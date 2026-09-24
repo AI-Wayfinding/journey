@@ -1,4 +1,4 @@
-import { randomToken } from './crypto.js';
+import { equalSecret, randomToken } from './crypto.js';
 import { failure } from './types.js';
 import type { RegistryMessage } from './types.js';
 
@@ -20,6 +20,13 @@ export class Registry {
     this.sql.exec('CREATE TABLE IF NOT EXISTS invites (hash TEXT PRIMARY KEY, journeyId TEXT NOT NULL, expires INTEGER NOT NULL, used INTEGER NOT NULL DEFAULT 0, accountHash TEXT)');
     this.sql.exec('CREATE TABLE IF NOT EXISTS pending_principals (journeyId TEXT NOT NULL, principal TEXT PRIMARY KEY, recipient TEXT NOT NULL, signingKey TEXT NOT NULL, accountHash TEXT NOT NULL)');
     this.sql.exec('CREATE TABLE IF NOT EXISTS agent_sessions (id TEXT PRIMARY KEY, journeyId TEXT NOT NULL, principal TEXT NOT NULL, recipient TEXT NOT NULL, signingKey TEXT NOT NULL, requestedScope TEXT NOT NULL, scope TEXT, expires INTEGER, status TEXT NOT NULL, code TEXT NOT NULL, remembered INTEGER NOT NULL)');
+    if (Number(this.sql.exec('SELECT version FROM schema_version').toArray()[0]?.version) < 2) {
+      this.state.storage.transactionSync(() => {
+        this.sql.exec('ALTER TABLE agent_sessions ADD COLUMN createdAt INTEGER NOT NULL DEFAULT 0');
+        this.sql.exec('ALTER TABLE agent_sessions ADD COLUMN failedAttempts INTEGER NOT NULL DEFAULT 0');
+        this.sql.exec('UPDATE schema_version SET version=2');
+      });
+    }
     this.sql.exec('CREATE TABLE IF NOT EXISTS nonces (sessionId TEXT NOT NULL, nonce TEXT NOT NULL, expires INTEGER NOT NULL, PRIMARY KEY(sessionId,nonce))');
     this.sql.exec('CREATE TABLE IF NOT EXISTS rates (key TEXT PRIMARY KEY, start INTEGER NOT NULL, count INTEGER NOT NULL)');
   }
@@ -104,13 +111,21 @@ export class Registry {
           case 'pendingGet': return this.one('SELECT accountHash FROM pending_principals WHERE journeyId=? AND principal=?', input.journeyId, input.principal);
           case 'pendingDelete': this.sql.exec('DELETE FROM pending_principals WHERE journeyId=? AND principal=?', input.journeyId, input.principal); return { ok: true };
           case 'agentCreate': {
-            this.sql.exec('INSERT INTO agent_sessions(id,journeyId,principal,recipient,signingKey,requestedScope,status,code,remembered) VALUES(?,?,?,?,?,?,?,?,?)', input.id, input.journeyId, input.principal, input.recipient, input.signingKey, input.requestedScope, 'pending', input.code, input.remembered ? 1 : 0);
+            this.sql.exec('INSERT INTO agent_sessions(id,journeyId,principal,recipient,signingKey,requestedScope,status,code,remembered,createdAt) VALUES(?,?,?,?,?,?,?,?,?,?)', input.id, input.journeyId, input.principal, input.recipient, input.signingKey, input.requestedScope, 'pending', input.code, input.remembered ? 1 : 0, now);
             return { ok: true };
           }
-          case 'agentGet': return this.one('SELECT id,journeyId,principal,recipient,signingKey,requestedScope,scope,expires,status,code,remembered FROM agent_sessions WHERE id=?', input.id);
+          case 'agentGet': return this.one('SELECT id,journeyId,principal,recipient,signingKey,requestedScope,scope,expires,status,remembered,createdAt FROM agent_sessions WHERE id=?', input.id);
+          case 'agentAttempt': {
+            const row = this.one('SELECT code,status,createdAt,failedAttempts FROM agent_sessions WHERE id=?', input.id);
+            if (!row || row.status !== 'pending' || Number(row.createdAt) + 600_000 <= now) return { matched: false, available: false };
+            if (equalSecret(input.code, String(row.code))) return { matched: true, available: true };
+            const attempts = Number(row.failedAttempts) + 1;
+            this.sql.exec('UPDATE agent_sessions SET failedAttempts=?,status=? WHERE id=?', attempts, attempts >= 5 ? 'locked' : 'pending', input.id);
+            return { matched: false, available: true };
+          }
           case 'agentApprove': {
-            const row = this.one('SELECT status FROM agent_sessions WHERE id=?', input.id);
-            if (!row || row.status !== 'pending') return null;
+            const row = this.one('SELECT status,createdAt FROM agent_sessions WHERE id=?', input.id);
+            if (!row || row.status !== 'pending' || Number(row.createdAt) + 600_000 <= now) return null;
             this.sql.exec('UPDATE agent_sessions SET scope=?,expires=?,status=? WHERE id=?', input.scope, input.expires, 'approved', input.id); return { ok: true };
           }
           case 'nonce': {

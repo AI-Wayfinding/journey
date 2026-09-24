@@ -10,14 +10,13 @@ let sent: string[] = [];
 let ip = 1;
 beforeEach(() => { sent = []; ip++; });
 async function request(path: string, method = 'GET', body?: object, extra: Record<string, string> = {}, overrides: Partial<Env> = {}) {
-  return worker.fetch(new Request(origin + path, { method, headers: { Origin: origin, 'X-Wayfinding': '1', 'Content-Type': 'application/json', 'CF-Connecting-IP': '198.51.100.' + ip, ...extra }, body: body && JSON.stringify(body) }), { ...env, RP_ID: 'app.wayfinding.support', ORIGIN: origin, EMAIL_HASH_KEY: 'test-key', ADMIN_TOKEN: 'test-admin', MAGIC_EMAIL: { send: async message => { sent.push(String(Reflect.get(message, 'EmailMessage::raw'))); } }, ...overrides } as Env);
+  return worker.fetch(new Request(origin + path, { method, headers: { Origin: origin, 'X-Wayfinding': '1', 'Content-Type': 'application/json', 'CF-Connecting-IP': '198.51.100.' + ip, ...extra }, body: body && JSON.stringify(body) }), { ...env, RP_ID: 'app.wayfinding.support', ORIGIN: origin, EMAIL_HASH_KEY: 'test-key', ADMIN_TOKEN: 'test-admin', AGENT_SESSION_RATE: { limit: async () => ({ success: true }) }, MAGIC_EMAIL: { send: async message => { sent.push('text' in message ? message.text ?? '' : ''); return { messageId: 'test' }; } }, ...overrides } as Env);
 }
 async function account(email: string) {
   const started = await request('/v1/auth/email/start', 'POST', { email });
   expect(started.status).toBe(202);
-  const raw = sent.at(-1)!;
-  expect(raw).toContain('To: ' + email);
-  const token = /#token=([A-Za-z0-9_-]+)/.exec(raw)![1]!;
+  const text = sent.at(-1)!;
+  const token = /#token=([A-Za-z0-9_-]+)/.exec(text)![1]!;
   const verified = await request('/v1/auth/email/verify', 'POST', { token });
   expect(verified.status).toBe(200);
   const cookie = verified.headers.get('set-cookie')!.split(';')[0]!;
@@ -67,6 +66,23 @@ describe('HTTP boundary', () => {
     expect(await denied.json()).toEqual({error:{code:'csrf'}});
     expect((await request('/v1/auth/email/start','POST',{email:first.email},{Origin:'https://elsewhere.example'})).status).toBe(403);
     expect((await request('/v1/auth/passkey/register/options','POST',{})).status).toBe(401);
+  });
+  it('sends a normalized, structured magic link and rejects header injection', async () => {
+    const emails: unknown[] = [];
+    const delivery = { send: async (message: unknown) => { emails.push(message); return {messageId:'test'}; } };
+    expect((await request('/v1/auth/email/start','POST',{email:'Mixed.Case@Example.ORG'},{},{MAGIC_EMAIL:delivery})).status).toBe(202);
+    expect(emails).toHaveLength(1);
+    expect(emails[0]).toEqual({
+      to:'mixed.case@example.org',
+      from:'noreply@wayfinding.support',
+      subject:'Sign in to Wayfinding',
+      text:expect.stringContaining('/auth/verify#token='),
+    });
+    expect((await request('/v1/auth/email/start','POST',{email:'attacker@example.org\r\nBcc: victim@example.org'},{},{MAGIC_EMAIL:delivery})).status).toBe(400);
+    expect(emails).toHaveLength(1);
+    const failed = await request('/v1/auth/email/start','POST',{email:'delivery-failure@example.org'},{},{MAGIC_EMAIL:{send:async () => { throw new Error('delivery failed'); }}});
+    expect(failed.status).toBe(202);
+    expect(await failed.json()).toEqual({status:'accepted'});
   });
   it('enforces per-address and per-IP limits without changing the response', async () => {
     sent=[];
@@ -157,6 +173,66 @@ it('creates, joins, syncs and rotates ciphertext; denies unauthorized reads and 
   expect((await request('/v1/journeys/'+id+'/export','GET',undefined,as(guest))).status).toBe(403);
 });
 
+it('rejects a malformed journey ID when requesting an agent session', async () => {
+  const body = {journeyId:'not-an-id',agentPublicKey:{recipient:'public-recipient',signingKey:'public-signing-key'},requestedScope:'read'};
+  expect((await request('/v1/agent-sessions','POST',body)).status).toBe(400);
+});
+
+it('limits unauthenticated agent-session creation by IP', async () => {
+  const keys: string[] = [];
+  const rate = { limit: async ({key}: {key:string}) => { keys.push(key); return {success:keys.length <= 10}; } };
+  const body = {journeyId:newId(),agentPublicKey:{recipient:'public-recipient',signingKey:'public-signing-key'},requestedScope:'read' as const};
+  for (let i = 0; i < 10; i++) expect((await request('/v1/agent-sessions','POST',body,{}, {AGENT_SESSION_RATE:rate})).status).toBe(201);
+  expect((await request('/v1/agent-sessions','POST',body,{}, {AGENT_SESSION_RATE:rate})).status).toBe(429);
+  expect(new Set(keys).size).toBe(1);
+  expect((await request('/v1/agent-sessions','POST',body,{}, {AGENT_SESSION_RATE:undefined})).status).toBe(500);
+});
+
+it('approves an agent session on the first correct code', async () => {
+  const owner = await person('first-code-owner@example.org');
+  const {id} = await journey(owner);
+  const started = await request('/v1/agent-sessions','POST',{journeyId:id,agentPublicKey:{recipient:'recipient',signingKey:'signing-key'},requestedScope:'read'});
+  expect(started.status).toBe(201);
+  const {id:sessionId,code} = await started.json() as {id:string,code:string};
+  const approval = {code,principal:owner.principal,scope:'read',expiresAt:Date.now()+3_600_000,wrap:'YWJjZA==',entry:'YWJjZA=='};
+  expect((await request('/v1/agent-sessions/'+sessionId+'/approve','POST',approval,{Cookie:owner.cookie})).status).toBe(200);
+  expect((await (await request('/v1/agent-sessions/'+sessionId)).json() as {status:string}).status).toBe('approved');
+});
+
+it('expires unapproved agent sessions after ten minutes', async () => {
+  const owner = await person('pending-agent-owner@example.org');
+  const {id} = await journey(owner);
+  const started = await request('/v1/agent-sessions','POST',{journeyId:id,agentPublicKey:{recipient:'recipient',signingKey:'signing-key'},requestedScope:'read'});
+  expect(started.status).toBe(201);
+  const {id:sessionId,code} = await started.json() as {id:string,code:string};
+  const now = Date.now();
+  try {
+    vi.useFakeTimers(); vi.setSystemTime(now + 600_001);
+    const status = await request('/v1/agent-sessions/'+sessionId);
+    expect((await status.json() as {status:string}).status).toBe('expired');
+    const next = await account(owner.email);
+    const options = await request('/v1/auth/passkey/login/options','POST',{}, {Cookie:next.cookie});
+    const {challenge} = await options.json() as {challenge:string};
+    const assertion = await owner.device.login(challenge);
+    expect((await request('/v1/auth/passkey/login/verify','POST',{response:assertion},{Cookie:next.cookie})).status).toBe(200);
+    const approval = {code,principal:owner.principal,scope:'read',expiresAt:Date.now()+3_600_000,wrap:'YWJjZA==',entry:'YWJjZA=='};
+    expect((await request('/v1/agent-sessions/'+sessionId+'/approve','POST',approval,{Cookie:next.cookie})).status).toBe(404);
+  } finally { vi.useRealTimers(); }
+});
+
+it('locks an agent session after five wrong approval codes', async () => {
+  const owner = await person('locked-agent-owner@example.org');
+  const {id} = await journey(owner);
+  const started = await request('/v1/agent-sessions','POST',{journeyId:id,agentPublicKey:{recipient:'recipient',signingKey:'signing-key'},requestedScope:'read'});
+  expect(started.status).toBe(201);
+  const {id:sessionId,code} = await started.json() as {id:string,code:string};
+  const url = '/v1/agent-sessions/'+sessionId+'/approve';
+  const approval = {code,principal:owner.principal,scope:'read',expiresAt:Date.now()+3_600_000,wrap:'YWJjZA==',entry:'YWJjZA=='};
+  for (let i = 0; i < 5; i++) expect((await request(url,'POST',{...approval,code:code === '000000' ? '999999' : '000000'},{Cookie:owner.cookie})).status).toBe(400);
+  expect((await (await request('/v1/agent-sessions/'+sessionId)).json() as {status:string}).status).toBe('locked');
+  expect((await request(url,'POST',approval,{Cookie:owner.cookie})).status).toBe(404);
+});
+
 it('approves a session agent and rejects a replay, expired timestamp and unauthorized signature', async () => {
   const owner = await person('agent-holder@example.org');
   const {id,key,entries} = await journey(owner);
@@ -197,11 +273,47 @@ it('approves a session agent and rejects a replay, expired timestamp and unautho
   const signed = await agentHeaders(sessionId,bot.privateKey,'GET','/v1/journeys/'+id+'/wraps/me');
   expect((await request('/v1/journeys/'+id+'/wraps/me','GET',undefined,signed)).status).toBe(200);
   expect((await request('/v1/auth/passkey/register/options','POST',{},signed)).status).toBe(401);
-  // The server cannot read or validate this log entry; it must still revoke an agent with its person.
-  expect((await request('/v1/journeys/'+id+'/log','POST',{entry:encryptedEntry,accessChanges:[{principal:owner.principal,action:'remove',kind:'agent',scope:'readwrite'}]},as(owner))).status).toBe(201);
+  const logPath = '/v1/journeys/'+id+'/log';
+  const agentChange = {entry:encryptedEntry,accessChanges:[{principal:owner.principal,action:'remove',kind:'person',scope:'readwrite'}]};
+  expect((await request(logPath,'POST',agentChange,await agentHeaders(sessionId,bot.privateKey,'POST',logPath,agentChange))).status).toBe(403);
+  const agentRotation = {entry:encryptedEntry,wraps:[{principal:owner.principal,epoch:2,wrap:agentWrap.ciphertext}],epoch:2};
+  expect((await request(logPath,'POST',agentRotation,await agentHeaders(sessionId,bot.privateKey,'POST',logPath,agentRotation))).status).toBe(403);
+  const agentMemberWrap = {entry:encryptedEntry,memberWraps:[{principal:agentPrincipal,epoch:1,wrap:agentWrap.ciphertext}]};
+  expect((await request(logPath,'POST',agentMemberWrap,await agentHeaders(sessionId,bot.privateKey,'POST',logPath,agentMemberWrap))).status).toBe(403);
+  expect((await request(logPath,'GET',undefined,await agentHeaders(sessionId,bot.privateKey,'GET',logPath))).status).toBe(200);
+  // The server cannot read or validate this log entry; a person can still revoke an agent they added.
+  expect((await request(logPath,'POST',{entry:encryptedEntry,accessChanges:[{principal:agentPrincipal,action:'remove',kind:'agent',scope:'readwrite'}]},as(owner))).status).toBe(201);
   expect((await request(recordPath,'GET',undefined,await agentHeaders(sessionId,bot.privateKey,'GET',recordPath))).status).toBe(403);
   const rows = await (await request('/v1/admin/registry','GET',undefined,{Authorization:'Bearer test-admin'})).json() as {registry:{id:string,memberCount:number}[]};
-  expect(rows.registry.find(row => row.id === id)?.memberCount).toBe(0);
+  expect(rows.registry.find(row => row.id === id)?.memberCount).toBe(1);
+});
+
+it('forbids a person from removing another person’s agent even if the claimed kind is person', async () => {
+  const owner = await person('agent-owner@example.org');
+  const guest = await person('agent-guest@example.org');
+  const {id} = await journey(owner);
+  const secret = base64url(crypto.getRandomValues(new Uint8Array(32)));
+  expect((await request('/v1/journeys/'+id+'/invites','POST',{inviteIdHash:await digest(secret),expiresAt:Date.now()+60_000},as(owner))).status).toBe(201);
+  expect((await request('/v1/invites/accept','POST',{inviteId:secret,principal:{id:guest.principal,recipient:guest.age.recipient,signingKey:guest.signing.publicKey}},{Cookie:guest.cookie})).status).toBe(200);
+  const path = '/v1/journeys/'+id+'/log';
+  expect((await request(path,'POST',{entry:'YWJjZA==',accessChanges:[{principal:guest.principal,action:'add',kind:'person',scope:'readwrite'}]},as(owner))).status).toBe(201);
+  const bot = await createSigningIdentity();
+  const age = await createAgeIdentity();
+  const started = await request('/v1/agent-sessions','POST',{journeyId:id,agentPublicKey:{recipient:age.recipient,signingKey:bot.publicKey},requestedScope:'readwrite'});
+  expect(started.status).toBe(201);
+  const {id:sessionId,code} = await started.json() as {id:string,code:string};
+  const approved = await request('/v1/agent-sessions/'+sessionId+'/approve','POST',{code,principal:owner.principal,scope:'readwrite',expiresAt:Date.now()+3_600_000,wrap:'YWJjZA==',entry:'YWJjZA=='},{Cookie:owner.cookie});
+  expect(approved.status).toBe(200);
+  const {principal:agentPrincipal} = await (await request('/v1/agent-sessions/'+sessionId)).json() as {principal:string};
+  expect((await request(path,'POST',{entry:'YWJjZA==',accessChanges:[{principal:agentPrincipal,action:'remove',kind:'person',scope:'readwrite'}]},as(guest))).status).toBe(403);
+});
+
+it('allows a person to remove themselves from a journey', async () => {
+  const owner = await person('self-removal@example.org');
+  const {id} = await journey(owner);
+  const path = '/v1/journeys/'+id+'/log';
+  expect((await request(path,'POST',{entry:'YWJjZA==',accessChanges:[{principal:owner.principal,action:'remove',kind:'person',scope:'readwrite'}]},as(owner))).status).toBe(201);
+  expect((await request(path,'GET',undefined,as(owner))).status).toBe(403);
 });
 
 it('requires passkey verification again after a later email sign-in', async () => {

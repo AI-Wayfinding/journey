@@ -43,6 +43,7 @@ export type RegistryMessage =
   | { op: 'pendingGet' | 'pendingDelete'; journeyId: string; principal: string }
   | { op: 'agentCreate'; id: string; journeyId: string; principal: string; recipient: string; signingKey: string; requestedScope: Scope; code: string; remembered: boolean }
   | { op: 'agentGet'; id: string }
+  | { op: 'agentAttempt'; id: string; code: string }
   | { op: 'agentApprove'; id: string; scope: Scope; expires: number }
   | { op: 'nonce'; id: string; nonce: string };
 type JourneyMessage = { journeyId: string; subject: Subject };

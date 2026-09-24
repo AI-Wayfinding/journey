@@ -1,5 +1,4 @@
 import { Hono } from 'hono';
-import { EmailMessage } from 'cloudflare:email';
 import { isId, newId, type Envelope } from '@ai-wayfinding/core';
 import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse } from '@simplewebauthn/server';
 import { base64url, digest, emailHash, equalSecret, randomToken, unbase64url, verifyAgentSignature } from './crypto.js';
@@ -12,13 +11,14 @@ export { EnclaveObject, Registry };
 export interface Env {
   REGISTRY: DurableObjectNamespace;
   ENCLAVES: DurableObjectNamespace;
-  MAGIC_EMAIL: { send(message: EmailMessage): Promise<void> };
+  MAGIC_EMAIL: SendEmail;
   EMAIL_HASH_KEY: string;
   ADMIN_TOKEN: string;
   RP_ID: string;
   ORIGIN: string;
   EMAIL_IP_RATE?: { limit(input: { key: string }): Promise<{ success: boolean }> };
   EMAIL_ACCOUNT_RATE?: { limit(input: { key: string }): Promise<{ success: boolean }> };
+  AGENT_SESSION_RATE?: { limit(input: { key: string }): Promise<{ success: boolean }> };
 }
 type Auth = { accountHash: string; sessionHash: string; verifiedAt: number | null };
 type Context = { Bindings: Env; Variables: { subject: Subject } };
@@ -109,8 +109,7 @@ app.post('/v1/auth/email/start', async c => {
   // Always identical status and shape. No account-existence conditional is present.
   if (local.allowed && ipLimit.success && emailLimit.success) {
     const link = c.env.ORIGIN + '/auth/verify#token=' + encodeURIComponent(token);
-    const raw = 'From: Wayfinding <noreply@wayfinding.support>\r\nTo: ' + email + '\r\nMessage-ID: <' + randomToken(16) + '@wayfinding.support>\r\nDate: ' + new Date().toUTCString() + '\r\nSubject: Sign in to Wayfinding\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nOpen ' + link + ' to sign in. This link expires in 15 minutes.';
-    try { await c.env.MAGIC_EMAIL.send(new EmailMessage('noreply@wayfinding.support', email, raw)); } catch { /* Do not disclose email delivery state. */ }
+    try { await c.env.MAGIC_EMAIL.send({ to: email, from: 'noreply@wayfinding.support', subject: 'Sign in to Wayfinding', text: 'Open ' + link + ' to sign in. This link expires in 15 minutes.' }); } catch { /* Do not disclose email delivery state. */ }
   }
   return json({ status: 'accepted' }, 202);
 });
@@ -247,10 +246,12 @@ app.get('/v1/journeys/:id/records', async c => {
 });
 app.post('/v1/journeys/:id/log', async c => {
   const b = await payload(c).catch(() => null), id = c.req.param('id');
-  if (!b || !encrypted(b.entry) || !Array.isArray(b.accessChanges) || b.accessChanges.length > 100) return failure('invalid-request', 400);
+  if (!b) return failure('invalid-request', 400);
+  if (journeySubject(c).agent && (b.accessChanges !== undefined || b.wraps !== undefined || b.epoch !== undefined || b.memberWraps !== undefined)) return failure('forbidden', 403);
+  if (!encrypted(b.entry) || b.accessChanges !== undefined && (!Array.isArray(b.accessChanges) || b.accessChanges.length > 100)) return failure('invalid-request', 400);
   const changes: AccessChange[] = [];
   const linked: { accountHash: string; principal: string }[] = [];
-  for (const value of b.accessChanges) {
+  for (const value of b.accessChanges ?? []) {
     if (!object(value) || !validString(value.principal, 128) || !['add', 'remove'].includes(String(value.action)) || !validKind(value.kind) || !validScope(value.scope) || value.expiresAt !== undefined && !validExpiry(value.expiresAt)) return failure('invalid-request', 400);
     const change: AccessChange = { principal: value.principal, action: value.action as 'add' | 'remove', kind: value.kind, scope: value.scope };
     if (value.expiresAt !== undefined) change.expiresAt = value.expiresAt as number;
@@ -300,7 +301,10 @@ app.get('/v1/journeys/:id/invites/pending', async c => {
 });
 app.post('/v1/agent-sessions', async c => {
   const b = await payload(c).catch(() => null);
-  if (!b || !validString(b.journeyId, 128) || !object(b.agentPublicKey) || !validString(b.agentPublicKey.recipient, 1024) || !validString(b.agentPublicKey.signingKey, 1024) || !validScope(b.requestedScope)) return failure('invalid-request', 400);
+  if (!b || !isId(b.journeyId) || !object(b.agentPublicKey) || !validString(b.agentPublicKey.recipient, 1024) || !validString(b.agentPublicKey.signingKey, 1024) || !validScope(b.requestedScope)) return failure('invalid-request', 400);
+  if (!c.env.AGENT_SESSION_RATE) return failure('internal', 500);
+  const ipHash = await digest(c.req.header('cf-connecting-ip') ?? 'unknown');
+  if (!(await c.env.AGENT_SESSION_RATE.limit({ key: ipHash })).success) return failure('rate-limited', 429);
   const id = randomToken(), principal = newId(), code = String(crypto.getRandomValues(new Uint32Array(1))[0]! % 1_000_000).padStart(6, '0');
   await registry(c.env, { op: 'agentCreate', id, journeyId: b.journeyId, principal, recipient: b.agentPublicKey.recipient, signingKey: b.agentPublicKey.signingKey, requestedScope: b.requestedScope, code, remembered: b.remembered === true });
   return json({ id, code, approvalUrl: c.env.ORIGIN + '/agent-sessions/' + id }, 201);
@@ -308,15 +312,20 @@ app.post('/v1/agent-sessions', async c => {
 app.get('/v1/agent-sessions/:id', async c => {
   const row = await registry(c.env, { op: 'agentGet', id: c.req.param('id') });
   if (!row) return failure('not-found', 404);
-  return json({ status: Number(row.expires) <= Date.now() && row.status === 'approved' ? 'expired' : row.status, journeyId: row.journeyId, principal: row.principal, scope: row.scope, expiresAt: row.expires });
+  const expired = row.status === 'pending' ? Number(row.createdAt) + 600_000 <= Date.now() : row.status === 'approved' && Number(row.expires) <= Date.now();
+  return json({ status: expired ? 'expired' : row.status, journeyId: row.journeyId, principal: row.principal, scope: row.scope, expiresAt: row.expires });
 });
 app.post('/v1/agent-sessions/:id/approve', async c => {
   const auth = await session(c); if (!auth || auth.verifiedAt === null || Date.now() - auth.verifiedAt > 300_000) return failure('unauthorized', 401);
   const b = await payload(c).catch(() => null), id = c.req.param('id');
   const row = await registry(c.env, { op: 'agentGet', id });
-  if (!row || row.status !== 'pending') return failure('not-found', 404);
+  if (!row || row.status !== 'pending' || Number(row.createdAt) + 600_000 <= Date.now()) return failure('not-found', 404);
   const maxDuration = row.remembered ? 90 * 86_400_000 : 8 * 3_600_000;
-  if (!b || !validString(b.code, 6) || !equalSecret(b.code, row.code) || !validString(b.principal, 128) || !validScope(b.scope) || !validExpiry(b.expiresAt) || b.expiresAt > Date.now() + maxDuration || !encrypted(b.wrap, 100_000) || !encrypted(b.entry)) return failure('invalid-request', 400);
+  if (!b || !validString(b.code, 6)) return failure('invalid-request', 400);
+  const attempt = await registry(c.env, { op: 'agentAttempt', id, code: b.code });
+  if (!attempt.available) return failure('not-found', 404);
+  if (!attempt.matched) return failure('invalid-request', 400);
+  if (!validString(b.principal, 128) || !validScope(b.scope) || !validExpiry(b.expiresAt) || b.expiresAt > Date.now() + maxDuration || !encrypted(b.wrap, 100_000) || !encrypted(b.entry)) return failure('invalid-request', 400);
   const s: Subject = { principal: b.principal, accountHash: auth.accountHash };
   const check = await enclave(c.env, row.journeyId, { op: 'access', journeyId: row.journeyId, subject: s });
   if (!check.ok) return check;

@@ -79,6 +79,11 @@ export class EnclaveObject {
           const memberWraps = input.memberWraps;
           if (memberWraps?.some(w => w.epoch !== meta.currentEpoch)) return failure('old-epoch', 409);
           if (!wraps && input.epoch !== undefined) return failure('invalid-request', 400);
+          for (const change of changes) {
+            if (change.action !== 'remove') continue;
+            const target = this.one('SELECT kind,addedBy FROM principals WHERE id=? AND removedAt IS NULL', change.principal);
+            if (target?.kind === 'agent' && target.addedBy !== subject.principal) return failure('forbidden', 403);
+          }
           let memberDelta = 0;
           this.state.storage.transactionSync(() => {
             this.sql.exec('INSERT INTO log(seq,entry,at) VALUES(?,?,?)', meta.nextLog!, input.entry, now);
