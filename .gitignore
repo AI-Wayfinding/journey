@@ -3,3 +3,4 @@ node_modules/
 tool/dist/
 packages/*/dist/
 .scratch/
+.worktrees/
