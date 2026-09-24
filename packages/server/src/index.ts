@@ -11,6 +11,7 @@ export { EnclaveObject, Registry };
 export interface Env {
   REGISTRY: DurableObjectNamespace;
   ENCLAVES: DurableObjectNamespace;
+  ASSETS: Fetcher;
   MAGIC_EMAIL: SendEmail;
   EMAIL_HASH_KEY: string;
   ADMIN_TOKEN: string;
@@ -81,6 +82,10 @@ function wraps(value: unknown, epoch: number): EpochWrap[] | null {
 }
 function transportList(jsonText: string): string[] { try { const value: unknown = JSON.parse(jsonText); return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : []; } catch { return []; } }
 function encrypted(value: unknown, max = 1_048_576): value is string { return validString(value, max) && /^[A-Za-z0-9+/_=-]+$/.test(value); }
+function sealedAgeKey(value: unknown): value is string {
+  if (!validString(value, 100_000) || !/^[A-Za-z0-9+/]+={0,2}$/.test(value) || value.length % 4 !== 0) return false;
+  try { const bytes = atob(value); return bytes.length >= 80 && bytes.startsWith('age-encryption.org/v1\n'); } catch { return false; }
+}
 type RegistrationResponse = Parameters<typeof verifyRegistrationResponse>[0]['response'];
 type AuthenticationResponse = Parameters<typeof verifyAuthenticationResponse>[0]['response'];
 function registrationResponse(value: unknown): value is RegistrationResponse {
@@ -97,7 +102,7 @@ app.use('/v1/*', async (c, next) => {
 app.post('/v1/auth/email/start', async c => {
   let data: Record<string, unknown>;
   try { data = await payload(c); } catch { return failure('invalid-request', 400); }
-  if (!validString(data.email, 254) || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email) || /[\r\n]/.test(data.email)) return failure('invalid-request', 400);
+  if (!validString(data.email, 254) || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email) || /[\r\n]/.test(data.email) || data.returnPath !== undefined && (typeof data.returnPath !== 'string' || !/^\/agent-sessions\/[A-Za-z0-9_-]{1,128}$/.test(data.returnPath))) return failure('invalid-request', 400);
   if (!validString(c.env.EMAIL_HASH_KEY)) return failure('internal', 500);
   const email = data.email.trim().toLowerCase();
   const hash = await emailHash(email, c.env.EMAIL_HASH_KEY);
@@ -108,7 +113,8 @@ app.post('/v1/auth/email/start', async c => {
   const emailLimit = c.env.EMAIL_ACCOUNT_RATE ? await c.env.EMAIL_ACCOUNT_RATE.limit({ key: hash }) : { success: true };
   // Always identical status and shape. No account-existence conditional is present.
   if (local.allowed && ipLimit.success && emailLimit.success) {
-    const link = c.env.ORIGIN + '/auth/verify#token=' + encodeURIComponent(token);
+    const returnPath = typeof data.returnPath === 'string' ? data.returnPath : '';
+    const link = c.env.ORIGIN + '/auth/verify#token=' + encodeURIComponent(token) + (returnPath ? '&next=' + encodeURIComponent(returnPath) : '');
     try { await c.env.MAGIC_EMAIL.send({ to: email, from: 'noreply@wayfinding.support', subject: 'Sign in to Wayfinding', text: 'Open ' + link + ' to sign in. This link expires in 15 minutes.' }); } catch { /* Do not disclose email delivery state. */ }
   }
   return json({ status: 'accepted' }, 202);
@@ -173,6 +179,21 @@ app.post('/v1/auth/logout', async c => {
   const auth = await session(c); if (!auth) return failure('unauthorized', 401);
   await registry(c.env, { op: 'logout', hash: auth.sessionHash });
   return new Response(JSON.stringify({ ok: true }), { headers: { 'Content-Type': 'application/json', 'Set-Cookie': 'wayfinding_session=; Path=/v1; HttpOnly; Secure; SameSite=Strict; Max-Age=0' } });
+});
+
+app.get('/v1/me/keys', async c => {
+  const auth = await session(c);
+  if (!auth || auth.verifiedAt === null) return failure('unauthorized', 401);
+  const keys = await registry(c.env, { op: 'keysGet', accountHash: auth.accountHash });
+  return new Response(JSON.stringify(keys), { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+});
+app.put('/v1/me/keys', async c => {
+  const auth = await session(c);
+  if (!auth || auth.verifiedAt === null) return failure('unauthorized', 401);
+  const b = await payload(c).catch(() => null);
+  if (!b || Object.keys(b).some(key => !['identity', 'signing'].includes(key)) || !sealedAgeKey(b.identity) || !sealedAgeKey(b.signing)) return failure('invalid-request', 400);
+  await registry(c.env, { op: 'keysPut', accountHash: auth.accountHash, identity: b.identity, signing: b.signing });
+  return new Response(null, { status: 204, headers: { 'Cache-Control': 'no-store' } });
 });
 
 app.post('/v1/journeys', async c => {
@@ -258,6 +279,8 @@ app.post('/v1/journeys/:id/log', async c => {
     if (change.action === 'add' && change.kind === 'person') {
       const pending = await registry(c.env, { op: 'pendingGet', journeyId: id, principal: change.principal });
       if (!pending) return failure('forbidden', 403);
+      // A support invitation cannot be turned into a writable or permanent server principal.
+      if (pending.support === 1 && (change.scope !== 'read' || change.expiresAt !== pending.expires || !validExpiry(pending.expires))) return failure('forbidden', 403);
       change.accountHash = pending.accountHash;
       linked.push({ accountHash: pending.accountHash, principal: change.principal });
     }
@@ -268,7 +291,7 @@ app.post('/v1/journeys/:id/log', async c => {
   const epoch = b.epoch;
   if (epoch !== undefined && !validEpoch(epoch)) return failure('invalid-request', 400);
   const rotated = b.wraps === undefined ? undefined : wraps(b.wraps, epoch as number);
-  const memberWraps = b.memberWraps === undefined ? undefined : wraps(b.memberWraps, Number(Array.isArray(b.memberWraps) && b.memberWraps[0]?.epoch));
+  const memberWraps = b.memberWraps === undefined ? undefined : Array.isArray(b.memberWraps) && b.memberWraps.length <= 100 && b.memberWraps.every(w => object(w) && validString(w.principal, 128) && validString(w.wrap, 100_000) && validEpoch(w.epoch)) && new Set(b.memberWraps.map(w => `${w.principal}:${w.epoch}`)).size === b.memberWraps.length ? b.memberWraps.map(w => ({ principal: w.principal as string, epoch: w.epoch as number, wrap: w.wrap as string })) : null;
   if (rotated === null || memberWraps === null) return failure('invalid-request', 400);
   const result = await enclave(c.env, id, { op: 'logWrite', journeyId: id, subject: journeySubject(c), entry: b.entry, changes, epoch, wraps: rotated, memberWraps });
   if (result.ok) {
@@ -287,10 +310,10 @@ app.get('/v1/journeys/:id/wraps/me', async c => enclave(c.env, c.req.param('id')
 app.get('/v1/journeys/:id/export', async c => enclave(c.env, c.req.param('id'), { op: 'export', journeyId: c.req.param('id'), subject: journeySubject(c) }));
 app.post('/v1/journeys/:id/invites', async c => {
   const b = await payload(c).catch(() => null), id = c.req.param('id');
-  if (!b || !validString(b.inviteIdHash, 43) || !/^[A-Za-z0-9_-]{43}$/.test(b.inviteIdHash) || !validExpiry(b.expiresAt) || b.expiresAt > Date.now() + 604_800_000) return failure('invalid-request', 400);
+  if (!b || !validString(b.inviteIdHash, 43) || !/^[A-Za-z0-9_-]{43}$/.test(b.inviteIdHash) || !validExpiry(b.expiresAt) || b.expiresAt > Date.now() + 604_800_000 || b.support !== undefined && typeof b.support !== 'boolean') return failure('invalid-request', 400);
   const access = await enclave(c.env, id, { op: 'inviteAccess', journeyId: id, subject: journeySubject(c) });
   if (!access.ok) return access;
-  await registry(c.env, { op: 'inviteCreate', journeyId: id, hash: b.inviteIdHash, expires: b.expiresAt });
+  await registry(c.env, { op: 'inviteCreate', journeyId: id, hash: b.inviteIdHash, expires: b.expiresAt, support: b.support === true });
   return json({ status: 'created' }, 201);
 });
 app.get('/v1/journeys/:id/invites/pending', async c => {
@@ -313,7 +336,7 @@ app.get('/v1/agent-sessions/:id', async c => {
   const row = await registry(c.env, { op: 'agentGet', id: c.req.param('id') });
   if (!row) return failure('not-found', 404);
   const expired = row.status === 'pending' ? Number(row.createdAt) + 600_000 <= Date.now() : row.status === 'approved' && Number(row.expires) <= Date.now();
-  return json({ status: expired ? 'expired' : row.status, journeyId: row.journeyId, principal: row.principal, scope: row.scope, expiresAt: row.expires });
+  return json({ status: expired ? 'expired' : row.status, journeyId: row.journeyId, principal: row.principal, recipient: row.recipient, signingKey: row.signingKey, requestedScope: row.requestedScope, remembered: row.remembered === 1, scope: row.scope, expiresAt: row.expires });
 });
 app.post('/v1/agent-sessions/:id/approve', async c => {
   const auth = await session(c); if (!auth || auth.verifiedAt === null || Date.now() - auth.verifiedAt > 300_000) return failure('unauthorized', 401);
@@ -336,5 +359,16 @@ app.post('/v1/agent-sessions/:id/approve', async c => {
   await registry(c.env, { op: 'activity', id: row.journeyId, memberDelta: 1, bytes: b.entry.length });
   return json({ status: 'approved' });
 });
-app.notFound(c => c.req.path.startsWith('/v1/') ? failure('not-found', 404) : new Response('Not Found', { status: 404, headers: { 'Content-Type': 'text/plain' } }));
+app.notFound(async c => {
+  if (c.req.path === '/v1' || c.req.path.startsWith('/v1/')) return failure('not-found', 404);
+  const response = await c.env.ASSETS.fetch(c.req.raw);
+  if (!response.headers.get('content-type')?.toLowerCase().includes('text/html')) return response;
+  const headers = new Headers(response.headers);
+  headers.set('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+  headers.set('Referrer-Policy', 'no-referrer');
+  headers.set('X-Content-Type-Options', 'nosniff');
+  headers.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=()');
+  headers.set('Cross-Origin-Opener-Policy', 'same-origin');
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+});
 export default app;

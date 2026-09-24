@@ -15,6 +15,7 @@ export class Registry {
     this.sql.exec('CREATE TABLE IF NOT EXISTS sessions (hash TEXT PRIMARY KEY, accountHash TEXT NOT NULL, created INTEGER NOT NULL, expires INTEGER NOT NULL, lastUsed INTEGER NOT NULL, verifiedAt INTEGER)');
     this.sql.exec('CREATE TABLE IF NOT EXISTS challenges (sessionHash TEXT PRIMARY KEY, challenge TEXT NOT NULL, kind TEXT NOT NULL, expires INTEGER NOT NULL)');
     this.sql.exec('CREATE TABLE IF NOT EXISTS credentials (id TEXT PRIMARY KEY, accountHash TEXT NOT NULL, publicKey TEXT NOT NULL, counter INTEGER NOT NULL, transports TEXT NOT NULL)');
+    this.sql.exec('CREATE TABLE IF NOT EXISTS sealed_keys (accountHash TEXT PRIMARY KEY, identity TEXT NOT NULL, signing TEXT NOT NULL)');
     this.sql.exec('CREATE TABLE IF NOT EXISTS journeys (id TEXT PRIMARY KEY, name TEXT NOT NULL, creatorEmail TEXT NOT NULL, creatorHash TEXT NOT NULL, created INTEGER NOT NULL, lastActive INTEGER NOT NULL, memberCount INTEGER NOT NULL, storageBytes INTEGER NOT NULL, visibility TEXT NOT NULL, mode TEXT NOT NULL, minClientVersion TEXT NOT NULL)');
     this.sql.exec('CREATE TABLE IF NOT EXISTS account_principals (accountHash TEXT NOT NULL, journeyId TEXT NOT NULL, principal TEXT NOT NULL, PRIMARY KEY(accountHash,journeyId,principal))');
     this.sql.exec('CREATE TABLE IF NOT EXISTS invites (hash TEXT PRIMARY KEY, journeyId TEXT NOT NULL, expires INTEGER NOT NULL, used INTEGER NOT NULL DEFAULT 0, accountHash TEXT)');
@@ -25,6 +26,14 @@ export class Registry {
         this.sql.exec('ALTER TABLE agent_sessions ADD COLUMN createdAt INTEGER NOT NULL DEFAULT 0');
         this.sql.exec('ALTER TABLE agent_sessions ADD COLUMN failedAttempts INTEGER NOT NULL DEFAULT 0');
         this.sql.exec('UPDATE schema_version SET version=2');
+      });
+    }
+    if (Number(this.sql.exec('SELECT version FROM schema_version').toArray()[0]?.version) < 3) {
+      this.state.storage.transactionSync(() => {
+        this.sql.exec('ALTER TABLE invites ADD COLUMN support INTEGER NOT NULL DEFAULT 0');
+        this.sql.exec('ALTER TABLE pending_principals ADD COLUMN support INTEGER NOT NULL DEFAULT 0');
+        this.sql.exec('ALTER TABLE pending_principals ADD COLUMN expires INTEGER');
+        this.sql.exec('UPDATE schema_version SET version=3');
       });
     }
     this.sql.exec('CREATE TABLE IF NOT EXISTS nonces (sessionId TEXT NOT NULL, nonce TEXT NOT NULL, expires INTEGER NOT NULL, PRIMARY KEY(sessionId,nonce))');
@@ -73,6 +82,11 @@ export class Registry {
           }
           case 'logout': this.sql.exec('DELETE FROM sessions WHERE hash=?', input.hash); return { ok: true };
           case 'credentials': return this.sql.exec('SELECT id,publicKey,counter,transports FROM credentials WHERE accountHash=?', input.accountHash).toArray();
+          case 'keysGet': return this.one('SELECT identity,signing FROM sealed_keys WHERE accountHash=?', input.accountHash);
+          case 'keysPut': {
+            this.sql.exec('INSERT INTO sealed_keys(accountHash,identity,signing) VALUES(?,?,?) ON CONFLICT(accountHash) DO UPDATE SET identity=excluded.identity,signing=excluded.signing', input.accountHash, input.identity, input.signing);
+            return { ok: true };
+          }
           case 'credential': return this.one('SELECT id,accountHash,publicKey,counter,transports FROM credentials WHERE id=? AND accountHash=?', input.id, input.accountHash);
           case 'challengeSet': this.sql.exec('INSERT INTO challenges(sessionHash,challenge,kind,expires) VALUES(?,?,?,?) ON CONFLICT(sessionHash) DO UPDATE SET challenge=excluded.challenge,kind=excluded.kind,expires=excluded.expires', input.sessionHash, input.challenge, input.kind, now + 300_000); return { ok: true };
           case 'challengeTake': {
@@ -99,16 +113,16 @@ export class Registry {
           case 'registry': return this.sql.exec('SELECT id,name,creatorEmail,created,lastActive,memberCount,storageBytes,visibility,mode,minClientVersion FROM journeys').toArray();
           case 'link': this.sql.exec('INSERT OR IGNORE INTO account_principals(accountHash,journeyId,principal) VALUES(?,?,?)', input.accountHash, input.journeyId, input.principal); return { ok: true };
           case 'activity': this.sql.exec('UPDATE journeys SET lastActive=?,memberCount=MAX(0,memberCount+?),storageBytes=MAX(0,storageBytes+?) WHERE id=?', now, input.memberDelta, input.bytes, input.id); return { ok: true };
-          case 'inviteCreate': this.sql.exec('INSERT INTO invites(hash,journeyId,expires) VALUES(?,?,?)', input.hash, input.journeyId, input.expires); return { ok: true };
+          case 'inviteCreate': this.sql.exec('INSERT INTO invites(hash,journeyId,expires,support) VALUES(?,?,?,?)', input.hash, input.journeyId, input.expires, input.support ? 1 : 0); return { ok: true };
           case 'inviteTake': {
-            const row = this.one('SELECT journeyId FROM invites WHERE hash=? AND expires>? AND used=0', input.hash, now);
+            const row = this.one('SELECT journeyId,expires,support FROM invites WHERE hash=? AND expires>? AND used=0', input.hash, now);
             if (!row) return null;
             this.sql.exec('UPDATE invites SET used=1,accountHash=? WHERE hash=? AND used=0', input.accountHash, input.hash);
-            this.sql.exec('INSERT INTO pending_principals(journeyId,principal,recipient,signingKey,accountHash) VALUES(?,?,?,?,?)', row.journeyId!, input.principal, input.recipient, input.signingKey, input.accountHash);
+            this.sql.exec('INSERT INTO pending_principals(journeyId,principal,recipient,signingKey,accountHash,support,expires) VALUES(?,?,?,?,?,?,?)', row.journeyId!, input.principal, input.recipient, input.signingKey, input.accountHash, row.support!, row.support ? row.expires! : null);
             return { journeyId: row.journeyId };
           }
-          case 'invitePending': return this.sql.exec('SELECT principal,recipient,signingKey FROM pending_principals WHERE journeyId=?', input.journeyId).toArray();
-          case 'pendingGet': return this.one('SELECT accountHash FROM pending_principals WHERE journeyId=? AND principal=?', input.journeyId, input.principal);
+          case 'invitePending': return this.sql.exec('SELECT principal,recipient,signingKey,support,expires FROM pending_principals WHERE journeyId=?', input.journeyId).toArray();
+          case 'pendingGet': return this.one('SELECT accountHash,support,expires FROM pending_principals WHERE journeyId=? AND principal=?', input.journeyId, input.principal);
           case 'pendingDelete': this.sql.exec('DELETE FROM pending_principals WHERE journeyId=? AND principal=?', input.journeyId, input.principal); return { ok: true };
           case 'agentCreate': {
             this.sql.exec('INSERT INTO agent_sessions(id,journeyId,principal,recipient,signingKey,requestedScope,status,code,remembered,createdAt) VALUES(?,?,?,?,?,?,?,?,?,?)', input.id, input.journeyId, input.principal, input.recipient, input.signingKey, input.requestedScope, 'pending', input.code, input.remembered ? 1 : 0, now);

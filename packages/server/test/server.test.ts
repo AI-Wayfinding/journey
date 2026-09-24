@@ -54,6 +54,30 @@ const as = (p: {cookie:string,principal:string}) => ({ Cookie:p.cookie, 'X-Princ
 
 // Seam: the Worker HTTP API, real Durable Objects and SQLite; email delivery is the only fake.
 describe('HTTP boundary', () => {
+  it('stores only named sealed key fields for a passkey-verified account', async () => {
+    const p = await person('sealed-keys@example.org');
+    const ciphertext = btoa('age-encryption.org/v1\n' + 'encrypted-contents'.repeat(8));
+    expect((await request('/v1/me/keys', 'PUT', { identity: ciphertext, signing: ciphertext }, { Cookie: p.cookie })).status).toBe(204);
+    const response = await request('/v1/me/keys', 'GET', undefined, { Cookie: p.cookie });
+    expect(await response.json()).toEqual({ identity: ciphertext, signing: ciphertext });
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect((await request('/v1/me/keys', 'GET')).status).toBe(401);
+    expect((await request('/v1/me/keys', 'PUT', { identity: ciphertext, signing: ciphertext, privateKey: 'secret' }, { Cookie: p.cookie })).status).toBe(400);
+    expect((await request('/v1/me/keys', 'PUT', { identity: 'plaintext', signing: ciphertext }, { Cookie: p.cookie })).status).toBe(400);
+  });
+  it('applies isolation headers to HTML assets without changing API responses', async () => {
+    const assets: Fetcher = { fetch: async () => new Response('<h1>Journey</h1>', { headers: { 'content-type': 'text/html; charset=utf-8' } }), connect: () => { throw new Error('not used'); } };
+    const page = await request('/journeys', 'GET', undefined, {}, { ASSETS: assets });
+    expect(page.status).toBe(200);
+    expect(page.headers.get('content-security-policy')).toContain("default-src 'self'");
+    expect(page.headers.get('content-security-policy')).toContain("frame-ancestors 'none'");
+    expect(page.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(page.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(page.headers.get('cross-origin-opener-policy')).toBe('same-origin');
+    expect(page.headers.get('permissions-policy')).toContain('camera=()');
+    expect((await request('/v1/missing', 'GET', undefined, {}, { ASSETS: assets })).status).toBe(404);
+    expect((await request('/v1', 'GET', undefined, {}, { ASSETS: assets })).status).toBe(404);
+  });
   it('hides account existence, requires CSRF and consumes links', async () => {
     sent = [];
     const first = await account('guest@example.org');
@@ -83,6 +107,16 @@ describe('HTTP boundary', () => {
     const failed = await request('/v1/auth/email/start','POST',{email:'delivery-failure@example.org'},{},{MAGIC_EMAIL:{send:async () => { throw new Error('delivery failed'); }}});
     expect(failed.status).toBe(202);
     expect(await failed.json()).toEqual({status:'accepted'});
+  });
+  it('returns to a named agent request without sending an invitation secret or open redirect', async () => {
+    const emails: { text: string }[] = [];
+    const delivery = { send: async (message: unknown) => { if (message && typeof message === 'object' && 'text' in message && typeof message.text === 'string') emails.push({ text: message.text }); return { messageId: 'test' }; } };
+    expect((await request('/v1/auth/email/start', 'POST', { email: 'agent-return@example.org', returnPath: '/agent-sessions/valid_123' }, {}, { MAGIC_EMAIL: delivery })).status).toBe(202);
+    expect(emails[0]!.text).toContain('#token=');
+    expect(emails[0]!.text).toContain('&next=%2Fagent-sessions%2Fvalid_123');
+    expect((await request('/v1/auth/email/start', 'POST', { email: 'agent-return@example.org', returnPath: 'https://elsewhere.example' }, {}, { MAGIC_EMAIL: delivery })).status).toBe(400);
+    expect((await request('/v1/auth/email/start', 'POST', { email: 'agent-return@example.org', returnPath: '/invite#leaked' }, {}, { MAGIC_EMAIL: delivery })).status).toBe(400);
+    expect(emails).toHaveLength(1);
   });
   it('enforces per-address and per-IP limits without changing the response', async () => {
     sent=[];
@@ -171,6 +205,26 @@ it('creates, joins, syncs and rotates ciphertext; denies unauthorized reads and 
   expect(denied.status).toBe(409);
   expect(await denied.json()).toEqual({error:{code:'old-epoch'}});
   expect((await request('/v1/journeys/'+id+'/export','GET',undefined,as(guest))).status).toBe(403);
+});
+
+it('keeps a Wayfinding support invite read-only and expiring at the server boundary', async () => {
+  const owner = await person('support-holder@example.org');
+  const invited = await person('support-guest@example.org');
+  const { id, key, entries } = await journey(owner);
+  const token = base64url(crypto.getRandomValues(new Uint8Array(32))), expiresAt = Date.now() + 3_600_000;
+  expect((await request('/v1/journeys/'+id+'/invites', 'POST', { inviteIdHash: await digest(token), expiresAt, support: true }, as(owner))).status).toBe(201);
+  expect((await request('/v1/invites/accept', 'POST', { inviteId: token, principal: { id: invited.principal, recipient: invited.age.recipient, signingKey: invited.signing.publicKey } }, { Cookie: invited.cookie })).status).toBe(200);
+  const pending = await request('/v1/journeys/'+id+'/invites/pending', 'GET', undefined, as(owner));
+  expect((await pending.json() as { pending: { support: number; expires: number }[] }).pending[0]).toMatchObject({ support: 1, expires: expiresAt });
+  const member = { id: invited.principal, kind: 'person', recipient: invited.age.recipient, signingKey: invited.signing.publicKey, scope: 'read', support: true, expiresAt: new Date(expiresAt).toISOString() };
+  const entry = await signEntry({ v: 1, seq: 1, prev: await hashEntry(entries[0]!), at: new Date().toISOString(), actor: owner.principal, type: 'member.add', body: { member, kind: 'person', grants: [] } }, await importSigningKey(owner.signing.privateKey));
+  const wrap = (await wrapJourneyKey(key, [{ id: invited.principal, recipient: invited.age.recipient }]))[0]!;
+  const submission = { entry: await cipherLog(key, id, entry), memberWraps: [{ principal: invited.principal, epoch: 1, wrap: wrap.ciphertext }] };
+  expect((await request('/v1/journeys/'+id+'/log', 'POST', { ...submission, accessChanges: [{ principal: invited.principal, action: 'add', kind: 'person', scope: 'readwrite' }] }, as(owner))).status).toBe(403);
+  expect((await request('/v1/journeys/'+id+'/log', 'POST', { ...submission, accessChanges: [{ principal: invited.principal, action: 'add', kind: 'person', scope: 'read', expiresAt: expiresAt + 1 }] }, as(owner))).status).toBe(403);
+  expect((await request('/v1/journeys/'+id+'/log', 'POST', { ...submission, accessChanges: [{ principal: invited.principal, action: 'add', kind: 'person', scope: 'read', expiresAt }] }, as(owner))).status).toBe(201);
+  expect((await request('/v1/journeys/'+id+'/seq', 'POST', {}, as(invited))).status).toBe(403);
+  expect((await request('/v1/journeys/'+id+'/log', 'GET', undefined, as(invited))).status).toBe(200);
 });
 
 it('rejects a malformed journey ID when requesting an agent session', async () => {
@@ -437,8 +491,9 @@ it('fails closed rather than hashing addresses with a missing key', async () => 
   expect(sent).toHaveLength(0);
 });
 
-it('serves no static assets in M2', async () => {
-  const response=await request('/');
-  expect(response.status).toBe(404);
-  expect(response.headers.get('content-type')).toBe('text/plain');
+it('serves the single-page app from the Worker assets binding', async () => {
+  const response = await request('/');
+  expect(response.status).toBe(200);
+  expect(response.headers.get('content-type')).toContain('text/html');
+  expect(response.headers.get('content-security-policy')).toContain("default-src 'self'");
 });

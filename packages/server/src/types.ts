@@ -26,7 +26,8 @@ export type RegistryMessage =
   | { op: 'emailStart'; ipHash: string; emailHash: string; tokenHash: string }
   | { op: 'emailVerify'; tokenHash: string; sessionHash: string }
   | { op: 'session' | 'logout'; hash: string }
-  | { op: 'credentials' | 'journeys'; accountHash: string }
+  | { op: 'credentials' | 'journeys' | 'keysGet'; accountHash: string }
+  | { op: 'keysPut'; accountHash: string; identity: string; signing: string }
   | { op: 'credential'; id: string; accountHash: string }
   | { op: 'challengeSet'; sessionHash: string; challenge: string; kind: 'register' | 'login' }
   | { op: 'challengeTake'; sessionHash: string; kind: 'register' | 'login' }
@@ -37,7 +38,7 @@ export type RegistryMessage =
   | { op: 'registry' }
   | { op: 'link'; accountHash: string; journeyId: string; principal: string }
   | { op: 'activity'; id: string; memberDelta: number; bytes: number }
-  | { op: 'inviteCreate'; hash: string; journeyId: string; expires: number }
+  | { op: 'inviteCreate'; hash: string; journeyId: string; expires: number; support: boolean }
   | { op: 'inviteTake'; hash: string; accountHash: string; principal: string; recipient: string; signingKey: string }
   | { op: 'invitePending'; journeyId: string }
   | { op: 'pendingGet' | 'pendingDelete'; journeyId: string; principal: string }

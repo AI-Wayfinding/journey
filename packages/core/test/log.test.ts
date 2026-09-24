@@ -31,6 +31,16 @@ it('verifies genesis and a holder adding a person', async () => {
   expect(state.ok && state.state.members[next.member.id]?.member.id).toBe(next.member.id);
 });
 
+it('stores an optional private description and journey kind in the signed genesis', async () => {
+  const creator = await person();
+  const [initial] = await genesis(creator);
+  const entry = await signEntry({ ...initial!, body: { ...initial!.body, description: 'A place to find our way', journeyKind: 'team' } }, creator.key);
+  expect(entry.body.description).toBe('A place to find our way');
+  expect(entry.body.journeyKind).toBe('team');
+  expect((await verifyLog([entry])).ok).toBe(true);
+  expect(await error([{ ...entry, body: { ...entry.body, description: 'Changed' } }])).toBe('invalid-signature');
+});
+
 it('rejects a non-holder adding people and agents signing membership changes', async () => {
   const creator = await person(); const next = await person(); const third = await person();
   const withMember = await append(await genesis(creator), creator, 'member.add', { member: next.member, grants: [], kind: 'person' });
@@ -40,6 +50,17 @@ it('rejects a non-holder adding people and agents signing membership changes', a
   expect((await verifyLog(withBot)).ok).toBe(true);
   expect(await error(await append(withBot, bot, 'member.remove', { member: creator.member.id }))).toBe('unauthorized');
   expect(await error(await append(withBot, creator, 'grant.add', { member: bot.member.id, grant: 'members.manage' }))).toBe('unauthorized');
+});
+
+it('marks support members read-only with a required expiry and no management grants', async () => {
+  const creator = await person(); const support = await person();
+  const member = { ...support.member, scope: 'read', support: true, expiresAt: '2026-09-01T00:00:00.000Z' };
+  const first = await genesis(creator);
+  const added = await append(first, creator, 'member.add', { member, grants: [], kind: 'person' });
+  expect((await verifyLog(added)).ok).toBe(true);
+  expect(await error(await append(first, creator, 'member.add', { member, grants: ['members.manage'], kind: 'person' }))).toBe('unauthorized');
+  expect(await error(await append(added, creator, 'grant.add', { member: member.id, grant: 'members.manage' }))).toBe('unauthorized');
+  await expect(append(first, creator, 'member.add', { member: { ...member, expiresAt: undefined }, grants: [], kind: 'person' })).rejects.toThrow('Invalid member.add');
 });
 
 it('keeps at least one person holding members.manage after every entry', async () => {

@@ -77,7 +77,7 @@ export class EnclaveObject {
           const wraps = input.wraps;
           if (wraps && input.epoch !== Number(meta.currentEpoch) + 1) return failure('old-epoch', 409);
           const memberWraps = input.memberWraps;
-          if (memberWraps?.some(w => w.epoch !== meta.currentEpoch)) return failure('old-epoch', 409);
+          if (memberWraps?.some(w => w.epoch < 1 || w.epoch > Number(meta.currentEpoch))) return failure('old-epoch', 409);
           if (!wraps && input.epoch !== undefined) return failure('invalid-request', 400);
           for (const change of changes) {
             if (change.action !== 'remove') continue;
@@ -102,7 +102,7 @@ export class EnclaveObject {
             }
             if (memberWraps) for (const wrap of memberWraps) {
               if (!this.one('SELECT id FROM principals WHERE id=? AND removedAt IS NULL', wrap.principal)) throw new Error('removed recipient');
-              this.sql.exec('INSERT INTO wraps(principal,epoch,wrap) VALUES(?,?,?)', wrap.principal, meta.currentEpoch!, wrap.wrap);
+              this.sql.exec('INSERT INTO wraps(principal,epoch,wrap) VALUES(?,?,?)', wrap.principal, wrap.epoch, wrap.wrap);
             }
             if (wraps) {
               for (const wrap of wraps) {
