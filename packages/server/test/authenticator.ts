@@ -13,13 +13,13 @@ function der(raw: Uint8Array): Uint8Array {
   const part = (x: Uint8Array) => { let i=0; while (i<x.length-1 && x[i] === 0) i++; let v=new Uint8Array(x.slice(i)); if(v[0]! & 128) v=new Uint8Array(join(new Uint8Array([0]),v)); return join(new Uint8Array([2,v.length]),v); };
   const a=part(raw.slice(0,32)),b=part(raw.slice(32)); return join(new Uint8Array([0x30,a.length+b.length]),a,b);
 }
-export async function authenticator() {
+export async function authenticator(rpId = 'app.wayfinding.support', origin = 'https://app.wayfinding.support') {
   const pair = await crypto.subtle.generateKey({name:'ECDSA',namedCurve:'P-256'},true,['sign','verify']);
   const jwk = await crypto.subtle.exportKey('jwk',pair.publicKey);
   const id = base64url(crypto.getRandomValues(new Uint8Array(32)));
-  const rpHash = new Uint8Array(await crypto.subtle.digest('SHA-256',text('app.wayfinding.support')));
+  const rpHash = new Uint8Array(await crypto.subtle.digest('SHA-256',text(rpId)));
   const counter = (n:number) => new Uint8Array([0,0,0,n]);
-  const clientData = (challenge:string,type:string) => base64url(text(JSON.stringify({type,challenge,origin:'https://app.wayfinding.support'})));
+  const clientData = (challenge:string,type:string) => base64url(text(JSON.stringify({type,challenge,origin})));
   return {
     register(challenge:string) {
       const cose = cbor({1:2,3:-7,'-1':1,'-2':unbase64url(jwk.x!),'-3':unbase64url(jwk.y!)});
