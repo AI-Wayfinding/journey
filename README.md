@@ -7,7 +7,7 @@ This repository holds the journey software. It is being built in stages:
 | Package | Status |
 |---|---|
 | `packages/core`: protocol and cryptography shared by every client and the server | built |
-| `packages/server`: Cloudflare Worker and one Durable Object per journey | next |
+| `packages/server`: Cloudflare Worker and one Durable Object per journey | built |
 | `packages/web`: the web app at app.wayfinding.support | planned |
 | agent client: the command-line and MCP tool | planned |
 

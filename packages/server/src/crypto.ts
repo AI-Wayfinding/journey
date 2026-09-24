@@ -1,0 +1,9 @@
+export function randomToken(bytes = 32): string { return base64url(crypto.getRandomValues(new Uint8Array(bytes))); }
+export function base64url(bytes: Uint8Array): string { return btoa(String.fromCharCode(...bytes)).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_'); }
+export function unbase64url(value: string): Uint8Array { if (!/^[A-Za-z0-9+/_=-]+$/.test(value)) throw new Error('bad encoding'); return Uint8Array.from(atob(value.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0)); }
+export async function digest(value: string): Promise<string> { return base64url(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)))); }
+export async function emailHash(email: string, secret: string): Promise<string> { const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']); return base64url(new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(email)))); }
+export function equalSecret(a: string, b: string): boolean { const x = new TextEncoder().encode(a), y = new TextEncoder().encode(b); let difference = x.length ^ y.length; for (let i = 0; i < Math.max(x.length, y.length); i++) difference |= (x[i] ?? 0) ^ (y[i] ?? 0); return difference === 0; }
+export async function verifyAgentSignature(key: string, method: string, path: string, body: string, timestamp: string, nonce: string, signature: string): Promise<boolean> {
+  try { const publicKey = await crypto.subtle.importKey('raw', new Uint8Array(unbase64url(key)), 'Ed25519', false, ['verify']); const hash = await digest(body); const message = [method.toUpperCase(), path, hash, timestamp, nonce].join('\n'); return crypto.subtle.verify('Ed25519', publicKey, new Uint8Array(unbase64url(signature)), new TextEncoder().encode(message)); } catch { return false; }
+}

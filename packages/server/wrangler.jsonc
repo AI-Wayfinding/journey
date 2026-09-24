@@ -1,0 +1,64 @@
+{
+  "name": "wayfinding-app",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-22",
+  "account_id": "16c42d94e589cc74c99aed7d51687cbc",
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "REGISTRY",
+        "class_name": "Registry"
+      },
+      {
+        "name": "ENCLAVES",
+        "class_name": "EnclaveObject"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "Registry",
+        "EnclaveObject"
+      ]
+    }
+  ],
+  "send_email": [
+    {
+      "name": "MAGIC_EMAIL",
+      "allowed_sender_addresses": [
+        "noreply@wayfinding.support"
+      ]
+    }
+  ],
+  "ratelimits": [
+    {
+      "name": "EMAIL_IP_RATE",
+      "namespace_id": "1001",
+      "simple": {
+        "limit": 10,
+        "period": 60
+      }
+    },
+    {
+      "name": "EMAIL_ACCOUNT_RATE",
+      "namespace_id": "1002",
+      "simple": {
+        "limit": 5,
+        "period": 60
+      }
+    }
+  ],
+  "vars": {
+    "RP_ID": "app.wayfinding.support",
+    "ORIGIN": "https://app.wayfinding.support"
+  },
+  "routes": [
+    {
+      "pattern": "app.wayfinding.support",
+      "custom_domain": true
+    }
+  ],
+  "workers_dev": false
+}
