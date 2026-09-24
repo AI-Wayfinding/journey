@@ -1,0 +1,36 @@
+{
+  "name": "@ai-wayfinding/core",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc",
+    "test": "vitest run",
+    "test:workers": "vitest run --config vitest.workers.config.ts",
+    "test:browser": "vitest run --config vitest.browser.config.ts"
+  },
+  "dependencies": {
+    "age-encryption": "^0.3.1"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
+    "@vitest/browser-playwright": "^4.1.11",
+    "playwright": "^1.63.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0"
+  }
+}
