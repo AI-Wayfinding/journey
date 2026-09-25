@@ -110,6 +110,29 @@ describe('HTTP boundary', () => {
     expect(failed.status).toBe(202);
     expect(await failed.json()).toEqual({status:'accepted'});
   });
+  it('logs an accepted send with its message ID only', async () => {
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => { lines.push(args.map(String).join(' ')); });
+    try { expect((await request('/v1/auth/email/start','POST',{email:'logged-ok@example.org'},{},{MAGIC_EMAIL:{send:async () => ({ messageId: 'msg-123' })}})).status).toBe(202); }
+    finally { spy.mockRestore(); }
+    const joined = lines.join('\n');
+    expect(joined).toContain('magic-link accepted msg-123');
+    expect(joined).not.toContain('logged-ok@example.org');
+    expect(joined).not.toContain('#token=');
+  });
+  it('logs a delivery failure without the address or the sign-in link', async () => {
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => { lines.push(args.map(String).join(' ')); });
+    try {
+      const failed = await request('/v1/auth/email/start','POST',{email:'logged-failure@example.org'},{},{MAGIC_EMAIL:{send:async () => { throw Object.assign(new Error('sender not verified'), { code: 'E_SENDER' }); }}});
+      expect(failed.status).toBe(202);
+    } finally { spy.mockRestore(); }
+    const joined = lines.join('\n');
+    expect(joined).toContain('magic-link send failed');
+    expect(joined).toContain('sender not verified');
+    expect(joined).not.toContain('logged-failure@example.org');
+    expect(joined).not.toContain('#token=');
+  });
   it('returns to a named agent request without sending an invitation secret or open redirect', async () => {
     const emails: { text: string }[] = [];
     const delivery = { send: async (message: unknown) => { if (message && typeof message === 'object' && 'text' in message && typeof message.text === 'string') emails.push({ text: message.text }); return { messageId: 'test' }; } };

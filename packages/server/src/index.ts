@@ -115,7 +115,15 @@ app.post('/v1/auth/email/start', async c => {
   if (local.allowed && ipLimit.success && emailLimit.success) {
     const returnPath = typeof data.returnPath === 'string' ? data.returnPath : '';
     const link = c.env.ORIGIN + '/auth/verify#token=' + encodeURIComponent(token) + (returnPath ? '&next=' + encodeURIComponent(returnPath) : '');
-    try { await c.env.MAGIC_EMAIL.send({ to: email, from: 'noreply@wayfinding.support', subject: 'Sign in to Wayfinding', text: 'Open ' + link + ' to sign in. This link expires in 15 minutes.' }); } catch { /* Do not disclose email delivery state. */ }
+    try {
+      const sent = await c.env.MAGIC_EMAIL.send({ to: email, from: 'noreply@wayfinding.support', subject: 'Sign in to Wayfinding', text: 'Open ' + link + ' to sign in. This link expires in 15 minutes.' });
+      console.log('magic-link accepted', String((sent as { messageId?: unknown } | undefined)?.messageId ?? 'no-id'));
+    }
+    catch (cause) {
+      // The response never reveals delivery state; the operator log does, without the address or link.
+      const detail = cause instanceof Error ? `${(cause as { code?: unknown }).code ?? cause.name}: ${cause.message}` : 'unknown error';
+      console.error('magic-link send failed', detail.replaceAll(email, '<address>').slice(0, 300));
+    }
   }
   return json({ status: 'accepted' }, 202);
 });
