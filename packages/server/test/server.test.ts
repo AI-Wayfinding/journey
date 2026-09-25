@@ -75,6 +75,8 @@ describe('HTTP boundary', () => {
     expect(page.headers.get('x-content-type-options')).toBe('nosniff');
     expect(page.headers.get('cross-origin-opener-policy')).toBe('same-origin');
     expect(page.headers.get('permissions-policy')).toContain('camera=()');
+    // Stops edge features (for example an analytics beacon) from being injected into the page.
+    expect(page.headers.get('cache-control')).toContain('no-transform');
     expect((await request('/v1/missing', 'GET', undefined, {}, { ASSETS: assets })).status).toBe(404);
     expect((await request('/v1', 'GET', undefined, {}, { ASSETS: assets })).status).toBe(404);
   });

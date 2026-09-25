@@ -369,6 +369,8 @@ app.notFound(async c => {
   headers.set('X-Content-Type-Options', 'nosniff');
   headers.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=()');
   headers.set('Cross-Origin-Opener-Policy', 'same-origin');
+  // no-transform keeps Cloudflare from rewriting the page, such as injecting an analytics beacon.
+  headers.set('Cache-Control', 'no-cache, no-transform');
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 });
 export default app;
