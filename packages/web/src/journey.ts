@@ -1,4 +1,5 @@
 import { createAgeIdentity, exportJourney, generateJourneyKey, hashEntry, newId, open, parseRecord, recipientsHash, removeAndRotate, seal, signEntry, unwrapJourneyKey, verifyLog, wrapJourneyKey } from '@ai-wayfinding/core';
+import { plainError } from './messages.js';
 import type { Envelope, ItemBody, JourneyKey, KeyWrap, LogEntry, LogState, Member, ProtocolRecord } from '@ai-wayfinding/core';
 import { getPersonKeys, rememberJourneyKey } from './keys.js';
 import type { PersonKeys } from './keys.js';
@@ -15,7 +16,7 @@ export async function api<T>(path: string, method = 'GET', data?: unknown, princ
   const response = await fetch('/v1' + path, { method, credentials: 'same-origin', cache: 'no-store', headers: { ...(data === undefined ? {} : { 'Content-Type': 'application/json' }), ...(method === 'GET' ? {} : { 'X-Wayfinding': '1' }), ...(principal ? { 'X-Principal': principal } : {}) }, ...(data === undefined ? {} : { body: JSON.stringify(data) }) });
   if (!response.ok) {
     const error = await response.json().catch(() => null) as { error?: { code?: string } } | null;
-    throw new Error(error?.error?.code ?? `Request failed (${response.status})`);
+    throw new Error(plainError(error?.error?.code, response.status));
   }
   return response.status === 204 ? undefined as T : response.json() as Promise<T>;
 }

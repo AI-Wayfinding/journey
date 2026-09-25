@@ -1,4 +1,5 @@
 import * as age from 'age-encryption';
+import { EXPIRED_LINK } from './messages.js';
 import { startAuthentication, startRegistration } from '@simplewebauthn/browser';
 import { newId, signEntry, verifyLog, wrapJourneyKey } from '@ai-wayfinding/core';
 import type { CommentBody, ItemBody, ProtocolRecord } from '@ai-wayfinding/core';
@@ -60,7 +61,9 @@ async function verifyEmail(): Promise<void> {
   requestedRoute = next && /^\/agent-sessions\/[A-Za-z0-9_-]{1,128}$/.test(next) ? next : invitation && /^[A-Za-z0-9_-]{43,}$/.test(invitation) ? '/invite#' + invitation : '/';
   history.replaceState(null, '', '/auth/verify');
   if (!token) { signIn('/'); return; }
-  const result = await api<{ challenge: 'register' | 'login' }>('/auth/email/verify', 'POST', { token });
+  let result: { challenge: 'register' | 'login' };
+  try { result = await api<{ challenge: 'register' | 'login' }>('/auth/email/verify', 'POST', { token }); }
+  catch { render(`<section class="panel"><h1>This sign-in link doesn't work</h1><p>${escape(EXPIRED_LINK)}</p><div class="actions"><a class="button" href="/sign-in">Send a new link</a></div></section>`); return; }
   if (result.challenge === 'register') {
     render(`<section class="panel"><h1>Create your passkeys</h1><p>Your passkeys protect your journey keys. You'll confirm a passkey for sign-in and one for encryption. No private key is saved on this device.</p><p>Works with Chrome or Edge 116+, Safari 18+, or Firefox 139+ with a passkey that supports PRF. There is no weaker fallback.</p><div class="actions"><button id="register">Register passkeys</button></div></section>`);
     const register = root.querySelector<HTMLButtonElement>('#register')!;
