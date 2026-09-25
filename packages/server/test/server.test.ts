@@ -100,10 +100,22 @@ describe('HTTP boundary', () => {
     expect(emails).toHaveLength(1);
     expect(emails[0]).toEqual({
       to:'mixed.case@example.org',
-      from:'noreply@wayfinding.support',
-      subject:'Sign in to Wayfinding',
+      from:{ name:'Wayfinding', email:'noreply@wayfinding.support' },
+      replyTo:'hello@wayfinding.support',
+      subject:'Your Wayfinding sign-in link',
       text:expect.stringContaining('/auth/verify#token='),
+      html:expect.stringContaining('/auth/verify#token='),
     });
+    const message = emails[0] as { text: string; html: string };
+    // Says why the person got it and what to do if they did not ask.
+    for (const body of [message.text, message.html]) {
+      expect(body).toContain('app.wayfinding.support');
+      expect(body).toContain('15 minutes');
+      expect(body).toContain("If you didn't ask");
+    }
+    // The address is never echoed into the HTML, so it cannot inject markup.
+    expect(message.html).not.toContain('mixed.case@example.org');
+    expect(message.html).not.toMatch(/<script|<img|https?:\/\/(?!app\.wayfinding\.support)/);
     expect((await request('/v1/auth/email/start','POST',{email:'attacker@example.org\r\nBcc: victim@example.org'},{},{MAGIC_EMAIL:delivery})).status).toBe(400);
     expect(emails).toHaveLength(1);
     const failed = await request('/v1/auth/email/start','POST',{email:'delivery-failure@example.org'},{},{MAGIC_EMAIL:{send:async () => { throw new Error('delivery failed'); }}});

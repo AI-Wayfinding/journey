@@ -3,6 +3,7 @@ import { isId, newId, type Envelope } from '@ai-wayfinding/core';
 import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse } from '@simplewebauthn/server';
 import { base64url, digest, emailHash, equalSecret, randomToken, unbase64url, verifyAgentSignature } from './crypto.js';
 import { EnclaveObject } from './enclave.js';
+import { magicLinkEmail } from './email.js';
 import { Registry } from './registry.js';
 import { failure, limitNumber, object, sequenceCursor, validEpoch, validExpiry, validKind, validScope, validSeq, validString } from './types.js';
 import type { AccessChange, CreateJourney, EnclaveMessage, EpochWrap, RegistryMessage, Subject } from './types.js';
@@ -116,7 +117,7 @@ app.post('/v1/auth/email/start', async c => {
     const returnPath = typeof data.returnPath === 'string' ? data.returnPath : '';
     const link = c.env.ORIGIN + '/auth/verify#token=' + encodeURIComponent(token) + (returnPath ? '&next=' + encodeURIComponent(returnPath) : '');
     try {
-      const sent = await c.env.MAGIC_EMAIL.send({ to: email, from: 'noreply@wayfinding.support', subject: 'Sign in to Wayfinding', text: 'Open ' + link + ' to sign in. This link expires in 15 minutes.' });
+      const sent = await c.env.MAGIC_EMAIL.send({ to: email, from: { name: 'Wayfinding', email: 'noreply@wayfinding.support' }, replyTo: 'hello@wayfinding.support', subject: 'Your Wayfinding sign-in link', ...magicLinkEmail(link) });
       console.log('magic-link accepted', String((sent as { messageId?: unknown } | undefined)?.messageId ?? 'no-id'));
     }
     catch (cause) {
