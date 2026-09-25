@@ -3,12 +3,33 @@ import { open, unwrapJourneyKey } from '@ai-wayfinding/core';
 import type { Envelope, JourneyKey } from '@ai-wayfinding/core';
 import { agentWritesItem, requestAgent } from './agent.js';
 
-async function browserPerson(browser: Browser): Promise<{ page: Page; context: BrowserContext; requests: string[] }> {
+declare global { interface Window { __passkeyCalls: { create: number; get: number } } }
+const calls = (page: Page) => page.evaluate(() => window.__passkeyCalls);
+async function browserPerson(browser: Browser, hasPrf = true, omitPrfOnCreate = false): Promise<{ page: Page; context: BrowserContext; requests: string[] }> {
   const context = await browser.newContext();
   const page = await context.newPage();
+  await page.addInitScript(({ omitPrfOnCreate }) => {
+    window.__passkeyCalls = { create: 0, get: 0 };
+    const create = navigator.credentials.create.bind(navigator.credentials);
+    const get = navigator.credentials.get.bind(navigator.credentials);
+    Object.defineProperty(navigator.credentials, 'create', { value: async (...args: Parameters<typeof create>) => {
+      window.__passkeyCalls.create++;
+      const credential = await create(...args);
+      if (omitPrfOnCreate && credential instanceof PublicKeyCredential) {
+        const extensions = credential.getClientExtensionResults.bind(credential);
+        Object.defineProperty(credential, 'getClientExtensionResults', { value: () => {
+          const results = extensions();
+          if (results.prf) delete results.prf.results;
+          return results;
+        } });
+      }
+      return credential;
+    } });
+    Object.defineProperty(navigator.credentials, 'get', { value: (...args: Parameters<typeof get>) => { window.__passkeyCalls.get++; return get(...args); } });
+  }, { omitPrfOnCreate });
   const cdp = await context.newCDPSession(page);
   await cdp.send('WebAuthn.enable');
-  await cdp.send('WebAuthn.addVirtualAuthenticator', { options: { protocol: 'ctap2', transport: 'internal', hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true, hasPrf: true } });
+  await cdp.send('WebAuthn.addVirtualAuthenticator', { options: { protocol: 'ctap2', transport: 'internal', hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true, hasPrf } });
   const requests: string[] = [];
   page.on('request', request => requests.push(request.url()));
   return { page, context, requests };
@@ -24,10 +45,41 @@ async function signUp(page: Page, email: string): Promise<void> {
   expect(text).toContain('/auth/verify#token=');
   const link = /https?:\/\/[^\s]+#token=[A-Za-z0-9_-]+/.exec(text!)![0]!;
   await page.goto(link);
-  await expect(page.getByRole('heading', { name: 'Create your passkeys' })).toBeVisible();
-  await page.getByRole('button', { name: 'Register passkeys' }).click();
+  await expect(page.getByRole('heading', { name: 'Create your passkey' })).toBeVisible();
+  await page.getByRole('button', { name: 'Create passkey' }).click();
   await expect(page.getByRole('heading', { name: 'A place to find your way' })).toBeVisible({ timeout: 30_000 });
+  const count = await calls(page);
+  expect(count.create).toBe(1);
+  expect(count.get).toBeLessThanOrEqual(1);
+  console.log(`Sign-up taps: ${count.create} create, ${count.get} get`);
 }
+
+test('missing PRF output at creation uses the same passkey once more', async ({ browser }) => {
+  const person = await browserPerson(browser, true, true);
+  try {
+    await signUp(person.page, `prf-retry-${Date.now()}@example.org`);
+    expect(await calls(person.page)).toEqual({ create: 1, get: 1 });
+    console.log('Sign-up without creation output: 1 create, 1 get');
+  } finally { await person.context.close(); }
+});
+
+test('a passkey without PRF stops sign-up without another prompt or a saved credential', async ({ browser }) => {
+  const person = await browserPerson(browser, false);
+  try {
+    const email = `no-prf-${Date.now()}@example.org`;
+    await person.page.goto('/sign-in');
+    await person.page.getByLabel('Email address').fill(email);
+    await person.page.getByRole('button', { name: 'Send sign-in link' }).click();
+    const sent = await person.page.request.get(`/__test/email?address=${encodeURIComponent(email)}`);
+    const { text } = await sent.json() as { text: string };
+    await person.page.goto(/https?:\/\/[^\s]+#token=[A-Za-z0-9_-]+/.exec(text)![0]!);
+    await person.page.getByRole('button', { name: 'Create passkey' }).click();
+    await expect(person.page.getByRole('alert')).toContainText("This passkey can't protect your journey keys. Use your device's own passkeys");
+    expect(await calls(person.page)).toEqual({ create: 1, get: 0 });
+    expect((await person.page.request.get('/v1/me/keys')).status()).toBe(401);
+    console.log('No-PRF sign-up taps: 1 create, 0 get');
+  } finally { await person.context.close(); }
+});
 
 test('two people share a journey with PRF passkeys and same-origin assets', async ({ browser, request }) => {
   const response = await request.get('/');
@@ -73,8 +125,10 @@ test('two people share a journey with PRF passkeys and same-origin assets', asyn
     const bobMessage = await bob.page.request.get(`/__test/email?address=${encodeURIComponent(bobEmail)}`);
     const bobText = (await bobMessage.json() as { text: string }).text;
     await bob.page.goto(/https?:\/\/[^\s]+#token=[A-Za-z0-9_-]+/.exec(bobText)![0]!);
-    await expect(bob.page.getByRole('heading', { name: 'Create your passkeys' })).toBeVisible();
-    await bob.page.getByRole('button', { name: 'Register passkeys' }).click();
+    await expect(bob.page.getByRole('heading', { name: 'Create your passkey' })).toBeVisible();
+    await bob.page.getByRole('button', { name: 'Create passkey' }).click();
+    await expect.poll(() => calls(bob.page).then(count => count.create)).toBe(1);
+    expect((await calls(bob.page)).get).toBeLessThanOrEqual(1);
     await expect(bob.page.getByRole('heading', { name: 'Join a journey' })).toBeVisible({ timeout: 30_000 });
     await bob.page.getByRole('button', { name: 'Ask to join' }).click();
     await expect(bob.page.getByRole('heading', { name: 'Waiting for a member to let you in' })).toBeVisible();
@@ -97,8 +151,11 @@ test('two people share a journey with PRF passkeys and same-origin assets', asyn
     const bobLoginText = ((await (await bob.page.request.get(`/__test/email?address=${encodeURIComponent(bobEmail)}`)).json()) as { text: string }).text;
     await bob.page.goto(/https?:\/\/[^\s]+#token=[A-Za-z0-9_-]+/.exec(bobLoginText)![0]!);
     await expect(bob.page.getByRole('heading', { name: 'Confirm your passkey' })).toBeVisible();
+    const beforeLogin = await calls(bob.page);
     await bob.page.getByRole('button', { name: 'Sign in with passkey' }).click();
     await expect(bob.page.getByRole('heading', { name: 'A place to find your way' })).toBeVisible({ timeout: 30_000 });
+    expect((await calls(bob.page)).get - beforeLogin.get).toBe(1);
+    console.log('Sign-in taps: 1 get');
     await bob.page.getByRole('link', { name: 'Our shared path' }).click();
     await bob.page.getByRole('link', { name: 'First observation' }).click();
     const bobWrapsResponse = await bob.page.request.get('/v1' + journeyPath + '/wraps/me', { headers: { 'X-Principal': bobPrincipal } });
@@ -107,8 +164,11 @@ test('two people share a journey with PRF passkeys and same-origin assets', asyn
     const agent = await requestAgent(request, journeyPath.split('/').at(-1)!);
     await alice.page.goto(agent.approvalUrl);
     await expect(alice.page.getByRole('heading', { name: 'Unlock with your passkey' })).toBeVisible();
+    const beforeUnlock = await calls(alice.page);
     await alice.page.getByRole('button', { name: 'Unlock with passkey' }).click();
     await expect(alice.page.getByRole('heading', { name: 'Approve an agent' })).toBeVisible();
+    expect((await calls(alice.page)).get - beforeUnlock.get).toBe(1);
+    console.log('New-tab unlock taps: 1 get');
     await alice.page.getByLabel('Six-digit code').fill(agent.code);
     await alice.page.getByLabel('Access').selectOption('readwrite');
     await alice.page.getByRole('button', { name: 'Confirm with passkey' }).click();

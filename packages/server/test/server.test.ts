@@ -6,6 +6,7 @@ import { authenticator } from './authenticator.js';
 import { base64url, digest, unbase64url } from '../src/crypto.js';
 
 const origin = 'https://app.wayfinding.support';
+const testSealed = () => ({ version: 1, identity: base64url(crypto.getRandomValues(new Uint8Array(96))), signing: base64url(crypto.getRandomValues(new Uint8Array(96))) });
 let sent: string[] = [];
 let ip = 1;
 beforeEach(() => { sent = []; ip++; });
@@ -28,10 +29,11 @@ async function person(email: string) {
   const device = await authenticator();
   const options = await request('/v1/auth/passkey/register/options','POST',{}, { Cookie: a.cookie });
   expect(options.status).toBe(200);
-  const values = await options.json() as {challenge:string,extensions:{prf:object},authenticatorSelection:{userVerification:string}};
-  expect(values.extensions.prf).toBeDefined();
+  const values = await options.json() as {challenge:string,extensions:{prf:{eval:{first:string}}},authenticatorSelection:{userVerification:string,residentKey:string}};
+  expect(values.extensions.prf.eval.first).toMatch(/^[A-Za-z0-9_-]{43}$/);
   expect(values.authenticatorSelection.userVerification).toBe('required');
-  const verified = await request('/v1/auth/passkey/register/verify','POST',{response:device.register(values.challenge)},{Cookie:a.cookie});
+  expect(values.authenticatorSelection.residentKey).toBe('required');
+  const verified = await request('/v1/auth/passkey/register/verify','POST',{response:device.register(values.challenge),sealed:testSealed()},{Cookie:a.cookie});
   expect(verified.status).toBe(200);
   return { ...a, device, age: await createAgeIdentity(), signing: await createSigningIdentity(), principal: newId() };
 }
@@ -54,16 +56,59 @@ const as = (p: {cookie:string,principal:string}) => ({ Cookie:p.cookie, 'X-Princ
 
 // Seam: the Worker HTTP API, real Durable Objects and SQLite; email delivery is the only fake.
 describe('HTTP boundary', () => {
-  it('stores only named sealed key fields for a passkey-verified account', async () => {
+  it('stores only versioned ciphertext fields for its verified account', async () => {
     const p = await person('sealed-keys@example.org');
-    const ciphertext = btoa('age-encryption.org/v1\n' + 'encrypted-contents'.repeat(8));
-    expect((await request('/v1/me/keys', 'PUT', { identity: ciphertext, signing: ciphertext }, { Cookie: p.cookie })).status).toBe(204);
+    const other = await person('other-sealed-keys@example.org');
+    const ciphertext = base64url(crypto.getRandomValues(new Uint8Array(96)));
+    const sealed = { version: 1, identity: ciphertext, signing: ciphertext };
+    expect((await request('/v1/me/keys', 'PUT', sealed, { Cookie: p.cookie })).status).toBe(204);
     const response = await request('/v1/me/keys', 'GET', undefined, { Cookie: p.cookie });
-    expect(await response.json()).toEqual({ identity: ciphertext, signing: ciphertext });
+    expect(await response.json()).toEqual(sealed);
     expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(await (await request('/v1/me/keys', 'GET', undefined, { Cookie: other.cookie })).json()).not.toEqual(sealed);
     expect((await request('/v1/me/keys', 'GET')).status).toBe(401);
-    expect((await request('/v1/me/keys', 'PUT', { identity: ciphertext, signing: ciphertext, privateKey: 'secret' }, { Cookie: p.cookie })).status).toBe(400);
-    expect((await request('/v1/me/keys', 'PUT', { identity: 'plaintext', signing: ciphertext }, { Cookie: p.cookie })).status).toBe(400);
+    const unverified = await account('unverified-keys@example.org');
+    expect((await request('/v1/me/keys', 'PUT', sealed, { Cookie: unverified.cookie })).status).toBe(401);
+    expect((await request('/v1/me/keys', 'GET', undefined, { Cookie: unverified.cookie })).status).toBe(401);
+    expect(await (await request('/v1/me/keys', 'GET', undefined, { Cookie: p.cookie })).json()).toEqual(sealed);
+    expect((await request('/v1/me/keys', 'PUT', { ...sealed, privateKey: 'secret' }, { Cookie: p.cookie })).status).toBe(400);
+    expect((await request('/v1/me/keys', 'PUT', { ...sealed, identity: 'plaintext' }, { Cookie: p.cookie })).status).toBe(400);
+    expect((await request('/v1/me/keys', 'PUT', { identity: ciphertext, signing: ciphertext }, { Cookie: p.cookie })).status).toBe(400);
+  });
+  it('keeps a different random PRF salt per account and uses it for login in a new session', async () => {
+    const first = await account('salt-first@example.org');
+    const second = await account('salt-second@example.org');
+    const options = async (cookie: string) => (await request('/v1/auth/passkey/register/options', 'POST', {}, { Cookie: cookie })).json() as Promise<{ challenge: string; extensions: { prf: { eval: { first: string } } } }>;
+    const initial = await options(first.cookie);
+    expect((await options(second.cookie)).extensions.prf.eval.first).not.toBe(initial.extensions.prf.eval.first);
+    const latest = await options(first.cookie);
+    expect(latest.extensions.prf.eval.first).toBe(initial.extensions.prf.eval.first);
+    const device = await authenticator();
+    expect((await request('/v1/auth/passkey/register/verify', 'POST', { response: device.register(latest.challenge), sealed: testSealed() }, { Cookie: first.cookie })).status).toBe(200);
+    const next = await account(first.email);
+    const login = await request('/v1/auth/passkey/login/options', 'POST', {}, { Cookie: next.cookie });
+    expect((await login.json() as { extensions: { prf: { eval: { first: string } } } }).extensions.prf.eval.first).toBe(initial.extensions.prf.eval.first);
+    const unlockedTab = await request('/v1/auth/passkey/login/options', 'POST', {}, { Cookie: first.cookie });
+    expect((await unlockedTab.json() as { extensions: { prf: { eval: { first: string } } } }).extensions.prf.eval.first).toBe(initial.extensions.prf.eval.first);
+  });
+  it('refuses an unsealed registration without saving a credential', async () => {
+    const a = await account('unsealed@example.org');
+    const device = await authenticator();
+    const options = await request('/v1/auth/passkey/register/options', 'POST', {}, { Cookie: a.cookie });
+    const { challenge } = await options.json() as { challenge: string };
+    expect((await request('/v1/auth/passkey/register/verify', 'POST', { response: device.register(challenge) }, { Cookie: a.cookie })).status).toBe(400);
+    expect((await account(a.email)).challenge).toBe('register');
+  });
+  it('refuses registration without PRF and leaves no credential for a clean retry', async () => {
+    const a = await account('no-prf@example.org');
+    const device = await authenticator();
+    const options = await request('/v1/auth/passkey/register/options', 'POST', {}, { Cookie: a.cookie });
+    const { challenge } = await options.json() as { challenge: string };
+    const withoutPrf = device.register(challenge, false);
+    expect((await request('/v1/auth/passkey/register/verify', 'POST', { response: withoutPrf, sealed: testSealed() }, { Cookie: a.cookie })).status).toBe(400);
+    const next = await account(a.email);
+    expect(next.challenge).toBe('register');
+    expect((await request('/v1/auth/passkey/register/options', 'POST', {}, { Cookie: next.cookie })).status).toBe(200);
   });
   it('applies isolation headers to HTML assets without changing API responses', async () => {
     const assets: Fetcher = { fetch: async () => new Response('<h1>Journey</h1>', { headers: { 'content-type': 'text/html; charset=utf-8' } }), connect: () => { throw new Error('not used'); } };

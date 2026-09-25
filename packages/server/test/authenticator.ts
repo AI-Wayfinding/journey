@@ -21,11 +21,11 @@ export async function authenticator(rpId = 'app.wayfinding.support', origin = 'h
   const counter = (n:number) => new Uint8Array([0,0,0,n]);
   const clientData = (challenge:string,type:string) => base64url(text(JSON.stringify({type,challenge,origin})));
   return {
-    register(challenge:string) {
+    register(challenge:string, prf = true) {
       const cose = cbor({1:2,3:-7,'-1':1,'-2':unbase64url(jwk.x!),'-3':unbase64url(jwk.y!)});
       const raw = unbase64url(id);
       const authData = join(rpHash,new Uint8Array([0x45]),counter(0),new Uint8Array(16),new Uint8Array([raw.length >> 8,raw.length & 255]),raw,cose);
-      return {id,rawId:id,type:'public-key',response:{clientDataJSON:clientData(challenge,'webauthn.create'),attestationObject:base64url(cbor({fmt:'none',authData,attStmt:{}})),transports:[]},clientExtensionResults:{}};
+      return {id,rawId:id,type:'public-key',response:{clientDataJSON:clientData(challenge,'webauthn.create'),attestationObject:base64url(cbor({fmt:'none',authData,attStmt:{}})),transports:[]},clientExtensionResults:{prf:{enabled:prf}}};
     },
     async login(challenge:string,n=1) {
       const clientDataJSON = clientData(challenge,'webauthn.get');

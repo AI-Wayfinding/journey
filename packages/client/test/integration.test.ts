@@ -45,7 +45,8 @@ async function person() {
   const options = await request('/v1/auth/passkey/register/options', 'POST', {}, { Cookie: cookie });
   expect(options.status).toBe(200);
   const { challenge } = await options.json() as { challenge: string };
-  const result = await request('/v1/auth/passkey/register/verify', 'POST', { response: device.register(challenge) }, { Cookie: cookie });
+  const ciphertext = () => Buffer.from(crypto.getRandomValues(new Uint8Array(96))).toString('base64url');
+  const result = await request('/v1/auth/passkey/register/verify', 'POST', { response: device.register(challenge), sealed: { version: 1, identity: ciphertext(), signing: ciphertext() } }, { Cookie: cookie });
   expect(result.status).toBe(200);
   return { email, cookie, principal: newId(), age: await createAgeIdentity(), signing: await createSigningIdentity() };
 }

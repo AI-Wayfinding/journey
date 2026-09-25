@@ -26,12 +26,12 @@ export type RegistryMessage =
   | { op: 'emailStart'; ipHash: string; emailHash: string; tokenHash: string }
   | { op: 'emailVerify'; tokenHash: string; sessionHash: string }
   | { op: 'session' | 'logout'; hash: string }
-  | { op: 'credentials' | 'journeys' | 'keysGet'; accountHash: string }
-  | { op: 'keysPut'; accountHash: string; identity: string; signing: string }
+  | { op: 'credentials' | 'journeys' | 'keysGet' | 'prfSalt'; accountHash: string }
+  | { op: 'keysPut'; accountHash: string; version: 1; identity: string; signing: string }
   | { op: 'credential'; id: string; accountHash: string }
   | { op: 'challengeSet'; sessionHash: string; challenge: string; kind: 'register' | 'login' }
   | { op: 'challengeTake'; sessionHash: string; kind: 'register' | 'login' }
-  | { op: 'credentialAdd'; id: string; accountHash: string; publicKey: string; counter: number; transports: string; sessionHash: string }
+  | { op: 'credentialAdd'; id: string; accountHash: string; publicKey: string; counter: number; transports: string; sessionHash: string; identity: string; signing: string }
   | { op: 'credentialUse'; id: string; accountHash: string; counter: number; sessionHash: string }
   | { op: 'journeyCreate'; data: CreateJourney }
   | { op: 'journeyDelete'; id: string }

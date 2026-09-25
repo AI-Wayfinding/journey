@@ -36,6 +36,17 @@ export class Registry {
         this.sql.exec('UPDATE schema_version SET version=3');
       });
     }
+    if (Number(this.sql.exec('SELECT version FROM schema_version').toArray()[0]?.version) < 4) {
+      this.state.storage.transactionSync(() => {
+        this.sql.exec('ALTER TABLE accounts ADD COLUMN prfSalt TEXT');
+        this.sql.exec('ALTER TABLE sealed_keys ADD COLUMN version INTEGER NOT NULL DEFAULT 0');
+        // The old two-credential format cannot open with the new single-credential key.
+        this.sql.exec('DELETE FROM sealed_keys');
+        this.sql.exec('DELETE FROM credentials');
+        this.sql.exec('UPDATE sessions SET verifiedAt=NULL');
+        this.sql.exec('UPDATE schema_version SET version=4');
+      });
+    }
     this.sql.exec('CREATE TABLE IF NOT EXISTS nonces (sessionId TEXT NOT NULL, nonce TEXT NOT NULL, expires INTEGER NOT NULL, PRIMARY KEY(sessionId,nonce))');
     this.sql.exec('CREATE TABLE IF NOT EXISTS rates (key TEXT PRIMARY KEY, start INTEGER NOT NULL, count INTEGER NOT NULL)');
   }
@@ -82,9 +93,13 @@ export class Registry {
           }
           case 'logout': this.sql.exec('DELETE FROM sessions WHERE hash=?', input.hash); return { ok: true };
           case 'credentials': return this.sql.exec('SELECT id,publicKey,counter,transports FROM credentials WHERE accountHash=?', input.accountHash).toArray();
-          case 'keysGet': return this.one('SELECT identity,signing FROM sealed_keys WHERE accountHash=?', input.accountHash);
+          case 'prfSalt': {
+            this.sql.exec('UPDATE accounts SET prfSalt=COALESCE(prfSalt,?) WHERE hash=?', randomToken(32), input.accountHash);
+            return this.one('SELECT prfSalt FROM accounts WHERE hash=?', input.accountHash);
+          }
+          case 'keysGet': return this.one('SELECT version,identity,signing FROM sealed_keys WHERE accountHash=? AND version=1', input.accountHash);
           case 'keysPut': {
-            this.sql.exec('INSERT INTO sealed_keys(accountHash,identity,signing) VALUES(?,?,?) ON CONFLICT(accountHash) DO UPDATE SET identity=excluded.identity,signing=excluded.signing', input.accountHash, input.identity, input.signing);
+            this.sql.exec('INSERT INTO sealed_keys(accountHash,version,identity,signing) VALUES(?,?,?,?) ON CONFLICT(accountHash) DO UPDATE SET version=excluded.version,identity=excluded.identity,signing=excluded.signing', input.accountHash, input.version, input.identity, input.signing);
             return { ok: true };
           }
           case 'credential': return this.one('SELECT id,accountHash,publicKey,counter,transports FROM credentials WHERE id=? AND accountHash=?', input.id, input.accountHash);
@@ -95,8 +110,11 @@ export class Registry {
             return row && row.kind === input.kind && Number(row.expires) > now ? row : null;
           }
           case 'credentialAdd': {
-            if (this.one('SELECT id FROM credentials WHERE accountHash=? LIMIT 1', input.accountHash) && !this.one('SELECT verifiedAt FROM sessions WHERE hash=? AND verifiedAt IS NOT NULL', input.sessionHash)) return null;
-            this.sql.exec('INSERT INTO credentials(id,accountHash,publicKey,counter,transports) VALUES(?,?,?,?,?)', input.id, input.accountHash, input.publicKey, input.counter, input.transports); this.sql.exec('UPDATE sessions SET verifiedAt=? WHERE hash=?', now, input.sessionHash); return { ok: true };
+            if (this.one('SELECT id FROM credentials WHERE accountHash=? LIMIT 1', input.accountHash)) return null;
+            this.sql.exec('INSERT INTO sealed_keys(accountHash,version,identity,signing) VALUES(?,?,?,?)', input.accountHash, 1, input.identity, input.signing);
+            this.sql.exec('INSERT INTO credentials(id,accountHash,publicKey,counter,transports) VALUES(?,?,?,?,?)', input.id, input.accountHash, input.publicKey, input.counter, input.transports);
+            this.sql.exec('UPDATE sessions SET verifiedAt=? WHERE hash=?', now, input.sessionHash);
+            return { ok: true };
           }
           case 'credentialUse': {
             const updated = this.sql.exec('UPDATE credentials SET counter=? WHERE id=? AND accountHash=? AND (counter<? OR counter=0 AND ?=0)', input.counter, input.id, input.accountHash, input.counter, input.counter);

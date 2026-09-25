@@ -4,7 +4,7 @@ A **journey** is an encrypted team space. Its technical name in the package is *
 
 ## Keys and records
 
-Each person and agent has an X25519 age recipient. Agents can use non-extractable Web Crypto private keys; a person's exportable identity can be sealed to a passkey-backed age recipient outside this package. Each person also has an Ed25519 signing key. A random 256-bit journey key belongs to a numbered **epoch** (one generation of the key). It is age-wrapped separately for every current member and agent. Removal creates the next epoch and gives wraps only to those who remain. Existing records stay under their old keys.
+Each person and agent has an X25519 age recipient. Agents can use non-extractable Web Crypto private keys; a person's exportable identity and Ed25519 signing key are encrypted with a key from one passkey outside this package. The passkey is also used for sign-in. A random 256-bit journey key belongs to a numbered **epoch** (one generation of the key). It is age-wrapped separately for every current member and agent. Removal creates the next epoch and gives wraps only to those who remain. Existing records stay under their old keys.
 
 Every item is an append-only encrypted version. The plain envelope is `{ outside: { v:1, id, journey, seq?, epoch, size, createdAt }, nonce, ciphertext }`, with base64 nonce and ciphertext. The outside has no record type. The nonce is 96 random bits; AES-GCM authenticates the ciphertext and all outside fields. The service must allocate `seq` before sealing if it wants a sequence there. `size` is the unencrypted UTF-8 JSON byte length, not the ciphertext length. The inside is `{ type, typeVersion, body }`, including optional unknown fields. Unknown types and unknown values remain intact when records are read and saved; known breaking versions can upgrade on read through registered converters. A client too old to meet the journey's signed minimum version may read but must not write.
 
@@ -15,6 +15,12 @@ Known inside types in version 1:
 - `delete`: `target` records a deletion request. The service is responsible for deleting stored versions; a copy already held by someone cannot be erased remotely.
 
 IDs are 26-character, time-sortable ULID-style strings from Web Crypto random bytes. Links and version identifiers use the same ID format. A search index is derived on a device and is not authoritative.
+
+## A person's saved keys
+
+On sign-up the service supplies a stable, random 32-byte PRF input for the account. WebAuthn PRF lets the person's passkey return a secret for that input when it is created. If PRF is enabled but the result is missing, the person sees an explanation before one extra passkey tap retrieves it from that same credential. If PRF is not enabled, sign-up stops; no credential or keys are saved. The client derives a 32-byte AES-GCM key from the PRF output with HKDF-SHA256 (`salt = UTF-8("wayfinding/person-keys/v1")`, `info = UTF-8("aes-gcm")`). This is a fixed, versioned HKDF domain: the account-specific random PRF input supplies account separation before derivation. Each private key is encrypted with its own random 12-byte nonce and authenticated data `wayfinding/person-keys/v1/identity` or `wayfinding/person-keys/v1/signing`. The saved JSON is `{version:1,identity,signing}`; both values are base64url of `nonce || ciphertext || tag`. The service stores only that ciphertext, not the PRF output or derived key. PRF byte arrays and derived bytes are wiped after use; the unlocked private keys remain in memory only until sign-out, tab close, or idle lock.
+
+On a later visit, the service's login options include that account's PRF input. One WebAuthn assertion both signs in and returns the PRF output, so the client can fetch and unlock the saved keys without a second passkey tap. An already verified session can use the same one-tap request to unlock a new tab. Server schema version 4 rejects old sealed-key writes, hides old reads, and deletes the former two-passkey credentials and encrypted keys. Accounts from before this change must sign up again. Old journey keys are not converted; the migration assumes there are no real journeys yet.
 
 ## Signed membership history
 

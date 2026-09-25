@@ -1,10 +1,9 @@
-import * as age from 'age-encryption';
 import { EXPIRED_LINK } from './messages.js';
 import { startAuthentication, startRegistration } from '@simplewebauthn/browser';
 import { newId, signEntry, verifyLog, wrapJourneyKey } from '@ai-wayfinding/core';
 import type { CommentBody, ItemBody, ProtocolRecord } from '@ai-wayfinding/core';
 import { clearPersonKeys, getPersonKeys, onPersonKeysCleared, sealPersonKeys, unlockPersonKeys } from './keys.js';
-import type { PersonKeys } from './keys.js';
+import type { PersonKeys, SealedPersonKeys } from './keys.js';
 import { allRecords, api, appendEntry, createJourney, currentKey, encryptedEntry, exportEncrypted, itemVersions, letIn, listings, removeMember, rotatePending, saveRecord, verifiedJourney } from './journey.js';
 import type { JourneyContext, JourneyListing } from './journey.js';
 import './style.css';
@@ -37,20 +36,51 @@ function supportedPrfBrowser(): boolean {
   const safari = /Version\/(\d+)/.exec(ua);
   return chrome ? Number(chrome[1]) >= 116 : firefox ? Number(firefox[1]) >= 139 : safari ? Number(safari[1]) >= 18 : false;
 }
-async function passkeyConfirmation(): Promise<void> {
-  const options = await api<Parameters<typeof startAuthentication>[0]['optionsJSON']>('/auth/passkey/login/options', 'POST', {});
-  const response = await startAuthentication({ optionsJSON: options });
-  await api('/auth/passkey/login/verify', 'POST', { response });
+const noPrf = "This passkey can't protect your journey keys. Use your device's own passkeys (iCloud Keychain on Apple devices, Google Password Manager on Android or Chrome), or a password manager that supports PRF, such as a recent 1Password or Bitwarden.";
+const decode = (value: string): Uint8Array => Uint8Array.from(atob(value.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
+type PrfOptions<T> = Omit<T, 'extensions'> & { extensions: { prf: { eval: { first: string } } } };
+function prfOutput(value: unknown): Uint8Array | null {
+  if (typeof value === 'string') { try { const bytes = decode(value); if (bytes.length === 32) return bytes; bytes.fill(0); return null; } catch { return null; } }
+  if (!(value instanceof ArrayBuffer) && !ArrayBuffer.isView(value)) return null;
+  const bytes = value instanceof ArrayBuffer ? new Uint8Array(value) : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  if (bytes.length !== 32) { bytes.fill(0); return null; }
+  const copy = new Uint8Array(bytes);
+  bytes.fill(0);
+  return copy;
+}
+async function authenticatedPrf(): Promise<Uint8Array> {
+  const options = await api<PrfOptions<Parameters<typeof startAuthentication>[0]['optionsJSON']>>('/auth/passkey/login/options', 'POST', {});
+  const response = await startAuthentication({ optionsJSON: { ...options, extensions: { prf: { eval: { first: decode(options.extensions.prf.eval.first) } } } } });
+  const output = prfOutput(response.clientExtensionResults?.prf?.results?.first);
+  if (!output) throw new Error(noPrf);
+  try {
+    const { id, rawId, type, response: details } = response;
+    await api('/auth/passkey/login/verify', 'POST', { response: { id, rawId, type, response: { clientDataJSON: details.clientDataJSON, authenticatorData: details.authenticatorData, signature: details.signature, userHandle: details.userHandle }, clientExtensionResults: {} } });
+    return output;
+  } catch (cause) { output.fill(0); throw cause; }
+}
+async function passkeyConfirmation(): Promise<void> { (await authenticatedPrf()).fill(0); }
+async function openWithPasskey(sealed: SealedPersonKeys): Promise<void> {
+  await unlockPersonKeys(sealed, await authenticatedPrf());
+}
+async function registrationPrf(credentialId: string, salt: Uint8Array): Promise<Uint8Array> {
+  const status = root.querySelector<HTMLElement>('#passkey-status');
+  if (status) status.textContent = 'Your passkey needs one more tap to protect your keys. Confirm it again.';
+  const credential = await navigator.credentials.get({ publicKey: { challenge: crypto.getRandomValues(new Uint8Array(32)).buffer, rpId: location.hostname, allowCredentials: [{ type: 'public-key', id: new Uint8Array(decode(credentialId)).buffer }], userVerification: 'required', extensions: { prf: { eval: { first: new Uint8Array(salt).buffer } } } } });
+  const result = (credential as PublicKeyCredential | null)?.getClientExtensionResults().prf;
+  const output = prfOutput(result?.results?.first);
+  if (!output) throw new Error(noPrf);
+  return output;
 }
 function signIn(destination = '/'): void {
   requestedRoute = destination === '/sign-in' ? '/' : destination;
   render(`<section class="panel"><p class="eyebrow">YOUR JOURNEY STARTS HERE</p><h1>Sign in</h1><p>Enter your email address. We'll send a private link to confirm it's you.</p><form id="email-form"><label for="email">Email address</label><input id="email" name="email" type="email" autocomplete="email" required /><div class="actions"><button type="submit">Send sign-in link</button></div></form></section>`);
   form('email-form', async f => { email = input(f, 'email'); await api('/auth/email/start', 'POST', { email, ...(/^\/agent-sessions\/[A-Za-z0-9_-]+$/.test(requestedRoute) ? { returnPath: requestedRoute } : {}) }); render('<section class="panel"><h1>Check your email</h1><p>Open the Wayfinding link to continue. It expires in 15 minutes. If you are joining a journey, keep this invitation open and return after signing in.</p></section>'); });
   // An already verified session can unlock this tab with PRF without another email link.
-  void api<{ identity: string; signing: string } | null>('/me/keys').then(sealed => {
+  void api<SealedPersonKeys | null>('/me/keys').then(sealed => {
     if (!sealed || getPersonKeys() || !root.querySelector('#email-form')) return;
-    render('<section class="panel"><h1>Unlock with your passkey</h1><p>Your keys are locked in this tab. Confirm your journey encryption passkey to continue.</p><div class="actions"><button id="unlock">Unlock with passkey</button></div></section>');
-    root.querySelector('#unlock')?.addEventListener('click', () => perform(async () => { await unlockPersonKeys(sealed, new age.webauthn.WebAuthnIdentity({ rpId: location.hostname })); navigate(requestedRoute); }));
+    render('<section class="panel"><h1>Unlock with your passkey</h1><p>Your keys are locked in this tab. Confirm your passkey once to continue.</p><div class="actions"><button id="unlock">Unlock with passkey</button></div></section>');
+    root.querySelector('#unlock')?.addEventListener('click', () => perform(async () => { await openWithPasskey(sealed); navigate(requestedRoute); }));
   }).catch(() => { /* No verified session: use the email form. */ });
 }
 async function verifyEmail(): Promise<void> {
@@ -65,29 +95,37 @@ async function verifyEmail(): Promise<void> {
   try { result = await api<{ challenge: 'register' | 'login' }>('/auth/email/verify', 'POST', { token }); }
   catch { render(`<section class="panel"><h1>This sign-in link doesn't work</h1><p>${escape(EXPIRED_LINK)}</p><div class="actions"><a class="button" href="/sign-in">Send a new link</a></div></section>`); return; }
   if (result.challenge === 'register') {
-    render(`<section class="panel"><h1>Create your passkeys</h1><p>Your passkeys protect your journey keys. You'll confirm a passkey for sign-in and one for encryption. No private key is saved on this device.</p><p>Works with Chrome or Edge 116+, Safari 18+, or Firefox 139+ with a passkey that supports PRF. There is no weaker fallback.</p><div class="actions"><button id="register">Register passkeys</button></div></section>`);
+    render(`<section class="panel"><h1>Create your passkey</h1><p>One passkey signs you in and protects your journey keys. No private key is saved on this device.</p><p>Works with Chrome or Edge 116+, Safari 18+, or Firefox 139+ with a passkey that supports protecting keys. There is no weaker fallback.</p><div class="actions"><button id="register">Create passkey</button></div><p id="passkey-status" role="status"></p></section>`);
     const register = root.querySelector<HTMLButtonElement>('#register')!;
-    if (!supportedPrfBrowser()) { register.disabled = true; error('This browser cannot use a PRF passkey. Use Chrome or Edge 116+, Safari 18+, or Firefox 139+ with a compatible passkey.'); return; }
+    if (!supportedPrfBrowser()) { register.disabled = true; error('This browser cannot use this kind of passkey. Use Chrome or Edge 116+, Safari 18+, or Firefox 139+ with a compatible passkey.'); return; }
     register.addEventListener('click', () => perform(async () => {
       register.disabled = true;
-      const hint = await age.webauthn.createCredential({ keyName: 'Wayfinding journey encryption', rpId: location.hostname });
-      const options = await api<Parameters<typeof startRegistration>[0]['optionsJSON']>('/auth/passkey/register/options', 'POST', {});
-      const response = await startRegistration({ optionsJSON: options });
-      if (response.clientExtensionResults?.prf?.enabled === false) throw new Error('This passkey cannot use PRF. Try a compatible passkey.');
-      await api('/auth/passkey/register/verify', 'POST', { response });
-      const sealed = await sealPersonKeys(new age.webauthn.WebAuthnRecipient({ identity: hint }));
-      await api('/me/keys', 'PUT', sealed.sealed);
-      await unlockPersonKeys(sealed.sealed, new age.webauthn.WebAuthnIdentity({ identity: hint }));
-      navigate(requestedRoute);
+      try {
+        const options = await api<PrfOptions<Parameters<typeof startRegistration>[0]['optionsJSON']>>('/auth/passkey/register/options', 'POST', {});
+        const salt = decode(options.extensions.prf.eval.first);
+        const response = await startRegistration({ optionsJSON: { ...options, extensions: { prf: { eval: { first: salt } } } } });
+        if (response.clientExtensionResults?.prf?.enabled !== true) throw new Error(noPrf);
+        const output = prfOutput(response.clientExtensionResults.prf.results?.first) ?? await registrationPrf(response.rawId, salt);
+        const unlockOutput = new Uint8Array(output);
+        try {
+          const sealed = await sealPersonKeys(output);
+          const { id, rawId, type, response: details } = response;
+          await api('/auth/passkey/register/verify', 'POST', { response: { id, rawId, type, response: { clientDataJSON: details.clientDataJSON, attestationObject: details.attestationObject, transports: details.transports }, clientExtensionResults: { prf: { enabled: true } } }, sealed: sealed.sealed });
+          await unlockPersonKeys(sealed.sealed, unlockOutput);
+          navigate(requestedRoute);
+        } finally { output.fill(0); unlockOutput.fill(0); }
+      } finally { if (register.isConnected) register.disabled = false; }
     }));
   } else {
-    render(`<section class="panel"><h1>Confirm your passkey</h1><p>After signing in, use your journey encryption passkey to unlock your keys in memory for this tab.</p><div class="actions"><button id="confirm">Sign in with passkey</button></div></section>`);
+    render(`<section class="panel"><h1>Confirm your passkey</h1><p>One passkey tap signs you in and unlocks your journey keys in this tab.</p><div class="actions"><button id="confirm">Sign in with passkey</button></div></section>`);
     root.querySelector('#confirm')?.addEventListener('click', () => perform(async () => {
-      await passkeyConfirmation();
-      const sealed = await api<{ identity: string; signing: string } | null>('/me/keys');
-      if (!sealed) throw new Error('No encrypted keys were saved for this account. Ask for help before continuing.');
-      await unlockPersonKeys(sealed, new age.webauthn.WebAuthnIdentity({ rpId: location.hostname }));
-      navigate(requestedRoute);
+      const output = await authenticatedPrf();
+      try {
+        const sealed = await api<SealedPersonKeys | null>('/me/keys');
+        if (!sealed) throw new Error('No encrypted keys were saved for this account. Sign up again to continue.');
+        await unlockPersonKeys(sealed, output);
+        navigate(requestedRoute);
+      } finally { output.fill(0); }
     }));
   }
 }

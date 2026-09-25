@@ -1,7 +1,44 @@
-import { createAgeIdentity, createSigningIdentity, deriveRecipient, importSigningKey, openIdentity, sealIdentity } from '@ai-wayfinding/core';
-import type { AgeIdentity, AgeRecipient, JourneyKey } from '@ai-wayfinding/core';
+import { createAgeIdentity, createSigningIdentity, deriveRecipient, importSigningKey } from '@ai-wayfinding/core';
+import type { JourneyKey } from '@ai-wayfinding/core';
 
-export interface SealedPersonKeys { identity: string; signing: string }
+export interface SealedPersonKeys { version: 1; identity: string; signing: string }
+const encoder = new TextEncoder();
+const decoder = new TextDecoder('utf-8', { fatal: true });
+const label = 'wayfinding/person-keys/v1';
+const asBuffer = (bytes: Uint8Array): ArrayBuffer => new Uint8Array(bytes).buffer;
+const encode = (bytes: Uint8Array): string => btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const decode = (value: string): Uint8Array => Uint8Array.from(atob(value.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
+
+async function withPrfKey<T>(output: Uint8Array, action: (key: CryptoKey) => Promise<T>): Promise<T> {
+  try {
+    if (output.length !== 32) throw new Error('This passkey did not return a journey key. Try another passkey.');
+    const raw = new Uint8Array(output);
+    try {
+      const input = await crypto.subtle.importKey('raw', raw.buffer, 'HKDF', false, ['deriveBits']);
+      const derived = new Uint8Array(await crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt: asBuffer(encoder.encode(label)), info: asBuffer(encoder.encode('aes-gcm')) }, input, 256));
+      try { return await action(await crypto.subtle.importKey('raw', derived.buffer, 'AES-GCM', false, ['encrypt', 'decrypt'])); }
+      finally { derived.fill(0); }
+    } finally { raw.fill(0); }
+  } finally { output.fill(0); }
+}
+async function encrypt(key: CryptoKey, field: 'identity' | 'signing', value: string): Promise<string> {
+  const nonce = crypto.getRandomValues(new Uint8Array(12));
+  const plain = encoder.encode(value);
+  try {
+    const sealed = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: asBuffer(nonce), additionalData: asBuffer(encoder.encode(label + '/' + field)) }, key, plain.buffer));
+    const combined = new Uint8Array(nonce.length + sealed.length);
+    combined.set(nonce);
+    combined.set(sealed, nonce.length);
+    return encode(combined);
+  } finally { plain.fill(0); }
+}
+async function decrypt(key: CryptoKey, field: 'identity' | 'signing', value: string): Promise<string> {
+  const bytes = decode(value);
+  if (bytes.length < 28) throw new Error('Your saved journey keys are damaged.');
+  const plain = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: asBuffer(bytes.slice(0, 12)), additionalData: asBuffer(encoder.encode(label + '/' + field)) }, key, asBuffer(bytes.slice(12))));
+  try { return decoder.decode(plain); }
+  finally { plain.fill(0); }
+}
 export interface PersonKeys { readonly identity: string; readonly recipient: string; readonly signingKey: string; readonly signingPrivateKey: CryptoKey }
 class UnlockedPersonKeys implements PersonKeys {
   #identity: string;
@@ -49,27 +86,28 @@ export function getPersonKeys(): PersonKeys | null {
   return unlocked;
 }
 
-/** The recipient can be a WebAuthnRecipient. Tests use an age X25519 recipient. */
-export async function sealPersonKeys(passkey: AgeRecipient): Promise<{ sealed: SealedPersonKeys; public: { recipient: string; signingKey: string } }> {
-  const age = await createAgeIdentity();
-  const signing = await createSigningIdentity();
-  return {
-    sealed: {
-      identity: await sealIdentity(age.identity, [passkey]),
-      signing: await sealIdentity(JSON.stringify(signing), [passkey]),
-    },
-    public: { recipient: age.recipient, signingKey: signing.publicKey },
-  };
+export async function sealPersonKeys(prfOutput: Uint8Array): Promise<{ sealed: SealedPersonKeys; public: { recipient: string; signingKey: string } }> {
+  return withPrfKey(prfOutput, async key => {
+    const age = await createAgeIdentity();
+    const signing = await createSigningIdentity();
+    return {
+      sealed: { version: 1, identity: await encrypt(key, 'identity', age.identity), signing: await encrypt(key, 'signing', JSON.stringify(signing)) },
+      public: { recipient: age.recipient, signingKey: signing.publicKey },
+    };
+  });
 }
 
-/** Decrypt only after a deliberate passkey tap; retain usable keys in module memory. */
-export async function unlockPersonKeys(sealed: SealedPersonKeys, passkey: AgeIdentity): Promise<PersonKeys> {
-  const identity = await openIdentity(sealed.identity, [passkey]);
-  const signing: unknown = JSON.parse(await openIdentity(sealed.signing, [passkey]));
-  if (!signing || typeof signing !== 'object' || !('publicKey' in signing) || !('privateKey' in signing) || typeof signing.publicKey !== 'string' || typeof signing.privateKey !== 'string') throw new Error('Invalid sealed signing key');
-  const next = new UnlockedPersonKeys(identity, await deriveRecipient(identity), signing.publicKey, await importSigningKey(signing.privateKey));
-  clearPersonKeys();
-  unlocked = next;
-  idleTimer = setTimeout(clearPersonKeys, IDLE_MS);
-  return next;
+/** Decrypt only after one passkey tap; retain usable keys in module memory. */
+export async function unlockPersonKeys(sealed: SealedPersonKeys, prfOutput: Uint8Array): Promise<PersonKeys> {
+  return withPrfKey(prfOutput, async key => {
+    if (sealed.version !== 1) throw new Error('Your saved journey keys need a new sign-up.');
+    const identity = await decrypt(key, 'identity', sealed.identity);
+    const signing: unknown = JSON.parse(await decrypt(key, 'signing', sealed.signing));
+    if (!signing || typeof signing !== 'object' || !('publicKey' in signing) || !('privateKey' in signing) || typeof signing.publicKey !== 'string' || typeof signing.privateKey !== 'string') throw new Error('Invalid sealed signing key');
+    const next = new UnlockedPersonKeys(identity, await deriveRecipient(identity), signing.publicKey, await importSigningKey(signing.privateKey));
+    clearPersonKeys();
+    unlocked = next;
+    idleTimer = setTimeout(clearPersonKeys, IDLE_MS);
+    return next;
+  });
 }
