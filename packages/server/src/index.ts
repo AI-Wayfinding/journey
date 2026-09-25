@@ -155,7 +155,7 @@ app.post('/v1/auth/passkey/register/verify', async c => {
   if ((await registry(c.env, { op: 'credentials', accountHash: auth.accountHash })).length) return failure('forbidden', 403);
   const challenge = await registry(c.env, { op: 'challengeTake', sessionHash: auth.sessionHash, kind: 'register' });
   if (!challenge) return failure('unauthorized', 401);
-  if (data.response.clientExtensionResults.prf?.enabled !== true) return failure('invalid-request', 400);
+  if (data.response.clientExtensionResults.prf?.enabled !== true) { console.warn('passkey-register refused', 'prf-not-enabled'); return failure('invalid-request', 400); }
   try {
     const verified = await verifyRegistrationResponse({ response: data.response, expectedChallenge: challenge.challenge, expectedOrigin: c.env.ORIGIN, expectedRPID: c.env.RP_ID, requireUserVerification: true });
     if (!verified.verified) return failure('unauthorized', 401);
@@ -163,7 +163,23 @@ app.post('/v1/auth/passkey/register/verify', async c => {
     const added = await registry(c.env, { op: 'credentialAdd', id: credential.id, accountHash: auth.accountHash, publicKey: base64url(credential.publicKey), counter: credential.counter, transports: JSON.stringify(credential.transports ?? []), sessionHash: auth.sessionHash, identity: data.sealed.identity, signing: data.sealed.signing });
     if (!added) return failure('forbidden', 403);
     return json({ verified: true });
-  } catch { return failure('unauthorized', 401); }
+  } catch (cause) { console.warn('passkey-register refused', cause instanceof Error ? cause.name + ': ' + cause.message.slice(0, 160) : 'unknown'); return failure('unauthorized', 401); }
+});
+const diagnosticValues: Record<string, RegExp> = {
+  stage: /^(register-create|register-get|login)$/, outcome: /^(ok|no-prf|no-output|error)$/, prf: /^(present|absent)$/, enabled: /^(true|false|absent)$/,
+  first: /^(absent|string|arraybuffer|view|other)$/, attachment: /^(platform|cross-platform)$/, aaguid: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+  error: /^[A-Za-z_]{1,60}$/, browser: /^([A-Za-z]{1,10} \d{1,4}|other)$/,
+};
+// Accepts only the named shape fields from a signed-in browser; everything else is dropped before logging.
+app.post('/v1/diagnostics/passkey', async c => {
+  const auth = await session(c); if (!auth) return failure('unauthorized', 401);
+  const data = await payload(c).catch(() => null);
+  if (!data || typeof data.stage !== 'string' || !diagnosticValues.stage!.test(data.stage)) return failure('invalid-request', 400);
+  const entry: Record<string, string | number> = { account: auth.accountHash.slice(0, 8) };
+  for (const [field, pattern] of Object.entries(diagnosticValues)) { const value = data[field]; if (typeof value === 'string' && pattern.test(value)) entry[field] = value; }
+  if (Number.isInteger(data.length) && (data.length as number) >= 0 && (data.length as number) <= 1024) entry.length = data.length as number;
+  console.log('passkey-diagnostic', JSON.stringify(entry));
+  return new Response(null, { status: 204 });
 });
 app.post('/v1/auth/passkey/login/options', async c => {
   const auth = await session(c); if (!auth) return failure('unauthorized', 401);

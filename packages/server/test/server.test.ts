@@ -110,6 +110,21 @@ describe('HTTP boundary', () => {
     expect(next.challenge).toBe('register');
     expect((await request('/v1/auth/passkey/register/options', 'POST', {}, { Cookie: next.cookie })).status).toBe(200);
   });
+  it('logs passkey diagnostics from named fields only and requires a session', async () => {
+    expect((await request('/v1/diagnostics/passkey', 'POST', { stage: 'register-create', outcome: 'no-output' })).status).toBe(401);
+    const a = await account('diagnostics@example.org');
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      const sent = await request('/v1/diagnostics/passkey', 'POST', { stage: 'register-create', outcome: 'no-output', enabled: 'absent', first: 'absent', length: 0, aaguid: 'bada5566-a7aa-401f-bd96-45619a55120d', browser: 'Chrome 140', prfOutput: 'SECRET-PRF', email: a.email, error: 'bad value; SECRET-ERR' }, { Cookie: a.cookie });
+      expect(sent.status).toBe(204);
+      const line = log.mock.calls.map(call => call.join(' ')).find(text => text.startsWith('passkey-diagnostic'))!;
+      expect(line).toContain('"stage":"register-create"');
+      expect(line).toContain('"aaguid":"bada5566-a7aa-401f-bd96-45619a55120d"');
+      expect(line).not.toContain('SECRET');
+      expect(line).not.toContain(a.email);
+      expect((await request('/v1/diagnostics/passkey', 'POST', { stage: 'anything' }, { Cookie: a.cookie })).status).toBe(400);
+    } finally { log.mockRestore(); }
+  });
   it('applies isolation headers to HTML assets without changing API responses', async () => {
     const assets: Fetcher = { fetch: async () => new Response('<h1>Journey</h1>', { headers: { 'content-type': 'text/html; charset=utf-8' } }), connect: () => { throw new Error('not used'); } };
     const page = await request('/journeys', 'GET', undefined, {}, { ASSETS: assets });

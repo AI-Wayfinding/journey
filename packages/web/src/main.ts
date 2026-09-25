@@ -48,10 +48,46 @@ function prfOutput(value: unknown): Uint8Array | null {
   bytes.fill(0);
   return copy;
 }
+type PasskeyStage = 'register-create' | 'register-get' | 'login';
+// Diagnostics describe only the shape of a passkey response: never the PRF output, keys, credential ids or email.
+function prfShape(value: unknown): { prf: string; enabled: string; first: string; length: number } {
+  const prf = value as { enabled?: unknown; results?: { first?: unknown } } | undefined;
+  const first = prf?.results?.first;
+  const kind = first === undefined ? 'absent' : typeof first === 'string' ? 'string' : first instanceof ArrayBuffer ? 'arraybuffer' : ArrayBuffer.isView(first) ? 'view' : 'other';
+  const length = typeof first === 'string' ? first.length : first instanceof ArrayBuffer || ArrayBuffer.isView(first) ? first.byteLength : 0;
+  return { prf: prf ? 'present' : 'absent', enabled: prf?.enabled === true ? 'true' : prf?.enabled === false ? 'false' : 'absent', first: kind, length };
+}
+// The AAGUID names the passkey provider model (for example 1Password or iCloud Keychain), not the person.
+function aaguid(authenticatorData: string | undefined): string | undefined {
+  if (!authenticatorData) return undefined;
+  try {
+    const bytes = decode(authenticatorData);
+    if (bytes.length < 53) return undefined;
+    const hex = [...bytes.slice(37, 53)].map(b => b.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  } catch { return undefined; }
+}
+function errorName(cause: unknown): string {
+  const value = cause as { code?: unknown; name?: unknown } | null;
+  return String(typeof value?.code === 'string' ? value.code : typeof value?.name === 'string' ? value.name : 'unknown').slice(0, 60);
+}
+function browserName(): string {
+  const ua = navigator.userAgent;
+  const match = /(Edg|Firefox|Chrome)\/(\d+)/.exec(ua);
+  if (match) return `${match[1]} ${match[2]}`;
+  const safari = /Version\/(\d+)\S* .*Safari/.exec(ua);
+  return safari ? `Safari ${safari[1]}` : 'other';
+}
+function reportPasskey(report: { stage: PasskeyStage; outcome: 'ok' | 'no-prf' | 'no-output' | 'error' } & Record<string, unknown>): void {
+  void fetch('/v1/diagnostics/passkey', { method: 'POST', credentials: 'same-origin', keepalive: true, headers: { 'Content-Type': 'application/json', 'X-Wayfinding': '1' }, body: JSON.stringify({ ...report, browser: browserName() }) }).catch(() => undefined);
+}
 async function authenticatedPrf(): Promise<Uint8Array> {
   const options = await api<PrfOptions<Parameters<typeof startAuthentication>[0]['optionsJSON']>>('/auth/passkey/login/options', 'POST', {});
-  const response = await startAuthentication({ optionsJSON: { ...options, extensions: { prf: { eval: { first: decode(options.extensions.prf.eval.first) } } } } });
+  let response: Awaited<ReturnType<typeof startAuthentication>>;
+  try { response = await startAuthentication({ optionsJSON: { ...options, extensions: { prf: { eval: { first: decode(options.extensions.prf.eval.first) } } } } }); }
+  catch (cause) { reportPasskey({ stage: 'login', outcome: 'error', error: errorName(cause) }); throw cause; }
   const output = prfOutput(response.clientExtensionResults?.prf?.results?.first);
+  reportPasskey({ stage: 'login', outcome: output ? 'ok' : 'no-output', ...prfShape(response.clientExtensionResults?.prf), attachment: response.authenticatorAttachment });
   if (!output) throw new Error(noPrf);
   try {
     const { id, rawId, type, response: details } = response;
@@ -69,6 +105,7 @@ async function registrationPrf(credentialId: string, salt: Uint8Array): Promise<
   const credential = await navigator.credentials.get({ publicKey: { challenge: crypto.getRandomValues(new Uint8Array(32)).buffer, rpId: location.hostname, allowCredentials: [{ type: 'public-key', id: new Uint8Array(decode(credentialId)).buffer }], userVerification: 'required', extensions: { prf: { eval: { first: new Uint8Array(salt).buffer } } } } });
   const result = (credential as PublicKeyCredential | null)?.getClientExtensionResults().prf;
   const output = prfOutput(result?.results?.first);
+  reportPasskey({ stage: 'register-get', outcome: output ? 'ok' : 'no-output', ...prfShape(result), attachment: (credential as PublicKeyCredential | null)?.authenticatorAttachment ?? undefined });
   if (!output) throw new Error(noPrf);
   return output;
 }
@@ -103,9 +140,22 @@ async function verifyEmail(): Promise<void> {
       try {
         const options = await api<PrfOptions<Parameters<typeof startRegistration>[0]['optionsJSON']>>('/auth/passkey/register/options', 'POST', {});
         const salt = decode(options.extensions.prf.eval.first);
-        const response = await startRegistration({ optionsJSON: { ...options, extensions: { prf: { eval: { first: salt } } } } });
-        if (response.clientExtensionResults?.prf?.enabled !== true) throw new Error(noPrf);
-        const output = prfOutput(response.clientExtensionResults.prf.results?.first) ?? await registrationPrf(response.rawId, salt);
+        let stage: PasskeyStage = 'register-create';
+        let response: Awaited<ReturnType<typeof startRegistration>>;
+        let output: Uint8Array;
+        try {
+          response = await startRegistration({ optionsJSON: { ...options, extensions: { prf: { eval: { first: salt } } } } });
+          const prf = response.clientExtensionResults?.prf;
+          const created = prfOutput(prf?.results?.first);
+          reportPasskey({ stage, outcome: created ? 'ok' : prf?.enabled === false ? 'no-prf' : 'no-output', ...prfShape(prf), attachment: response.authenticatorAttachment, aaguid: aaguid(response.response.authenticatorData) });
+          // Only a definite "no PRF" stops here. Some password managers omit the flag, so one confirming tap decides.
+          if (!created && prf?.enabled === false) throw new Error(noPrf);
+          stage = 'register-get';
+          output = created ?? await registrationPrf(response.rawId, salt);
+        } catch (cause) {
+          if (!(cause instanceof Error && cause.message === noPrf)) reportPasskey({ stage, outcome: 'error', error: errorName(cause) });
+          throw cause;
+        }
         const unlockOutput = new Uint8Array(output);
         try {
           const sealed = await sealPersonKeys(output);
