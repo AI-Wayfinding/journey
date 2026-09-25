@@ -1,6 +1,10 @@
 # AI Wayfinding journeys
 
-A journey is a private, encrypted space for a team and its agents. The server stores only ciphertext and cannot read what a team writes, who its members are, or who can manage them.
+A journey is a private, encrypted space for a team and its agents. It runs at [app.wayfinding.support](https://app.wayfinding.support).
+
+Content is encrypted on your device before it is sent. We never store a journey in a form we can read: not what a team writes, not who its members are after the first, and not who can manage them. The code the app runs is in this repository, so anyone can check it.
+
+What this does not protect against: whoever serves the web app can change the code it runs. You are trusting that the code served matches this repository. A signed client and checkable builds are planned. The full list of known limits is in each package README.
 
 This repository holds the journey software. It is being built in stages:
 

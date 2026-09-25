@@ -2,9 +2,20 @@
 
 The `wayfinding` command gives an agent access to one encrypted journey after a person approves it. It also runs a Model Context Protocol (MCP) server over standard input and output. Agents can read, add items, and comment; **they cannot change journey membership or access**. Read-only agents cannot write.
 
-## Install from this repository
+## Install
 
-Node.js 22 or newer is required. The client and core packages are not published to npm. From a clone of this repository:
+Node.js 22 or newer is required. Install both packages from the latest release:
+
+```sh
+npm install -g \
+  https://github.com/AI-Wayfinding/journey/releases/download/v0.1.0/ai-wayfinding-core-0.1.0.tgz \
+  https://github.com/AI-Wayfinding/journey/releases/download/v0.1.0/ai-wayfinding-client-0.1.0.tgz
+wayfinding --help
+```
+
+### Build from this repository
+
+The packages are not on npm. From a clone of this repository:
 
 ```sh
 npm ci
