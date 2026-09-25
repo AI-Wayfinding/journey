@@ -47,6 +47,14 @@ export class Registry {
         this.sql.exec('UPDATE schema_version SET version=4');
       });
     }
+    if (Number(this.sql.exec('SELECT version FROM schema_version').toArray()[0]?.version) < 5) {
+      this.state.storage.transactionSync(() => {
+        // The verified address travels with the sign-in token and session so journey creation needs no retyping.
+        this.sql.exec('ALTER TABLE tokens ADD COLUMN email TEXT');
+        this.sql.exec('ALTER TABLE sessions ADD COLUMN email TEXT');
+        this.sql.exec('UPDATE schema_version SET version=5');
+      });
+    }
     this.sql.exec('CREATE TABLE IF NOT EXISTS nonces (sessionId TEXT NOT NULL, nonce TEXT NOT NULL, expires INTEGER NOT NULL, PRIMARY KEY(sessionId,nonce))');
     this.sql.exec('CREATE TABLE IF NOT EXISTS rates (key TEXT PRIMARY KEY, start INTEGER NOT NULL, count INTEGER NOT NULL)');
   }
@@ -71,25 +79,25 @@ export class Registry {
             const ipAllowed = allowed('ip:' + input.ipHash, 10);
             const emailAllowed = allowed('email:' + input.emailHash, 5);
             if (!ipAllowed || !emailAllowed) return { allowed: false };
-            this.sql.exec('INSERT INTO tokens(hash,accountHash,expires) VALUES(?,?,?)', input.tokenHash, input.emailHash, now + 900_000);
+            this.sql.exec('INSERT INTO tokens(hash,accountHash,expires,email) VALUES(?,?,?,?)', input.tokenHash, input.emailHash, now + 900_000, input.email);
             return { allowed: true };
           }
           case 'emailVerify': {
-            const row = this.one('SELECT accountHash,expires FROM tokens WHERE hash=?', input.tokenHash);
+            const row = this.one('SELECT accountHash,expires,email FROM tokens WHERE hash=?', input.tokenHash);
             if (!row || Number(row.expires) <= now) return null;
             this.sql.exec('DELETE FROM tokens WHERE hash=?', input.tokenHash);
             const hash = String(row.accountHash);
             let account = this.one('SELECT id FROM accounts WHERE hash=?', hash);
             const needsRegistration = !account || !this.one('SELECT id FROM credentials WHERE accountHash=? LIMIT 1', hash);
             if (!account) { this.sql.exec('INSERT INTO accounts(hash,id) VALUES(?,?)', hash, randomToken(16)); account = this.one('SELECT id FROM accounts WHERE hash=?', hash); }
-            this.sql.exec('INSERT INTO sessions(hash,accountHash,created,expires,lastUsed,verifiedAt) VALUES(?,?,?,?,?,NULL)', input.sessionHash, hash, now, now + 43_200_000, now);
+            this.sql.exec('INSERT INTO sessions(hash,accountHash,created,expires,lastUsed,verifiedAt,email) VALUES(?,?,?,?,?,NULL,?)', input.sessionHash, hash, now, now + 43_200_000, now, row.email ?? null);
             return { accountHash: hash, accountId: account!.id, newAccount: needsRegistration };
           }
           case 'session': {
-            const row = this.one('SELECT accountHash,expires,verifiedAt FROM sessions WHERE hash=?', input.hash);
+            const row = this.one('SELECT accountHash,expires,verifiedAt,email FROM sessions WHERE hash=?', input.hash);
             if (!row || Number(row.expires) <= now) return null;
             this.sql.exec('UPDATE sessions SET lastUsed=? WHERE hash=?', now, input.hash);
-            return { accountHash: row.accountHash, verifiedAt: row.verifiedAt };
+            return { accountHash: row.accountHash, verifiedAt: row.verifiedAt, email: row.email ?? null };
           }
           case 'logout': this.sql.exec('DELETE FROM sessions WHERE hash=?', input.hash); return { ok: true };
           case 'credentials': return this.sql.exec('SELECT id,publicKey,counter,transports FROM credentials WHERE accountHash=?', input.accountHash).toArray();

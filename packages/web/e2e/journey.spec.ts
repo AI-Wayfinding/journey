@@ -93,7 +93,7 @@ test('two people share a journey with PRF passkeys and same-origin assets', asyn
     await alice.page.getByRole('link', { name: 'Start a journey' }).first().click();
     await alice.page.getByLabel('Journey name').fill('Our shared path');
     await alice.page.getByLabel('Description (optional)').fill('A place to work together');
-    await alice.page.getByLabel('Your email address').fill(aliceEmail);
+    await expect(alice.page.getByLabel('Your email address')).toHaveCount(0);
     await alice.page.getByRole('button', { name: 'Create journey' }).click();
     await expect(alice.page.getByRole('heading', { name: 'Your recovery key' })).toBeVisible();
     const recovery = await alice.page.locator('#recovery-copy-value').textContent();

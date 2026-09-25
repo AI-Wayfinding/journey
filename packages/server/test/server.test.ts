@@ -47,7 +47,7 @@ async function journey(owner: Awaited<ReturnType<typeof person>>) {
   const genesis = await signEntry({v:1,seq:0,prev:null,at:new Date().toISOString(),actor:owner.principal,type:'genesis',body:{journey:id,name:'Shared space',creator:{id:owner.principal,kind:'person',recipient:owner.age.recipient,signingKey:owner.signing.publicKey},grants:['members.manage'],mode:'sealed',visibility:'private',minClientVersion:'0.1.0'}},await importSigningKey(owner.signing.privateKey));
   const recovery = await createAgeIdentity();
   const recoveryWrap = (await wrapJourneyKey(key,[{id:'recovery',recipient:recovery.recipient}]))[0]!.ciphertext;
-  const create = await request('/v1/journeys','POST',{id,name:'Shared space',creatorEmail:owner.email,creator:{id:owner.principal,recipient:owner.age.recipient,signingKey:owner.signing.publicKey},genesis:await cipherLog(key,id,genesis),wraps:(await wrapJourneyKey(key,[{id:owner.principal,recipient:owner.age.recipient}])).map(w=>({principal:w.recipient,epoch:w.epoch,wrap:w.ciphertext})),recoveryWrap,minClientVersion:'0.1.0'},{Cookie:owner.cookie});
+  const create = await request('/v1/journeys','POST',{id,name:'Shared space',creatorEmail:'spoofed@example.org',creator:{id:owner.principal,recipient:owner.age.recipient,signingKey:owner.signing.publicKey},genesis:await cipherLog(key,id,genesis),wraps:(await wrapJourneyKey(key,[{id:owner.principal,recipient:owner.age.recipient}])).map(w=>({principal:w.recipient,epoch:w.epoch,wrap:w.ciphertext})),recoveryWrap,minClientVersion:'0.1.0'},{Cookie:owner.cookie});
   expect(create.status).toBe(201);
   expect((await create.json() as {id:string}).id).toBe(id);
   return {id,key,entries:[genesis]};
@@ -280,6 +280,8 @@ it('creates, joins, syncs and rotates ciphertext; denies unauthorized reads and 
   const admin = await request('/v1/admin/registry','GET',undefined,{Authorization:'Bearer test-admin'});
   const registry = await admin.text();
   expect(registry).toContain(owner.email);
+  // A body address cannot choose the stored creator email.
+  expect(registry).not.toContain('spoofed@example.org');
   expect(registry).not.toContain(guest.email);
   expect(registry).not.toContain('Encrypted only');
   expect((await request('/v1/admin/registry','GET',undefined,{Authorization:'Bearer invalid'})).status).toBe(401);

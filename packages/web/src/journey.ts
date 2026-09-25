@@ -80,7 +80,7 @@ export async function appendEntry(ctx: JourneyContext, type: string, body: LogEn
   if (!verified.ok) throw new Error(verified.error.message);
   await api(`/journeys/${ctx.id}/log`, 'POST', { entry: await encryptedEntry(ctx, entry), ...extra }, ctx.principal);
 }
-export async function createJourney(name: string, email: string, description: string, kind: 'individual' | 'team', keys: PersonKeys): Promise<{ listing: JourneyListing; recoveryIdentity: string; recoveryRecipient: string; recoveryWrap: string }> {
+export async function createJourney(name: string, description: string, kind: 'individual' | 'team', keys: PersonKeys): Promise<{ listing: JourneyListing; recoveryIdentity: string; recoveryRecipient: string; recoveryWrap: string }> {
   const id = newId(), principal = newId(), recovery = await createAgeIdentity();
   const creator: Member = { id: principal, kind: 'person', recipient: keys.recipient, signingKey: keys.signingKey };
   const first = await signEntry({ v: 1, seq: 0, prev: null, at: new Date().toISOString(), actor: principal, type: 'genesis', body: { journey: id, name, creator, grants: ['members.manage'], mode: 'sealed', visibility: 'private', minClientVersion: '0.1.0', description, journeyKind: kind } }, keys.signingPrivateKey);
@@ -90,7 +90,7 @@ export async function createJourney(name: string, email: string, description: st
   const genesis = encodeEntry(await seal({ type: 'membership', typeVersion: 1, body: first as unknown as ProtocolRecord['body'] }, { id: newId(), journey: id, epoch: 1, createdAt: first.at }, key));
   const [own] = await wrapJourneyKey(key, [{ id: principal, recipient: keys.recipient }]);
   const [recoveryWrap] = await wrapJourneyKey(key, [{ id: 'recovery', recipient: recovery.recipient }]);
-  await api('/journeys', 'POST', { id, name, creatorEmail: email, creator: { id: principal, recipient: keys.recipient, signingKey: keys.signingKey }, genesis, wraps: [{ principal, epoch: 1, wrap: own!.ciphertext }], recoveryWrap: recoveryWrap!.ciphertext, minClientVersion: '0.1.0' });
+  await api('/journeys', 'POST', { id, name, creator: { id: principal, recipient: keys.recipient, signingKey: keys.signingKey }, genesis, wraps: [{ principal, epoch: 1, wrap: own!.ciphertext }], recoveryWrap: recoveryWrap!.ciphertext, minClientVersion: '0.1.0' });
   const listing = { id, name, principal };
   return { listing, recoveryIdentity: recovery.identity, recoveryRecipient: recovery.recipient, recoveryWrap: recoveryWrap!.ciphertext };
 }

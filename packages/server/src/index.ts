@@ -22,7 +22,7 @@ export interface Env {
   EMAIL_ACCOUNT_RATE?: { limit(input: { key: string }): Promise<{ success: boolean }> };
   AGENT_SESSION_RATE?: { limit(input: { key: string }): Promise<{ success: boolean }> };
 }
-type Auth = { accountHash: string; sessionHash: string; verifiedAt: number | null };
+type Auth = { accountHash: string; sessionHash: string; verifiedAt: number | null; email: string | null };
 type Context = { Bindings: Env; Variables: { subject: Subject } };
 const app = new Hono<Context>();
 const json = (data: unknown, status = 200): Response => Response.json(data, { status });
@@ -52,7 +52,7 @@ async function session(c: AppContext): Promise<Auth | null> {
   if (!match) return null;
   const sessionHash = await digest(match[1]!);
   const row = await registry(c.env, { op: 'session', hash: sessionHash });
-  return row ? { accountHash: row.accountHash, sessionHash, verifiedAt: row.verifiedAt } : null;
+  return row ? { accountHash: row.accountHash, sessionHash, verifiedAt: row.verifiedAt, email: typeof row.email === 'string' ? row.email : null } : null;
 }
 async function agent(c: AppContext): Promise<Subject | null> {
   const id = c.req.header('x-agent-session'), timestamp = c.req.header('x-agent-timestamp');
@@ -112,7 +112,7 @@ app.post('/v1/auth/email/start', async c => {
   const hash = await emailHash(email, c.env.EMAIL_HASH_KEY);
   const ipHash = await digest(c.req.header('cf-connecting-ip') ?? 'unknown');
   const token = randomToken();
-  const local = await registry(c.env, { op: 'emailStart', ipHash, emailHash: hash, tokenHash: await digest(token) });
+  const local = await registry(c.env, { op: 'emailStart', ipHash, emailHash: hash, tokenHash: await digest(token), email });
   const ipLimit = c.env.EMAIL_IP_RATE ? await c.env.EMAIL_IP_RATE.limit({ key: ipHash }) : { success: true };
   const emailLimit = c.env.EMAIL_ACCOUNT_RATE ? await c.env.EMAIL_ACCOUNT_RATE.limit({ key: hash }) : { success: true };
   // Always identical status and shape. No account-existence conditional is present.
@@ -232,9 +232,10 @@ app.post('/v1/journeys', async c => {
   const credentials = await registry(c.env, { op: 'credentials', accountHash: auth.accountHash });
   if (!credentials.length) return failure('forbidden', 403);
   const b = await payload(c).catch(() => null);
-  if (!b || !validString(b.name, 200) || !validString(b.creatorEmail, 254) || !object(b.creator) || !validString(b.creator.id, 128) || !validString(b.creator.recipient, 1024) || !validString(b.creator.signingKey, 1024) || !encrypted(b.genesis) || !encrypted(b.recoveryWrap, 100_000) || !validString(b.minClientVersion, 32)) return failure('invalid-request', 400);
-  const creatorEmail = b.creatorEmail.trim().toLowerCase();
-  if (await emailHash(creatorEmail, c.env.EMAIL_HASH_KEY) !== auth.accountHash) return failure('forbidden', 403);
+  if (!b || !validString(b.name, 200) || !object(b.creator) || !validString(b.creator.id, 128) || !validString(b.creator.recipient, 1024) || !validString(b.creator.signingKey, 1024) || !encrypted(b.genesis) || !encrypted(b.recoveryWrap, 100_000) || !validString(b.minClientVersion, 32)) return failure('invalid-request', 400);
+  // The creator's address comes from the verified sign-in, never from the request body.
+  const creatorEmail = auth.email;
+  if (!creatorEmail || await emailHash(creatorEmail, c.env.EMAIL_HASH_KEY) !== auth.accountHash) return failure('unauthorized', 401);
   const id = b.id;
   if (!isId(id)) return failure('invalid-request', 400);
   const initialWraps = wraps(b.wraps, 1);

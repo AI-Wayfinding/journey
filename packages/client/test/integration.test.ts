@@ -62,7 +62,7 @@ async function journey(owner: Owner) {
   const recovery = await createAgeIdentity();
   const recoveryWrap = (await wrapJourneyKey(key, [{ id: 'recovery', recipient: recovery.recipient }]))[0]!.ciphertext;
   const wraps = (await wrapJourneyKey(key, [{ id: owner.principal, recipient: owner.age.recipient }])).map(wrap => ({ principal: wrap.recipient, epoch: wrap.epoch, wrap: wrap.ciphertext }));
-  const created = await request('/v1/journeys', 'POST', { id, name: 'Journey test', creatorEmail: owner.email, creator: { id: owner.principal, recipient: owner.age.recipient, signingKey: owner.signing.publicKey }, genesis: await cipherLog(key, id, first), wraps, recoveryWrap, minClientVersion: '0.1.0' }, { Cookie: owner.cookie });
+  const created = await request('/v1/journeys', 'POST', { id, name: 'Journey test', creator: { id: owner.principal, recipient: owner.age.recipient, signingKey: owner.signing.publicKey }, genesis: await cipherLog(key, id, first), wraps, recoveryWrap, minClientVersion: '0.1.0' }, { Cookie: owner.cookie });
   expect(created.status).toBe(201);
   return { id, key, entries: [first] };
 }

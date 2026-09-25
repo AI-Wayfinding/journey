@@ -23,7 +23,7 @@ export function sequenceCursor(value: string | undefined, fallback: number): num
 // Only the Worker calls these objects; the public JSON boundary validates and copies named fields first.
 export interface Subject { principal: string; accountHash?: string; agent?: boolean }
 export type RegistryMessage =
-  | { op: 'emailStart'; ipHash: string; emailHash: string; tokenHash: string }
+  | { op: 'emailStart'; ipHash: string; emailHash: string; tokenHash: string; email: string }
   | { op: 'emailVerify'; tokenHash: string; sessionHash: string }
   | { op: 'session' | 'logout'; hash: string }
   | { op: 'credentials' | 'journeys' | 'keysGet' | 'prfSalt'; accountHash: string }
