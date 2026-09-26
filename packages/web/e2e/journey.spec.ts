@@ -1,11 +1,11 @@
-import { expect, test, type Browser, type BrowserContext, type Page } from '@playwright/test';
+import { expect, test, type Browser, type BrowserContext, type CDPSession, type Page } from '@playwright/test';
 import { open, unwrapJourneyKey } from '@ai-wayfinding/core';
 import type { Envelope, JourneyKey } from '@ai-wayfinding/core';
 import { agentWritesItem, requestAgent } from './agent.js';
 
 declare global { interface Window { __passkeyCalls: { create: number; get: number } } }
 const calls = (page: Page) => page.evaluate(() => window.__passkeyCalls);
-async function browserPerson(browser: Browser, hasPrf = true, omitPrfOnCreate = false): Promise<{ page: Page; context: BrowserContext; requests: string[] }> {
+async function browserPerson(browser: Browser, hasPrf = true, omitPrfOnCreate = false): Promise<{ page: Page; context: BrowserContext; requests: string[]; cdp: CDPSession; authenticatorId: string }> {
   const context = await browser.newContext();
   const page = await context.newPage();
   await page.addInitScript(({ omitPrfOnCreate }) => {
@@ -29,13 +29,15 @@ async function browserPerson(browser: Browser, hasPrf = true, omitPrfOnCreate = 
   }, { omitPrfOnCreate });
   const cdp = await context.newCDPSession(page);
   await cdp.send('WebAuthn.enable');
-  await cdp.send('WebAuthn.addVirtualAuthenticator', { options: { protocol: 'ctap2', transport: 'internal', hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true, hasPrf } });
+  const { authenticatorId } = await cdp.send('WebAuthn.addVirtualAuthenticator', { options: { protocol: 'ctap2', transport: 'internal', hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true, hasPrf } });
   const requests: string[] = [];
   page.on('request', request => requests.push(request.url()));
-  return { page, context, requests };
+  return { page, context, requests, cdp, authenticatorId };
 }
 async function signUp(page: Page, email: string): Promise<void> {
-  await page.goto('/sign-in');
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: "Let's get started" })).toBeVisible();
+  await page.getByRole('link', { name: 'Start your journey' }).click();
   await page.getByLabel('Email address').fill(email);
   await page.getByRole('button', { name: 'Send sign-in link' }).click();
   await expect(page.getByRole('heading', { name: 'Check your email' })).toBeVisible();
@@ -53,6 +55,39 @@ async function signUp(page: Page, email: string): Promise<void> {
   expect(count.get).toBeLessThanOrEqual(1);
   console.log(`Sign-up taps: ${count.create} create, ${count.get} get`);
 }
+
+test('start, continue with a discoverable passkey in a new page, and email a journey invitation', async ({ browser }) => {
+  const owner = await browserPerson(browser);
+  const second = await browserPerson(browser);
+  try {
+    const email = `continue-${Date.now()}@example.org`;
+    await signUp(owner.page, email);
+    await owner.page.getByRole('link', { name: 'Start a journey' }).first().click();
+    await expect(owner.page.getByLabel('Who is it for?')).toHaveCount(0);
+    await owner.page.getByLabel('Journey name').fill('A shared beginning');
+    await owner.page.getByRole('button', { name: 'Create journey' }).click();
+    await owner.page.getByLabel('I have saved my recovery key somewhere safe.').check();
+    await owner.page.getByRole('button', { name: 'Continue to journey' }).click();
+    await owner.page.getByRole('link', { name: 'Share this journey' }).click();
+    const guestEmail = `invited-${Date.now()}@example.org`;
+    await owner.page.getByLabel('Email addresses (separate with commas)').fill(guestEmail);
+    await owner.page.getByRole('button', { name: 'Send invitation' }).click();
+    await expect(owner.page.getByText(`Invitation sent to ${guestEmail}.`)).toBeVisible();
+    const delivered = await owner.page.request.get(`/__test/email?address=${encodeURIComponent(guestEmail)}`);
+    const { text } = await delivered.json() as { text: string };
+    expect(text).toContain('/invite#');
+    await second.page.goto(/https?:\/\/[^\s]+\/invite#[A-Za-z0-9_-]+/.exec(text)![0]!);
+    await expect(second.page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
+    await owner.page.goto('/'); // A fresh load clears the in-memory keys; the CDP authenticator stays with this page.
+    await expect(owner.page.getByRole('heading', { name: "Let's get started" })).toBeVisible();
+    await owner.page.getByRole('link', { name: 'Continue your journey' }).click();
+    await expect(owner.page.getByLabel('Email address')).toHaveCount(0);
+    await owner.page.getByRole('button', { name: 'Continue with passkey' }).click();
+    await expect(owner.page.getByRole('heading', { name: 'A place to find your way' })).toBeVisible();
+    await owner.page.getByRole('link', { name: 'A shared beginning' }).click();
+    await expect(owner.page.getByRole('heading', { name: 'A shared beginning' })).toBeVisible();
+  } finally { await owner.context.close(); await second.context.close(); }
+});
 
 test('missing PRF output at creation uses the same passkey once more', async ({ browser }) => {
   const person = await browserPerson(browser, true, true);
@@ -94,6 +129,7 @@ test('two people share a journey with PRF passkeys and same-origin assets', asyn
     await alice.page.getByLabel('Journey name').fill('Our shared path');
     await alice.page.getByLabel('Description (optional)').fill('A place to work together');
     await expect(alice.page.getByLabel('Your email address')).toHaveCount(0);
+    await expect(alice.page.getByLabel('Who is it for?')).toHaveCount(0);
     await alice.page.getByRole('button', { name: 'Create journey' }).click();
     await expect(alice.page.getByRole('heading', { name: 'Your recovery key' })).toBeVisible();
     const recovery = await alice.page.locator('#recovery-copy-value').textContent();
@@ -111,8 +147,9 @@ test('two people share a journey with PRF passkeys and same-origin assets', asyn
     await expect(alice.page.getByRole('heading', { name: 'First observation' })).toBeVisible();
     const itemPath = new URL(alice.page.url()).pathname;
     await alice.page.getByRole('link', { name: 'Back to journey' }).click();
-    await alice.page.getByRole('link', { name: 'People & agents' }).click();
-    await alice.page.getByRole('button', { name: 'Create invitation link' }).click();
+    await alice.page.getByRole('link', { name: 'Share this journey' }).click();
+    await expect(alice.page.getByRole('heading', { name: 'Share this journey with other wayfinders' })).toBeVisible();
+    await alice.page.getByRole('button', { name: 'Copy link instead' }).click();
     const link = (await alice.page.locator('#invite-copy-value').textContent())!;
     expect(link).toMatch(/\/invite#[A-Za-z0-9_-]{43}/);
 
@@ -133,7 +170,7 @@ test('two people share a journey with PRF passkeys and same-origin assets', asyn
     await bob.page.getByRole('button', { name: 'Ask to join' }).click();
     await expect(bob.page.getByRole('heading', { name: 'Waiting for a member to let you in' })).toBeVisible();
     await alice.page.getByRole('link', { name: 'Back to journey' }).click();
-    await alice.page.getByRole('link', { name: 'People & agents' }).click();
+    await alice.page.getByRole('link', { name: 'Share this journey' }).click();
     await alice.page.getByRole('button', { name: 'Let in' }).click();
     await expect(bob.page.getByRole('heading', { name: 'Our shared path' })).toBeVisible({ timeout: 20_000 });
     const bobLists = await bob.page.request.get('/v1/journeys');
@@ -177,7 +214,7 @@ test('two people share a journey with PRF passkeys and same-origin assets', asyn
     await alice.page.getByRole('link', { name: 'People & agents' }).click();
     await alice.page.getByRole('link', { name: 'Back to journey' }).click();
     await expect(alice.page.getByRole('link', { name: 'Agent observation' })).toBeVisible();
-    await alice.page.getByRole('link', { name: 'People & agents' }).click();
+    await alice.page.getByRole('link', { name: 'Share this journey' }).click();
     alice.page.on('dialog', dialog => void dialog.accept());
     await alice.page.locator(`[data-remove="${bobPrincipal}"]`).click();
     await expect(alice.page.locator(`[data-remove="${bobPrincipal}"]`)).toHaveCount(0, { timeout: 20_000 });
@@ -201,9 +238,9 @@ test('two people share a journey with PRF passkeys and same-origin assets', asyn
     expect(bob.requests.every(url => new URL(url).hostname === 'localhost')).toBeTruthy();
     expect(itemPath).toContain(journeyPath);
     await alice.page.getByRole('link', { name: 'Back to journey' }).click();
-    await alice.page.getByRole('link', { name: 'People & agents' }).click();
+    await alice.page.getByRole('link', { name: 'Share this journey' }).click();
     await alice.page.getByLabel('Invitation').selectOption('support');
-    await alice.page.getByRole('button', { name: 'Create invitation link' }).click();
+    await alice.page.getByRole('button', { name: 'Copy link instead' }).click();
     const supportLink = (await alice.page.locator('#invite-copy-value').textContent())!;
     await signUp(support.page, `support-${Date.now()}@example.org`);
     await support.page.getByLabel('Invitation link').fill(supportLink);
@@ -211,13 +248,13 @@ test('two people share a journey with PRF passkeys and same-origin assets', asyn
     await support.page.getByRole('button', { name: 'Ask to join' }).click();
     await expect(support.page.getByRole('heading', { name: 'Waiting for a member to let you in' })).toBeVisible();
     await alice.page.getByRole('link', { name: 'Back to journey' }).click();
-    await alice.page.getByRole('link', { name: 'People & agents' }).click();
+    await alice.page.getByRole('link', { name: 'Share this journey' }).click();
     await expect(alice.page.getByText('Wayfinding support (Hypha), read only')).toBeVisible();
     await alice.page.getByRole('button', { name: 'Let in' }).click();
     await expect(support.page.getByRole('heading', { name: 'Our shared path' })).toBeVisible({ timeout: 20_000 });
     await expect(support.page.getByRole('link', { name: 'Add an item' })).toHaveCount(0);
     await alice.page.getByRole('link', { name: 'Back to journey' }).click();
-    await alice.page.getByRole('link', { name: 'People & agents' }).click();
+    await alice.page.getByRole('link', { name: 'Share this journey' }).click();
     await expect(alice.page.getByText('Wayfinding support (Hypha)')).toBeVisible({ timeout: 10_000 });
     const supportLists = await support.page.request.get('/v1/journeys');
     const supportPrincipal = ((await supportLists.json()) as { journeys: { id: string; principal: string }[] }).journeys.find(j => journeyPath.endsWith(j.id))!.principal;

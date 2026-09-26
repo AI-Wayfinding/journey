@@ -1,9 +1,9 @@
 import { Hono } from 'hono';
 import { isId, newId, type Envelope } from '@ai-wayfinding/core';
 import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse } from '@simplewebauthn/server';
-import { base64url, digest, emailHash, equalSecret, randomToken, unbase64url, verifyAgentSignature } from './crypto.js';
+import { appPrfSalt, base64url, digest, emailHash, equalSecret, randomToken, unbase64url, verifyAgentSignature } from './crypto.js';
 import { EnclaveObject } from './enclave.js';
-import { magicLinkEmail } from './email.js';
+import { invitationEmail, magicLinkEmail } from './email.js';
 import { Registry } from './registry.js';
 import { failure, limitNumber, object, sequenceCursor, validEpoch, validExpiry, validKind, validScope, validSeq, validString } from './types.js';
 import type { AccessChange, CreateJourney, EnclaveMessage, EpochWrap, RegistryMessage, Subject } from './types.js';
@@ -27,6 +27,7 @@ type Context = { Bindings: Env; Variables: { subject: Subject } };
 const app = new Hono<Context>();
 const json = (data: unknown, status = 200): Response => Response.json(data, { status });
 const cookie = (value: string): string => 'wayfinding_session=' + value + '; Path=/v1; HttpOnly; Secure; SameSite=Strict; Max-Age=43200';
+const discoveryCookie = (value: string): string => 'wayfinding_discovery=' + value + '; Path=/v1/auth/passkey; HttpOnly; Secure; SameSite=Strict; Max-Age=300';
 type AppContext = import('hono').Context<Context>;
 async function registry(env: Env, data: RegistryMessage): Promise<any> {
   const stub = env.REGISTRY.get(env.REGISTRY.idFromName('registry-v1'));
@@ -87,8 +88,8 @@ function sealedPersonKey(value: unknown): value is string {
   if (!validString(value, 100_000) || !/^[A-Za-z0-9_-]+$/.test(value)) return false;
   try { return unbase64url(value).length >= 64; } catch { return false; }
 }
-function sealedKeys(value: unknown): value is { version: 1; identity: string; signing: string } {
-  return object(value) && Object.keys(value).every(key => ['version', 'identity', 'signing'].includes(key)) && value.version === 1 && sealedPersonKey(value.identity) && sealedPersonKey(value.signing);
+function sealedKeys(value: unknown, migration = false): value is { version: 1; identity: string; signing: string; migrate?: true } {
+  return object(value) && Object.keys(value).every(key => ['version', 'identity', 'signing', ...(migration ? ['migrate'] : [])].includes(key)) && value.version === 1 && (value.migrate === undefined || migration && value.migrate === true) && sealedPersonKey(value.identity) && sealedPersonKey(value.signing);
 }
 type RegistrationResponse = Parameters<typeof verifyRegistrationResponse>[0]['response'];
 type AuthenticationResponse = Parameters<typeof verifyAuthenticationResponse>[0]['response'];
@@ -144,10 +145,10 @@ app.post('/v1/auth/passkey/register/options', async c => {
   if (!auth) return failure('unauthorized', 401);
   const existing = await registry(c.env, { op: 'credentials', accountHash: auth.accountHash });
   if (existing.length) return failure('forbidden', 403);
-  const salt = await registry(c.env, { op: 'prfSalt', accountHash: auth.accountHash });
-  const options = await generateRegistrationOptions({ rpName: 'Wayfinding', rpID: c.env.RP_ID, userName: auth.accountHash, userID: new Uint8Array(unbase64url(auth.accountHash)), authenticatorSelection: { residentKey: 'required', userVerification: 'required' }, extensions: { prf: { eval: { first: salt.prfSalt } } }, excludeCredentials: existing.map((r: any) => ({ id: r.id, transports: transportList(r.transports) })) });
+  if (!validString(c.env.EMAIL_HASH_KEY)) return failure('internal', 500);
+  const options = await generateRegistrationOptions({ rpName: 'Wayfinding', rpID: c.env.RP_ID, userName: auth.accountHash, userID: new Uint8Array(unbase64url(auth.accountHash)), authenticatorSelection: { residentKey: 'required', userVerification: 'required' }, extensions: { prf: { eval: { first: unbase64url(await appPrfSalt(c.env.EMAIL_HASH_KEY)) } } }, excludeCredentials: existing.map((r: any) => ({ id: r.id, transports: transportList(r.transports) })) });
   await registry(c.env, { op: 'challengeSet', sessionHash: auth.sessionHash, challenge: options.challenge, kind: 'register' });
-  return json(options);
+  return json({ ...options, extensions: { prf: { eval: { first: await appPrfSalt(c.env.EMAIL_HASH_KEY) } } } });
 });
 app.post('/v1/auth/passkey/register/verify', async c => {
   const auth = await session(c); if (!auth) return failure('unauthorized', 401);
@@ -185,10 +186,12 @@ app.post('/v1/auth/passkey/login/options', async c => {
   const auth = await session(c); if (!auth) return failure('unauthorized', 401);
   const credentials = await registry(c.env, { op: 'credentials', accountHash: auth.accountHash });
   if (!credentials.length) return failure('unauthorized', 401);
-  const salt = await registry(c.env, { op: 'prfSalt', accountHash: auth.accountHash });
-  const options = await generateAuthenticationOptions({ rpID: c.env.RP_ID, userVerification: 'required', extensions: { prf: { eval: { first: salt.prfSalt } } }, allowCredentials: credentials.map((r: any) => ({ id: r.id, transports: transportList(r.transports) })) });
+  if (!validString(c.env.EMAIL_HASH_KEY)) return failure('internal', 500);
+  const legacy = await registry(c.env, { op: 'legacySalt', accountHash: auth.accountHash });
+  const appSalt = await appPrfSalt(c.env.EMAIL_HASH_KEY);
+  const options = await generateAuthenticationOptions({ rpID: c.env.RP_ID, userVerification: 'required', extensions: { prf: { eval: { first: unbase64url(legacy?.prfSalt || appSalt), ...(legacy?.prfSalt ? { second: unbase64url(appSalt) } : {}) } } }, allowCredentials: credentials.map((r: any) => ({ id: r.id, transports: transportList(r.transports) })) });
   await registry(c.env, { op: 'challengeSet', sessionHash: auth.sessionHash, challenge: options.challenge, kind: 'login' });
-  return json(options);
+  return json({ ...options, extensions: { prf: { eval: { first: legacy?.prfSalt || appSalt, ...(legacy?.prfSalt ? { second: appSalt } : {}) } } } });
 });
 app.post('/v1/auth/passkey/login/verify', async c => {
   const auth = await session(c); if (!auth) return failure('unauthorized', 401);
@@ -203,7 +206,38 @@ app.post('/v1/auth/passkey/login/verify', async c => {
     if (!result.verified) return failure('unauthorized', 401);
     const used = await registry(c.env, { op: 'credentialUse', id: credential.id, accountHash: auth.accountHash, counter: result.authenticationInfo.newCounter, sessionHash: auth.sessionHash });
     if (!used) return failure('unauthorized', 401);
-    return json({ verified: true });
+    const legacy = await registry(c.env, { op: 'legacySalt', accountHash: auth.accountHash });
+    return json({ verified: true, migrate: Boolean(legacy?.prfSalt) });
+  } catch { return failure('unauthorized', 401); }
+});
+app.post('/v1/auth/passkey/start', async c => {
+  if (!validString(c.env.EMAIL_HASH_KEY)) return failure('internal', 500);
+  const ipHash = await digest(c.req.header('cf-connecting-ip') ?? 'unknown');
+  if (!(await registry(c.env, { op: 'inviteRate', journeyId: 'passkey', accountHash: ipHash })).allowed) return failure('rate-limited', 429);
+  const options = await generateAuthenticationOptions({ rpID: c.env.RP_ID, userVerification: 'required', extensions: { prf: { eval: { first: unbase64url(await appPrfSalt(c.env.EMAIL_HASH_KEY)) } } } });
+  const id = randomToken();
+  await registry(c.env, { op: 'challengeSet', sessionHash: await digest(id), challenge: options.challenge, kind: 'discover' });
+  return new Response(JSON.stringify({ ...options, extensions: { prf: { eval: { first: await appPrfSalt(c.env.EMAIL_HASH_KEY) } } } }), { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'Set-Cookie': discoveryCookie(id) } });
+});
+app.post('/v1/auth/passkey/finish', async c => {
+  const data = await payload(c).catch(() => null);
+  if (!data || !authenticationResponse(data.response)) return failure('invalid-request', 400);
+  const id = /(?:^|;\s*)wayfinding_discovery=([A-Za-z0-9_-]+)/.exec(c.req.header('cookie') ?? '')?.[1];
+  if (!id) return failure('unauthorized', 401);
+  const challenge = await registry(c.env, { op: 'challengeTake', sessionHash: await digest(id), kind: 'discover' });
+  if (!challenge) return failure('unauthorized', 401);
+  const credential = await registry(c.env, { op: 'credentialById', id: data.response.id });
+  if (!credential?.email || credential.prfSalt) return failure('unauthorized', 401);
+  try {
+    const result = await verifyAuthenticationResponse({ response: data.response, expectedChallenge: challenge.challenge, expectedOrigin: c.env.ORIGIN, expectedRPID: c.env.RP_ID, requireUserVerification: true, credential: { id: credential.id, publicKey: new Uint8Array(unbase64url(credential.publicKey)), counter: credential.counter, transports: transportList(credential.transports) } });
+    if (!result.verified) return failure('unauthorized', 401);
+    const sessionId = randomToken();
+    const used = await registry(c.env, { op: 'passkeySession', id: credential.id, accountHash: credential.accountHash, counter: result.authenticationInfo.newCounter, sessionHash: await digest(sessionId) });
+    if (!used) return failure('unauthorized', 401);
+    const headers = new Headers({ 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    headers.append('Set-Cookie', cookie(sessionId));
+    headers.append('Set-Cookie', discoveryCookie('') + '; Max-Age=0');
+    return new Response(JSON.stringify({ verified: true }), { headers });
   } catch { return failure('unauthorized', 401); }
 });
 app.post('/v1/auth/logout', async c => {
@@ -222,8 +256,9 @@ app.put('/v1/me/keys', async c => {
   const auth = await session(c);
   if (!auth || auth.verifiedAt === null) return failure('unauthorized', 401);
   const b = await payload(c).catch(() => null);
-  if (!sealedKeys(b)) return failure('invalid-request', 400);
-  await registry(c.env, { op: 'keysPut', accountHash: auth.accountHash, version: 1, identity: b.identity, signing: b.signing });
+  if (!sealedKeys(b, true)) return failure('invalid-request', 400);
+  const saved = await registry(c.env, { op: 'keysPut', accountHash: auth.accountHash, sessionHash: auth.sessionHash, version: 1, identity: b.identity, signing: b.signing, migrate: b.migrate === true });
+  if (!saved) return failure('forbidden', 403);
   return new Response(null, { status: 204, headers: { 'Cache-Control': 'no-store' } });
 });
 
@@ -342,10 +377,23 @@ app.get('/v1/journeys/:id/wraps/me', async c => enclave(c.env, c.req.param('id')
 app.get('/v1/journeys/:id/export', async c => enclave(c.env, c.req.param('id'), { op: 'export', journeyId: c.req.param('id'), subject: journeySubject(c) }));
 app.post('/v1/journeys/:id/invites', async c => {
   const b = await payload(c).catch(() => null), id = c.req.param('id');
-  if (!b || !validString(b.inviteIdHash, 43) || !/^[A-Za-z0-9_-]{43}$/.test(b.inviteIdHash) || !validExpiry(b.expiresAt) || b.expiresAt > Date.now() + 604_800_000 || b.support !== undefined && typeof b.support !== 'boolean') return failure('invalid-request', 400);
+  if (!b || !validString(b.inviteIdHash, 43) || !/^[A-Za-z0-9_-]{43}$/.test(b.inviteIdHash) || !validExpiry(b.expiresAt) || b.expiresAt > Date.now() + 604_800_000 || b.support !== undefined && typeof b.support !== 'boolean' || b.email !== undefined && (!validString(b.email, 254) || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(b.email))) return failure('invalid-request', 400);
+  if (b.email !== undefined && (journeySubject(c).agent || !journeySubject(c).accountHash || !validString(b.inviteId, 43) || !/^[A-Za-z0-9_-]{43}$/.test(b.inviteId) || await digest(b.inviteId) !== b.inviteIdHash)) return failure('invalid-request', 400);
   const access = await enclave(c.env, id, { op: 'inviteAccess', journeyId: id, subject: journeySubject(c) });
   if (!access.ok) return access;
+  if (b.email !== undefined && !(await registry(c.env, { op: 'inviteRate', journeyId: id, accountHash: journeySubject(c).accountHash! })).allowed) return failure('rate-limited', 429);
   await registry(c.env, { op: 'inviteCreate', journeyId: id, hash: b.inviteIdHash, expires: b.expiresAt, support: b.support === true });
+  if (typeof b.email === 'string') {
+    const email = b.email.trim().toLowerCase();
+    const link = c.env.ORIGIN + '/invite#' + b.inviteId;
+    try {
+      await c.env.MAGIC_EMAIL.send({ to: email, from: { name: 'Wayfinding', email: 'noreply@wayfinding.support' }, replyTo: 'hello@wayfinding.support', subject: 'An invitation to a Wayfinding journey', ...invitationEmail(link) });
+    } catch (cause) {
+      // Delivery errors can include the address or invitation URL; never write their message to logs.
+      console.error('invitation send failed', cause instanceof Error ? cause.name : 'unknown');
+      return failure('internal', 500);
+    }
+  }
   return json({ status: 'created' }, 201);
 });
 app.get('/v1/journeys/:id/invites/pending', async c => {

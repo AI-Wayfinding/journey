@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { clearPersonKeys, getPersonKeys, onPersonKeysCleared, rememberJourneyKey, sealPersonKeys, unlockPersonKeys } from './keys.js';
+import { clearPersonKeys, getPersonKeys, onPersonKeysCleared, rememberJourneyKey, resealPersonKeys, sealPersonKeys, unlockPersonKeys } from './keys.js';
 
 const prf = () => Uint8Array.from({ length: 32 }, (_, i) => i + 1);
 afterEach(() => { clearPersonKeys(); vi.useRealTimers(); vi.unstubAllGlobals(); });
@@ -28,6 +28,14 @@ describe('passkey-sealed person keys', () => {
     expect(() => keys.signingPrivateKey).toThrow('Your keys are locked');
   });
 
+  it('reseals an old account with the new PRF output without changing its keys', async () => {
+    const original = await sealPersonKeys(prf());
+    const updated = await resealPersonKeys(original.sealed, prf(), new Uint8Array(32).fill(9));
+    await expect(unlockPersonKeys(updated, prf())).rejects.toThrow();
+    const keys = await unlockPersonKeys(updated, new Uint8Array(32).fill(9));
+    expect(keys.recipient).toBe(original.public.recipient);
+    expect(keys.signingKey).toBe(original.public.signingKey);
+  });
   it('forgets usable keys after 30 minutes without activity', async () => {
     const generated = await sealPersonKeys(prf());
     vi.useFakeTimers();

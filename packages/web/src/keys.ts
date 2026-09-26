@@ -97,6 +97,15 @@ export async function sealPersonKeys(prfOutput: Uint8Array): Promise<{ sealed: S
   });
 }
 
+/** Move existing ciphertext to the app-wide PRF input without changing the private keys. */
+export async function resealPersonKeys(sealed: SealedPersonKeys, oldOutput: Uint8Array, newOutput: Uint8Array): Promise<SealedPersonKeys> {
+  return withPrfKey(oldOutput, async oldKey => {
+    const identity = await decrypt(oldKey, 'identity', sealed.identity);
+    const signing = await decrypt(oldKey, 'signing', sealed.signing);
+    return withPrfKey(newOutput, async newKey => ({ version: 1, identity: await encrypt(newKey, 'identity', identity), signing: await encrypt(newKey, 'signing', signing) }));
+  });
+}
+
 /** Decrypt only after one passkey tap; retain usable keys in module memory. */
 export async function unlockPersonKeys(sealed: SealedPersonKeys, prfOutput: Uint8Array): Promise<PersonKeys> {
   return withPrfKey(prfOutput, async key => {

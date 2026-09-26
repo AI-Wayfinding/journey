@@ -55,6 +55,19 @@ export class Registry {
         this.sql.exec('UPDATE schema_version SET version=5');
       });
     }
+    if (Number(this.sql.exec('SELECT version FROM schema_version').toArray()[0]?.version) < 6) {
+      this.state.storage.transactionSync(() => {
+        // Plain account email so a returning person can continue with a passkey alone.
+        this.sql.exec('ALTER TABLE accounts ADD COLUMN email TEXT');
+        this.sql.exec('UPDATE schema_version SET version=6');
+      });
+    }
+    if (Number(this.sql.exec('SELECT version FROM schema_version').toArray()[0]?.version) < 7) {
+      this.state.storage.transactionSync(() => {
+        this.sql.exec('ALTER TABLE sessions ADD COLUMN migrationAllowed INTEGER NOT NULL DEFAULT 0');
+        this.sql.exec('UPDATE schema_version SET version=7');
+      });
+    }
     this.sql.exec('CREATE TABLE IF NOT EXISTS nonces (sessionId TEXT NOT NULL, nonce TEXT NOT NULL, expires INTEGER NOT NULL, PRIMARY KEY(sessionId,nonce))');
     this.sql.exec('CREATE TABLE IF NOT EXISTS rates (key TEXT PRIMARY KEY, start INTEGER NOT NULL, count INTEGER NOT NULL)');
   }
@@ -90,6 +103,7 @@ export class Registry {
             let account = this.one('SELECT id FROM accounts WHERE hash=?', hash);
             const needsRegistration = !account || !this.one('SELECT id FROM credentials WHERE accountHash=? LIMIT 1', hash);
             if (!account) { this.sql.exec('INSERT INTO accounts(hash,id) VALUES(?,?)', hash, randomToken(16)); account = this.one('SELECT id FROM accounts WHERE hash=?', hash); }
+            if (row.email) this.sql.exec('UPDATE accounts SET email=? WHERE hash=?', row.email, hash);
             this.sql.exec('INSERT INTO sessions(hash,accountHash,created,expires,lastUsed,verifiedAt,email) VALUES(?,?,?,?,?,NULL,?)', input.sessionHash, hash, now, now + 43_200_000, now, row.email ?? null);
             return { accountHash: hash, accountId: account!.id, newAccount: needsRegistration };
           }
@@ -101,16 +115,16 @@ export class Registry {
           }
           case 'logout': this.sql.exec('DELETE FROM sessions WHERE hash=?', input.hash); return { ok: true };
           case 'credentials': return this.sql.exec('SELECT id,publicKey,counter,transports FROM credentials WHERE accountHash=?', input.accountHash).toArray();
-          case 'prfSalt': {
-            this.sql.exec('UPDATE accounts SET prfSalt=COALESCE(prfSalt,?) WHERE hash=?', randomToken(32), input.accountHash);
-            return this.one('SELECT prfSalt FROM accounts WHERE hash=?', input.accountHash);
-          }
+          case 'legacySalt': return this.one('SELECT prfSalt FROM accounts WHERE hash=?', input.accountHash);
           case 'keysGet': return this.one('SELECT version,identity,signing FROM sealed_keys WHERE accountHash=? AND version=1', input.accountHash);
           case 'keysPut': {
+            if (input.migrate && (!input.sessionHash || !this.one('SELECT hash FROM sessions WHERE hash=? AND accountHash=? AND migrationAllowed=1', input.sessionHash, input.accountHash))) return null;
             this.sql.exec('INSERT INTO sealed_keys(accountHash,version,identity,signing) VALUES(?,?,?,?) ON CONFLICT(accountHash) DO UPDATE SET version=excluded.version,identity=excluded.identity,signing=excluded.signing', input.accountHash, input.version, input.identity, input.signing);
+            if (input.migrate) this.sql.exec('UPDATE accounts SET prfSalt=NULL WHERE hash=?', input.accountHash);
             return { ok: true };
           }
           case 'credential': return this.one('SELECT id,accountHash,publicKey,counter,transports FROM credentials WHERE id=? AND accountHash=?', input.id, input.accountHash);
+          case 'credentialById': return this.one('SELECT c.id,c.accountHash,c.publicKey,c.counter,c.transports,a.email,a.prfSalt FROM credentials c JOIN accounts a ON a.hash=c.accountHash WHERE c.id=?', input.id);
           case 'challengeSet': this.sql.exec('INSERT INTO challenges(sessionHash,challenge,kind,expires) VALUES(?,?,?,?) ON CONFLICT(sessionHash) DO UPDATE SET challenge=excluded.challenge,kind=excluded.kind,expires=excluded.expires', input.sessionHash, input.challenge, input.kind, now + 300_000); return { ok: true };
           case 'challengeTake': {
             const row = this.one('SELECT challenge,kind,expires FROM challenges WHERE sessionHash=?', input.sessionHash);
@@ -127,7 +141,15 @@ export class Registry {
           case 'credentialUse': {
             const updated = this.sql.exec('UPDATE credentials SET counter=? WHERE id=? AND accountHash=? AND (counter<? OR counter=0 AND ?=0)', input.counter, input.id, input.accountHash, input.counter, input.counter);
             if (updated.rowsWritten !== 1) return null;
-            this.sql.exec('UPDATE sessions SET verifiedAt=? WHERE hash=?', now, input.sessionHash); return { ok: true };
+            this.sql.exec('UPDATE sessions SET verifiedAt=?,migrationAllowed=(SELECT prfSalt IS NOT NULL FROM accounts WHERE hash=?) WHERE hash=?', now, input.accountHash, input.sessionHash); return { ok: true };
+          }
+          case 'passkeySession': {
+            const updated = this.sql.exec('UPDATE credentials SET counter=? WHERE id=? AND accountHash=? AND (counter<? OR counter=0 AND ?=0)', input.counter, input.id, input.accountHash, input.counter, input.counter);
+            if (updated.rowsWritten !== 1) return null;
+            const account = this.one('SELECT email,prfSalt FROM accounts WHERE hash=?', input.accountHash);
+            if (!account?.email || account.prfSalt) return null;
+            this.sql.exec('INSERT INTO sessions(hash,accountHash,created,expires,lastUsed,verifiedAt,email) VALUES(?,?,?,?,?,?,?)', input.sessionHash, input.accountHash, now, now + 43_200_000, now, now, account.email);
+            return { ok: true };
           }
           case 'journeyCreate': {
             const data = input.data;
@@ -140,6 +162,14 @@ export class Registry {
           case 'link': this.sql.exec('INSERT OR IGNORE INTO account_principals(accountHash,journeyId,principal) VALUES(?,?,?)', input.accountHash, input.journeyId, input.principal); return { ok: true };
           case 'activity': this.sql.exec('UPDATE journeys SET lastActive=?,memberCount=MAX(0,memberCount+?),storageBytes=MAX(0,storageBytes+?) WHERE id=?', now, input.memberDelta, input.bytes, input.id); return { ok: true };
           case 'inviteCreate': this.sql.exec('INSERT INTO invites(hash,journeyId,expires,support) VALUES(?,?,?,?)', input.hash, input.journeyId, input.expires, input.support ? 1 : 0); return { ok: true };
+          case 'inviteRate': {
+            const key = `invite:${input.journeyId}:${input.accountHash}`;
+            const row = this.one('SELECT start,count FROM rates WHERE key=?', key);
+            const start = row && Number(row.start) + 60_000 > now ? Number(row.start) : now;
+            const count = row && start === Number(row.start) ? Number(row.count) + 1 : 1;
+            this.sql.exec('INSERT INTO rates(key,start,count) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET start=excluded.start,count=excluded.count', key, start, count);
+            return { allowed: count <= 5 };
+          }
           case 'inviteTake': {
             const row = this.one('SELECT journeyId,expires,support FROM invites WHERE hash=? AND expires>? AND used=0', input.hash, now);
             if (!row) return null;

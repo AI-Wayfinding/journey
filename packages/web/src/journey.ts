@@ -80,10 +80,10 @@ export async function appendEntry(ctx: JourneyContext, type: string, body: LogEn
   if (!verified.ok) throw new Error(verified.error.message);
   await api(`/journeys/${ctx.id}/log`, 'POST', { entry: await encryptedEntry(ctx, entry), ...extra }, ctx.principal);
 }
-export async function createJourney(name: string, description: string, kind: 'individual' | 'team', keys: PersonKeys): Promise<{ listing: JourneyListing; recoveryIdentity: string; recoveryRecipient: string; recoveryWrap: string }> {
+export async function createJourney(name: string, description: string, keys: PersonKeys): Promise<{ listing: JourneyListing; recoveryIdentity: string; recoveryRecipient: string; recoveryWrap: string }> {
   const id = newId(), principal = newId(), recovery = await createAgeIdentity();
   const creator: Member = { id: principal, kind: 'person', recipient: keys.recipient, signingKey: keys.signingKey };
-  const first = await signEntry({ v: 1, seq: 0, prev: null, at: new Date().toISOString(), actor: principal, type: 'genesis', body: { journey: id, name, creator, grants: ['members.manage'], mode: 'sealed', visibility: 'private', minClientVersion: '0.1.0', description, journeyKind: kind } }, keys.signingPrivateKey);
+  const first = await signEntry({ v: 1, seq: 0, prev: null, at: new Date().toISOString(), actor: principal, type: 'genesis', body: { journey: id, name, creator, grants: ['members.manage'], mode: 'sealed', visibility: 'private', minClientVersion: '0.1.0', description } }, keys.signingPrivateKey);
   const checked = await verifyLog([first]);
   if (!checked.ok) throw new Error(checked.error.message);
   const key = generateJourneyKey();

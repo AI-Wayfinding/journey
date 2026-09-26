@@ -1,8 +1,9 @@
 import { EXPIRED_LINK } from './messages.js';
+import { prfOutput } from './prf.js';
 import { startAuthentication, startRegistration } from '@simplewebauthn/browser';
 import { newId, signEntry, verifyLog, wrapJourneyKey } from '@ai-wayfinding/core';
 import type { CommentBody, ItemBody, ProtocolRecord } from '@ai-wayfinding/core';
-import { clearPersonKeys, getPersonKeys, onPersonKeysCleared, sealPersonKeys, unlockPersonKeys } from './keys.js';
+import { clearPersonKeys, getPersonKeys, onPersonKeysCleared, resealPersonKeys, sealPersonKeys, unlockPersonKeys } from './keys.js';
 import type { PersonKeys, SealedPersonKeys } from './keys.js';
 import { allRecords, api, appendEntry, createJourney, currentKey, encryptedEntry, exportEncrypted, itemVersions, letIn, listings, removeMember, rotatePending, saveRecord, verifiedJourney } from './journey.js';
 import type { JourneyContext, JourneyListing } from './journey.js';
@@ -38,23 +39,14 @@ function supportedPrfBrowser(): boolean {
 }
 const noPrf = "This passkey can't protect your journey keys. Use your device's own passkeys (iCloud Keychain on Apple devices, Google Password Manager on Android or Chrome), or a password manager that supports PRF, such as a recent 1Password or Bitwarden.";
 const decode = (value: string): Uint8Array => Uint8Array.from(atob(value.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
-type PrfOptions<T> = Omit<T, 'extensions'> & { extensions: { prf: { eval: { first: string } } } };
-function prfOutput(value: unknown): Uint8Array | null {
-  if (typeof value === 'string') { try { const bytes = decode(value); if (bytes.length === 32) return bytes; bytes.fill(0); return null; } catch { return null; } }
-  if (!(value instanceof ArrayBuffer) && !ArrayBuffer.isView(value)) return null;
-  const bytes = value instanceof ArrayBuffer ? new Uint8Array(value) : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-  if (bytes.length !== 32) { bytes.fill(0); return null; }
-  const copy = new Uint8Array(bytes);
-  bytes.fill(0);
-  return copy;
-}
+type PrfOptions<T> = Omit<T, 'extensions'> & { extensions: { prf: { eval: { first: string; second?: string } } } };
 type PasskeyStage = 'register-create' | 'register-get' | 'login';
 // Diagnostics describe only the shape of a passkey response: never the PRF output, keys, credential ids or email.
 function prfShape(value: unknown): { prf: string; enabled: string; first: string; length: number } {
   const prf = value as { enabled?: unknown; results?: { first?: unknown } } | undefined;
   const first = prf?.results?.first;
-  const kind = first === undefined ? 'absent' : typeof first === 'string' ? 'string' : first instanceof ArrayBuffer ? 'arraybuffer' : ArrayBuffer.isView(first) ? 'view' : 'other';
-  const length = typeof first === 'string' ? first.length : first instanceof ArrayBuffer || ArrayBuffer.isView(first) ? first.byteLength : 0;
+  const kind = first === undefined ? 'absent' : typeof first === 'string' ? 'string' : Object.prototype.toString.call(first) === '[object ArrayBuffer]' ? 'arraybuffer' : ArrayBuffer.isView(first) ? 'view' : 'other';
+  const length = typeof first === 'string' ? first.length : kind === 'arraybuffer' || kind === 'view' ? (first as ArrayBuffer).byteLength : 0;
   return { prf: prf ? 'present' : 'absent', enabled: prf?.enabled === true ? 'true' : prf?.enabled === false ? 'false' : 'absent', first: kind, length };
 }
 // The AAGUID names the passkey provider model (for example 1Password or iCloud Keychain), not the person.
@@ -84,14 +76,26 @@ function reportPasskey(report: { stage: PasskeyStage; outcome: 'ok' | 'no-prf' |
 async function authenticatedPrf(): Promise<Uint8Array> {
   const options = await api<PrfOptions<Parameters<typeof startAuthentication>[0]['optionsJSON']>>('/auth/passkey/login/options', 'POST', {});
   let response: Awaited<ReturnType<typeof startAuthentication>>;
-  try { response = await startAuthentication({ optionsJSON: { ...options, extensions: { prf: { eval: { first: decode(options.extensions.prf.eval.first) } } } } }); }
+  try { response = await startAuthentication({ optionsJSON: { ...options, extensions: { prf: { eval: { first: decode(options.extensions.prf.eval.first), ...(options.extensions.prf.eval.second ? { second: decode(options.extensions.prf.eval.second) } : {}) } } } } }); }
   catch (cause) { reportPasskey({ stage: 'login', outcome: 'error', error: errorName(cause) }); throw cause; }
   const output = prfOutput(response.clientExtensionResults?.prf?.results?.first);
   reportPasskey({ stage: 'login', outcome: output ? 'ok' : 'no-output', ...prfShape(response.clientExtensionResults?.prf), attachment: response.authenticatorAttachment });
   if (!output) throw new Error(noPrf);
   try {
     const { id, rawId, type, response: details } = response;
-    await api('/auth/passkey/login/verify', 'POST', { response: { id, rawId, type, response: { clientDataJSON: details.clientDataJSON, authenticatorData: details.authenticatorData, signature: details.signature, userHandle: details.userHandle }, clientExtensionResults: {} } });
+    const result = await api<{ migrate: boolean }>('/auth/passkey/login/verify', 'POST', { response: { id, rawId, type, response: { clientDataJSON: details.clientDataJSON, authenticatorData: details.authenticatorData, signature: details.signature, userHandle: details.userHandle }, clientExtensionResults: {} } });
+    if (result.migrate) {
+      const newOutput = prfOutput(response.clientExtensionResults?.prf?.results?.second);
+      if (!newOutput) throw new Error('Your keys need updating. Use an email link and a passkey that supports two PRF values.');
+      try {
+        const sealed = await api<SealedPersonKeys | null>('/me/keys');
+        if (!sealed) throw new Error('No encrypted keys were saved for this account.');
+        const updated = await resealPersonKeys(sealed, output, new Uint8Array(newOutput));
+        await api('/me/keys', 'PUT', { ...updated, migrate: true });
+        output.fill(0);
+        return newOutput;
+      } catch (cause) { newOutput.fill(0); throw cause; }
+    }
     return output;
   } catch (cause) { output.fill(0); throw cause; }
 }
@@ -108,6 +112,33 @@ async function registrationPrf(credentialId: string, salt: Uint8Array): Promise<
   reportPasskey({ stage: 'register-get', outcome: output ? 'ok' : 'no-output', ...prfShape(result), attachment: (credential as PublicKeyCredential | null)?.authenticatorAttachment ?? undefined });
   if (!output) throw new Error(noPrf);
   return output;
+}
+function startScreen(): void {
+  if (getPersonKeys()) { void home(); return; }
+  render(`<section class="panel"><h1>Let's get started</h1><div class="actions"><a class="button" href="/sign-in">Start your journey</a><a class="button" href="/continue">Continue your journey</a><a class="button" href="/join">Join a journey you've been invited to</a></div></section>`);
+}
+function joinScreen(): void {
+  render('<section class="panel"><h1>Join a journey you\'ve been invited to</h1><p>Open the invitation link from your email, or paste it here.</p><form id="join-link"><label for="invite-link">Invitation link</label><input id="invite-link" name="invite-link" type="url" required /><button type="submit">Open invitation</button></form></section>');
+  form('join-link', async f => { const url = new URL(input(f, 'invite-link')); if (url.origin !== location.origin || url.pathname !== '/invite' || !/^[A-Za-z0-9_-]{43,}$/.test(url.hash.slice(1))) throw new Error('This is not a Wayfinding invitation link.'); navigate('/invite' + url.hash); });
+}
+function continueScreen(): void {
+  render('<section class="panel"><h1>Continue your journey</h1><p>Use your passkey to sign in and unlock your journeys.</p><div class="actions"><button id="passkey-continue">Continue with passkey</button><a href="/sign-in">Use an email link instead</a></div></section>');
+  root.querySelector('#passkey-continue')?.addEventListener('click', () => perform(async () => {
+    try {
+      const options = await api<PrfOptions<Parameters<typeof startAuthentication>[0]['optionsJSON']>>('/auth/passkey/start', 'POST', {});
+      const response = await startAuthentication({ optionsJSON: { ...options, extensions: { prf: { eval: { first: decode(options.extensions.prf.eval.first) } } } } });
+      const output = prfOutput(response.clientExtensionResults?.prf?.results?.first);
+      if (!output) throw new Error(noPrf);
+      try {
+        const { id, rawId, type, response: details } = response;
+        await api('/auth/passkey/finish', 'POST', { response: { id, rawId, type, response: { clientDataJSON: details.clientDataJSON, authenticatorData: details.authenticatorData, signature: details.signature, userHandle: details.userHandle }, clientExtensionResults: {} } });
+        const sealed = await api<SealedPersonKeys | null>('/me/keys');
+        if (!sealed) throw new Error('No encrypted keys were saved for this account.');
+        await unlockPersonKeys(sealed, output);
+        navigate('/');
+      } finally { output.fill(0); }
+    } catch (cause) { throw new Error(`${cause instanceof Error ? cause.message : 'This passkey did not work.'} Use an email link instead if this is an older account or a different passkey.`); }
+  }));
 }
 function signIn(destination = '/'): void {
   requestedRoute = destination === '/sign-in' ? '/' : destination;
@@ -189,9 +220,9 @@ async function home(): Promise<void> {
   form('join-link', async f => { const url = new URL(input(f, 'invite-link')); if (url.origin !== location.origin || url.pathname !== '/invite' || !/^[A-Za-z0-9_-]{43,}$/.test(url.hash.slice(1))) throw new Error('This is not a Wayfinding invitation link.'); navigate('/invite' + url.hash); });
 }
 function newJourney(keys: PersonKeys): void {
-  render(`<section class="panel"><p class="eyebrow">A NEW JOURNEY</p><h1>Start a journey</h1><form id="new-form"><label for="name">Journey name</label><input name="name" id="name" required maxlength="200" /><label for="kind">Who is it for?</label><select name="kind" id="kind"><option value="individual">Individual</option><option value="team">Team</option></select><label for="description">Description (optional)</label><textarea name="description" id="description" placeholder="What brings you here?"></textarea><p class="meta">The server keeps the journey name and the email address you signed in with. The description is encrypted inside your journey.</p><div class="actions"><button type="submit">Create journey</button></div></form></section>`);
+  render(`<section class="panel"><p class="eyebrow">A NEW JOURNEY</p><h1>Start a journey</h1><form id="new-form"><label for="name">Journey name</label><input name="name" id="name" required maxlength="200" /><label for="description">Description (optional)</label><textarea name="description" id="description" placeholder="What brings you here?"></textarea><p class="meta">The server keeps the journey name and the email address you signed in with. The description is encrypted inside your journey.</p><div class="actions"><button type="submit">Create journey</button></div></form></section>`);
   form('new-form', async f => {
-    const result = await createJourney(input(f, 'name'), input(f, 'description'), input(f, 'kind') as 'individual' | 'team', keys);
+    const result = await createJourney(input(f, 'name'), input(f, 'description'), keys);
     recovery = { identity: result.recoveryIdentity, recipient: result.recoveryRecipient, wrap: result.recoveryWrap, listing: result.listing };
     history.replaceState(null, '', `/journeys/${result.listing.id}/recovery`);
     recoveryScreen();
@@ -226,7 +257,7 @@ async function journeyHome(id: string): Promise<void> {
   const records = await allRecords(ctx), items = itemVersions(records).filter(v => !v.deleted && v.item.itemType !== 'recovery');
   const readOnly = ctx.state.members[ctx.principal]?.member.scope === 'read';
   const name = String(ctx.log[0]?.body.name ?? 'Journey');
-  render(`<section class="panel"><p class="eyebrow">JOURNEY</p><h1>${escape(name)}</h1>${ctx.log[0]?.body.description ? `<p>${escape(String(ctx.log[0].body.description))}</p>` : ''}<div class="actions">${readOnly ? '<p class="meta">Your access is read-only.</p>' : `<a class="button" href="/journeys/${id}/add">Add an item</a>`}<a class="button" href="/journeys/${id}/members">People &amp; agents</a><a class="button" href="/journeys/${id}/export">Export</a></div></section><section class="panel"><h2>Items</h2><div class="grid"><div><label for="filter">Filter by type</label><select id="filter"><option value="">All types</option>${[...new Set(items.map(v => v.item.itemType))].map(t => `<option value="${escape(t)}">${escape(t)}</option>`).join('')}</select></div><div><label for="search">Search your items</label><input id="search" type="search" placeholder="Search titles and text" /></div></div><div id="items" class="cards"></div></section>`);
+  render(`<section class="panel"><p class="eyebrow">JOURNEY</p><h1>${escape(name)}</h1>${ctx.log[0]?.body.description ? `<p>${escape(String(ctx.log[0].body.description))}</p>` : ''}<div class="actions">${readOnly ? '<p class="meta">Your access is read-only.</p>' : `<a class="button" href="/journeys/${id}/add">Add an item</a>`}<a class="button" href="/journeys/${id}/members">Share this journey</a><a class="button" href="/journeys/${id}/export">Export</a></div></section><section class="panel"><h2>Items</h2><div class="grid"><div><label for="filter">Filter by type</label><select id="filter"><option value="">All types</option>${[...new Set(items.map(v => v.item.itemType))].map(t => `<option value="${escape(t)}">${escape(t)}</option>`).join('')}</select></div><div><label for="search">Search your items</label><input id="search" type="search" placeholder="Search titles and text" /></div></div><div id="items" class="cards"></div></section>`);
   const showItems = () => { const filter = read('filter'), query = read('search').toLocaleLowerCase(); root.querySelector('#items')!.innerHTML = items.filter(({ item }) => (!filter || item.itemType === filter) && (!query || `${item.title} ${item.body}`.toLocaleLowerCase().includes(query))).map(({ item, root: itemRoot }) => `<article class="card"><p class="meta">${escape(item.itemType)}</p><h3><a href="/journeys/${id}/items/${escape(itemRoot)}">${escape(item.title)}</a></h3><p>${escape(item.body.slice(0, 160))}</p></article>`).join('') || '<p>No matching items.</p>'; };
   root.querySelector('#search')?.addEventListener('input', showItems); root.querySelector('#filter')?.addEventListener('change', showItems); showItems();
 }
@@ -256,19 +287,24 @@ async function membersScreen(id: string): Promise<void> {
   const pendingRotation = ctx.log.at(-1)?.type === 'member.remove';
   const holder = ctx.state.grants[ctx.principal]?.includes('members.manage') ?? false;
   const pending = holder ? (await api<{ pending: { principal: string; recipient: string; signingKey: string; support: number; expires: number | null }[] }>(`/journeys/${id}/invites/pending`, 'GET', undefined, ctx.principal)).pending : [];
-  render(`<section class="panel"><p><a href="/journeys/${id}">← Back to journey</a></p><h1>People &amp; agents</h1><p>Only journey members can see who is here. People who manage members are marked below.</p>${pendingRotation ? '<p class="notice">Key update pending. A person who manages members can finish it on their next visit.</p>' : ''}<ul class="list">${Object.entries(ctx.state.members).map(([memberId, { member, grants }]) => `<li><strong>${member.kind === 'agent' ? 'Agent' : member.support ? 'Wayfinding support (Hypha)' : 'Person'} ${memberId === ctx.principal ? '(you)' : escape(memberId)}</strong><p class="meta">${grants.includes('members.manage') ? 'Manages people' : 'Member'}${member.kind === 'agent' || member.support ? ` · ${escape(member.scope ?? 'readwrite')} · ${escape(member.expiresAt ?? 'session')}` : ''}</p>${holder && memberId !== ctx.principal ? `<div class="actions"><button class="secondary" data-remove="${escape(memberId)}">Remove</button>${member.kind === 'person' && !member.support ? `<button class="secondary" data-grant="${escape(memberId)}">${grants.includes('members.manage') ? 'Stop managing people' : 'Let manage people'}</button>` : ''}</div>` : ''}</li>`).join('')}</ul><div class="actions"><button id="leave" class="secondary">Leave journey</button></div></section>${holder ? `<section class="panel"><h2>Invite someone</h2><form id="invite-form"><label for="invite-scope">Invitation</label><select id="invite-scope" name="invite-scope"><option value="person">Invite a person</option><option value="support">Invite Wayfinding support</option></select><p class="meta">Support joins like any other person. Their access ends after seven days.</p><div class="actions"><button type="submit">Create invitation link</button></div></form><div id="invitation"></div></section><section class="panel"><h2>Waiting to join</h2><ul class="list">${pending.length ? pending.map(row => `<li><code>${escape(row.principal)}</code>${row.support ? ' · Wayfinding support (Hypha), read only' : ''} <button data-let-in="${escape(row.principal)}">Let in</button></li>`).join('') : '<li>No one is waiting.</li>'}</ul></section>` : ''}`);
+  render(`<section class="panel"><p><a href="/journeys/${id}">← Back to journey</a></p><h1>People in this journey</h1><p>Only journey members can see who is here. People who manage members are marked below.</p>${pendingRotation ? '<p class="notice">Key update pending. A person who manages members can finish it on their next visit.</p>' : ''}<ul class="list">${Object.entries(ctx.state.members).map(([memberId, { member, grants }]) => `<li><strong>${member.kind === 'agent' ? 'Agent' : member.support ? 'Wayfinding support (Hypha)' : 'Person'} ${memberId === ctx.principal ? '(you)' : escape(memberId)}</strong><p class="meta">${grants.includes('members.manage') ? 'Manages people' : 'Member'}${member.kind === 'agent' || member.support ? ` · ${escape(member.scope ?? 'readwrite')} · ${escape(member.expiresAt ?? 'session')}` : ''}</p>${holder && memberId !== ctx.principal ? `<div class="actions"><button class="secondary" data-remove="${escape(memberId)}">Remove</button>${member.kind === 'person' && !member.support ? `<button class="secondary" data-grant="${escape(memberId)}">${grants.includes('members.manage') ? 'Stop managing people' : 'Let manage people'}</button>` : ''}</div>` : ''}</li>`).join('')}</ul><div class="actions"><button id="leave" class="secondary">Leave journey</button></div></section>${holder ? `<section class="panel"><h2>Share this journey with other wayfinders</h2><form id="invite-form"><label for="invite-email">Email addresses (separate with commas)</label><input id="invite-email" name="invite-email" type="text" placeholder="friend@example.org" /><label for="invite-scope">Invitation</label><select id="invite-scope" name="invite-scope"><option value="person">Invite a person</option><option value="support">Invite Wayfinding support</option></select><p class="meta">Support joins like any other person. Their access ends after seven days.</p><div class="actions"><button type="submit" id="invite-send">Send invitation</button><button type="button" id="invite-link-only" class="secondary">Copy link instead</button></div></form><div id="invitation"></div></section><section class="panel"><h2>Waiting to join</h2><ul class="list">${pending.length ? pending.map(row => `<li><code>${escape(row.principal)}</code>${row.support ? ' · Wayfinding support (Hypha), read only' : ''} <button data-let-in="${escape(row.principal)}">Let in</button></li>`).join('') : '<li>No one is waiting.</li>'}</ul></section>` : ''}`);
   const fresh = async () => { const latest = await context(id); if (!latest) throw new Error('Sign in again.'); return latest; };
-  form('invite-form', async f => {
+  const invite = async (addresses: string[]) => {
     await fresh();
-    const bytes = crypto.getRandomValues(new Uint8Array(32));
-    const secret = btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(secret)));
-    const inviteIdHash = btoa(String.fromCharCode(...digest)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-    await api(`/journeys/${id}/invites`, 'POST', { inviteIdHash, expiresAt: Date.now() + 7 * 86_400_000, support: input(f, 'invite-scope') === 'support' }, ctx.principal);
-    const value = `${location.origin}/invite#${secret}`;
-    root.querySelector('#invitation')!.innerHTML = `<p class="notice">Share this invitation once. It expires in seven days. Anyone with this link can ask to join; a member must let them in.</p><pre id="invite-copy-value">${escape(value)}</pre><button id="invite-copy">Copy link</button><p id="copy-status" role="status"></p>`;
+    if (addresses.length > 5 || addresses.some(address => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address))) throw new Error('Enter up to five valid email addresses.');
+    for (const email of addresses.length ? addresses : ['']) {
+      const bytes = crypto.getRandomValues(new Uint8Array(32));
+      const secret = btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+      const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(secret)));
+      const inviteIdHash = btoa(String.fromCharCode(...digest)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+      await api(`/journeys/${id}/invites`, 'POST', { inviteIdHash, expiresAt: Date.now() + 7 * 86_400_000, support: read('invite-scope') === 'support', ...(email ? { email, inviteId: secret } : {}) }, ctx.principal);
+      const value = `${location.origin}/invite#${secret}`;
+      root.querySelector('#invitation')!.innerHTML = `<p class="notice">${email ? `Invitation sent to ${escape(email)}. ` : ''}A member must let them in.</p><pre id="invite-copy-value">${escape(value)}</pre><button id="invite-copy">Copy link</button><p id="copy-status" role="status"></p>`;
+    }
     copy('invite-copy');
-  });
+  };
+  form('invite-form', async f => { const addresses = input(f, 'invite-email').split(/[\s,;]+/).filter(Boolean); if (!addresses.length) throw new Error('Enter an email address or choose Copy link instead.'); await invite(addresses); });
+  root.querySelector('#invite-link-only')?.addEventListener('click', () => perform(async () => { await invite([]); }));
   root.querySelectorAll<HTMLButtonElement>('[data-let-in]').forEach(button => button.addEventListener('click', () => perform(async () => { const latest = await fresh(); const person = pending.find(row => row.principal === button.dataset.letIn); if (!person) throw new Error('This person is no longer waiting.'); await letIn(latest, person); await membersScreen(id); })));
   root.querySelectorAll<HTMLButtonElement>('[data-grant]').forEach(button => button.addEventListener('click', () => perform(async () => { const latest = await fresh(); const target = button.dataset.grant!; const grants = latest.state.grants[target] ?? []; await appendEntry(latest, grants.includes('members.manage') ? 'grant.remove' : 'grant.add', { member: target, grant: 'members.manage' }); await membersScreen(id); })));
   root.querySelectorAll<HTMLButtonElement>('[data-remove]').forEach(button => button.addEventListener('click', () => perform(async () => {
@@ -351,6 +387,8 @@ async function route(): Promise<void> {
   const path = location.pathname;
   if (path === '/auth/verify') return verifyEmail();
   if (path === '/sign-in') return signIn();
+  if (path === '/continue') return continueScreen();
+  if (path === '/join') return joinScreen();
   if (path === '/invite') return acceptInvite();
   const agent = /^\/agent-sessions\/([A-Za-z0-9_-]+)$/.exec(path); if (agent) return agentScreen(agent[1]!);
   if (path === '/new') { const keys = await requireKeys(); if (keys) newJourney(keys); return; }
@@ -365,7 +403,7 @@ async function route(): Promise<void> {
     if (item) return item[2] ? itemForm(id, item[1]) : itemScreen(id, item[1]!);
     if (!sub) return journeyHome(id);
   }
-  if (path === '/') return home();
+  if (path === '/') return getPersonKeys() ? home() : startScreen();
   render('<section class="panel"><h1>Page not found</h1><p><a href="/">Return to your journeys</a></p></section>');
 }
 perform(route);

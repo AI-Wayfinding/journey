@@ -1,4 +1,4 @@
-import { env } from 'cloudflare:test';
+import { env, runInDurableObject } from 'cloudflare:test';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createAgeIdentity, createSigningIdentity, generateJourneyKey, hashEntry, importSigningKey, newId, open, removeAndRotate, seal, signEntry, verifyLog, wrapJourneyKey, type JourneyKey, type LogEntry } from '@ai-wayfinding/core';
 import worker, { type Env } from '../src/index.js';
@@ -75,12 +75,12 @@ describe('HTTP boundary', () => {
     expect((await request('/v1/me/keys', 'PUT', { ...sealed, identity: 'plaintext' }, { Cookie: p.cookie })).status).toBe(400);
     expect((await request('/v1/me/keys', 'PUT', { identity: ciphertext, signing: ciphertext }, { Cookie: p.cookie })).status).toBe(400);
   });
-  it('keeps a different random PRF salt per account and uses it for login in a new session', async () => {
+  it('uses one app-wide PRF salt, including discoverable options', async () => {
     const first = await account('salt-first@example.org');
     const second = await account('salt-second@example.org');
     const options = async (cookie: string) => (await request('/v1/auth/passkey/register/options', 'POST', {}, { Cookie: cookie })).json() as Promise<{ challenge: string; extensions: { prf: { eval: { first: string } } } }>;
     const initial = await options(first.cookie);
-    expect((await options(second.cookie)).extensions.prf.eval.first).not.toBe(initial.extensions.prf.eval.first);
+    expect((await options(second.cookie)).extensions.prf.eval.first).toBe(initial.extensions.prf.eval.first);
     const latest = await options(first.cookie);
     expect(latest.extensions.prf.eval.first).toBe(initial.extensions.prf.eval.first);
     const device = await authenticator();
@@ -90,6 +90,72 @@ describe('HTTP boundary', () => {
     expect((await login.json() as { extensions: { prf: { eval: { first: string } } } }).extensions.prf.eval.first).toBe(initial.extensions.prf.eval.first);
     const unlockedTab = await request('/v1/auth/passkey/login/options', 'POST', {}, { Cookie: first.cookie });
     expect((await unlockedTab.json() as { extensions: { prf: { eval: { first: string } } } }).extensions.prf.eval.first).toBe(initial.extensions.prf.eval.first);
+    const discover = await request('/v1/auth/passkey/start', 'POST', {});
+    const values = await discover.json() as { allowCredentials?: unknown[]; extensions: { prf: { eval: { first: string } } } };
+    expect(values.allowCredentials ?? []).toEqual([]);
+    expect(values.extensions.prf.eval.first).toBe(initial.extensions.prf.eval.first);
+  });
+  it('signs in by discoverable passkey with no prior email session; unknown and legacy credentials fail', async () => {
+    const owner = await person('discovery@example.org');
+    const start = await request('/v1/auth/passkey/start', 'POST', {});
+    const { challenge } = await start.json() as { challenge: string };
+    const discovery = start.headers.get('set-cookie')!.split(';')[0]!;
+    const response = await owner.device.login(challenge);
+    expect((await request('/v1/auth/passkey/finish', 'POST', { response }, { Cookie: discovery, Origin: 'https://other.example' })).status).toBe(403);
+    const finished = await request('/v1/auth/passkey/finish', 'POST', { response }, { Cookie: discovery });
+    expect(finished.status).toBe(200);
+    expect((await request('/v1/me/keys', 'GET', undefined, { Cookie: finished.headers.get('set-cookie')!.split(';')[0]! })).status).toBe(200);
+    expect((await request('/v1/auth/passkey/finish', 'POST', { response }, { Cookie: discovery })).status).toBe(401);
+    const missing = await request('/v1/auth/passkey/start', 'POST', {});
+    const forged = { ...response, id: 'unknown', rawId: 'unknown' };
+    expect((await request('/v1/auth/passkey/finish', 'POST', { response: forged }, { Cookie: missing.headers.get('set-cookie')!.split(';')[0]! })).status).toBe(401);
+    const registry = (env as unknown as Env).REGISTRY.get((env as unknown as Env).REGISTRY.idFromName('registry-v1'));
+    await runInDurableObject(registry, (_object, state) => { state.storage.sql.exec('UPDATE accounts SET email=NULL WHERE hash=(SELECT accountHash FROM credentials WHERE id=?)', response.id); });
+    const noEmail = await request('/v1/auth/passkey/start', 'POST', {});
+    const noEmailResponse = await owner.device.login((await noEmail.json() as { challenge: string }).challenge, 2);
+    expect((await request('/v1/auth/passkey/finish', 'POST', { response: noEmailResponse }, { Cookie: noEmail.headers.get('set-cookie')!.split(';')[0]! })).status).toBe(401);
+  });
+  it('migrates legacy PRF keys after email sign-in, clearing the old salt only with the sealed update', async () => {
+    const owner = await person('old-salt@example.org');
+    const registry = (env as unknown as Env).REGISTRY.get((env as unknown as Env).REGISTRY.idFromName('registry-v1'));
+    const salt = base64url(crypto.getRandomValues(new Uint8Array(32)));
+    await runInDurableObject(registry, (_object, state) => { state.storage.sql.exec('UPDATE accounts SET prfSalt=? WHERE hash=(SELECT accountHash FROM credentials WHERE id=?)', salt, owner.device.register('unused').id); });
+    const next = await account(owner.email);
+    const options = await request('/v1/auth/passkey/login/options', 'POST', {}, { Cookie: next.cookie });
+    const values = await options.json() as { challenge: string; extensions: { prf: { eval: { first: string; second: string } } } };
+    expect(values.extensions.prf.eval.first).toBe(salt);
+    expect(values.extensions.prf.eval.second).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    const assertion = await owner.device.login(values.challenge);
+    expect((await (await request('/v1/auth/passkey/login/verify', 'POST', { response: assertion }, { Cookie: next.cookie })).json() as { migrate: boolean }).migrate).toBe(true);
+    const sealed = testSealed();
+    expect((await request('/v1/me/keys', 'PUT', { ...sealed, migrate: true }, { Cookie: next.cookie })).status).toBe(204);
+    expect(await (await request('/v1/me/keys', 'GET', undefined, { Cookie: next.cookie })).json()).toEqual(sealed);
+    const after = await request('/v1/auth/passkey/login/options', 'POST', {}, { Cookie: next.cookie });
+    const updated = await after.json() as { extensions: { prf: { eval: { first: string; second?: string } } } };
+    expect(updated.extensions.prf.eval.first).toBe(values.extensions.prf.eval.second);
+    expect(updated.extensions.prf.eval.second).toBeUndefined();
+  });
+  it('emails a client-secret invitation only to a validated address, without storing or logging it', async () => {
+    const owner = await person('invite-email-owner@example.org');
+    const { id } = await journey(owner);
+    const secret = base64url(crypto.getRandomValues(new Uint8Array(32)));
+    const email = 'invitee@example.org';
+    const deliveries: string[] = [];
+    const delivery = { send: async (message: { to: string; text?: string }) => { deliveries.push(message.to + ' ' + message.text); return { messageId: 'sent' }; } } as Env['MAGIC_EMAIL'];
+    const path = `/v1/journeys/${id}/invites`;
+    expect((await request(path, 'POST', { inviteIdHash: await digest(secret), inviteId: secret, email, expiresAt: Date.now() + 60_000 }, as(owner), { MAGIC_EMAIL: delivery })).status).toBe(201);
+    expect(deliveries[0]).toContain(email);
+    expect(deliveries[0]).toContain(`${origin}/invite#${secret}`);
+    expect((await request(path, 'POST', { inviteIdHash: await digest(secret), inviteId: secret, email: 'bad\r\nBcc: someone@example.org', expiresAt: Date.now() + 60_000 }, as(owner), { MAGIC_EMAIL: delivery })).status).toBe(400);
+    const registry = (env as unknown as Env).REGISTRY.get((env as unknown as Env).REGISTRY.idFromName('registry-v1'));
+    const hash = await digest(secret);
+    expect(await runInDurableObject(registry, (_object, state) => JSON.stringify(state.storage.sql.exec('SELECT * FROM invites WHERE hash=?', hash).toArray()))).not.toContain(email);
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const second = base64url(crypto.getRandomValues(new Uint8Array(32)));
+      expect((await request(path, 'POST', { inviteIdHash: await digest(second), inviteId: second, email, expiresAt: Date.now() + 60_000 }, as(owner), { MAGIC_EMAIL: { send: async () => { throw new Error('mail failed for ' + email); } } as Env['MAGIC_EMAIL'] })).status).toBe(500);
+      expect(log.mock.calls.flat().join(' ')).not.toContain(email);
+    } finally { log.mockRestore(); }
   });
   it('refuses an unsealed registration without saving a credential', async () => {
     const a = await account('unsealed@example.org');

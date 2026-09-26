@@ -6,6 +6,14 @@
  */
 const escapeHtml = (value: string): string => value.replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]!));
 
+export function invitationEmail(link: string): { text: string; html: string } {
+  const message = 'Someone invited you to a Wayfinding journey. Open this link to ask to join. A member must let you in before you can read anything. The link works once and expires within seven days.';
+  return {
+    text: `${message}\n\n${link}\n\nIf you did not expect this invitation, ignore it.\n\nWayfinding · wayfinding.support`,
+    html: `<!doctype html><html lang="en"><body><p>${message}</p><p><a href="${escapeHtml(link)}">Open invitation</a></p><p>If you did not expect this invitation, ignore it.</p></body></html>`,
+  };
+}
+
 export function magicLinkEmail(link: string): { text: string; html: string } {
   const text = [
     'You asked to sign in to Wayfinding journeys at app.wayfinding.support.',

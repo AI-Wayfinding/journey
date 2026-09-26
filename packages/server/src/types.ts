@@ -26,11 +26,13 @@ export type RegistryMessage =
   | { op: 'emailStart'; ipHash: string; emailHash: string; tokenHash: string; email: string }
   | { op: 'emailVerify'; tokenHash: string; sessionHash: string }
   | { op: 'session' | 'logout'; hash: string }
-  | { op: 'credentials' | 'journeys' | 'keysGet' | 'prfSalt'; accountHash: string }
-  | { op: 'keysPut'; accountHash: string; version: 1; identity: string; signing: string }
+  | { op: 'credentials' | 'journeys' | 'keysGet' | 'legacySalt'; accountHash: string }
+  | { op: 'keysPut'; accountHash: string; sessionHash: string; version: 1; identity: string; signing: string; migrate?: boolean }
+  | { op: 'credentialById'; id: string }
+  | { op: 'passkeySession'; id: string; accountHash: string; counter: number; sessionHash: string }
   | { op: 'credential'; id: string; accountHash: string }
-  | { op: 'challengeSet'; sessionHash: string; challenge: string; kind: 'register' | 'login' }
-  | { op: 'challengeTake'; sessionHash: string; kind: 'register' | 'login' }
+  | { op: 'challengeSet'; sessionHash: string; challenge: string; kind: 'register' | 'login' | 'discover' }
+  | { op: 'challengeTake'; sessionHash: string; kind: 'register' | 'login' | 'discover' }
   | { op: 'credentialAdd'; id: string; accountHash: string; publicKey: string; counter: number; transports: string; sessionHash: string; identity: string; signing: string }
   | { op: 'credentialUse'; id: string; accountHash: string; counter: number; sessionHash: string }
   | { op: 'journeyCreate'; data: CreateJourney }
@@ -39,6 +41,7 @@ export type RegistryMessage =
   | { op: 'link'; accountHash: string; journeyId: string; principal: string }
   | { op: 'activity'; id: string; memberDelta: number; bytes: number }
   | { op: 'inviteCreate'; hash: string; journeyId: string; expires: number; support: boolean }
+  | { op: 'inviteRate'; journeyId: string; accountHash: string }
   | { op: 'inviteTake'; hash: string; accountHash: string; principal: string; recipient: string; signingKey: string }
   | { op: 'invitePending'; journeyId: string }
   | { op: 'pendingGet' | 'pendingDelete'; journeyId: string; principal: string }
