@@ -63,6 +63,32 @@ it('marks support members read-only with a required expiry and no management gra
   await expect(append(first, creator, 'member.add', { member: { ...member, expiresAt: undefined }, grants: [], kind: 'person' })).rejects.toThrow('Invalid member.add');
 });
 
+it('signs agent names and lets only a manager or the person who added the agent rename it', async () => {
+  const creator = await person(), owner = await person(), outsider = await person(), bot = await agent(owner.member.id);
+  let entries = await genesis(creator);
+  for (const member of [owner.member, outsider.member]) entries = await append(entries, creator, 'member.add', { member, grants: [], kind: 'person' });
+  entries = await append(entries, owner, 'member.add', { member: { ...bot.member, name: 'Helper' }, grants: [], kind: 'agent' });
+  const added = await verifyLog(entries);
+  expect(added.ok && added.state.members[bot.member.id]?.member.name).toBe('Helper');
+  expect(entries.at(-1)?.body.member).toMatchObject({ name: 'Helper' });
+  expect(await error(await append(entries, outsider, 'member.rename', { id: bot.member.id, name: 'Hijacked' }))).toBe('unauthorized');
+  expect(await error(await append(entries, bot, 'member.rename', { id: bot.member.id, name: 'Hijacked' }))).toBe('unauthorized');
+  entries = await append(entries, owner, 'member.rename', { id: bot.member.id, name: 'Guide' });
+  entries = await append(entries, creator, 'member.rename', { id: bot.member.id, name: 'Trusted guide' });
+  const renamed = await verifyLog(entries);
+  expect(renamed.ok && renamed.state.members[bot.member.id]?.member.name).toBe('Trusted guide');
+  expect(await error(await append(entries, creator, 'member.rename', { id: owner.member.id, name: 'Person' }))).toBe('invalid-entry');
+  for (const name of [' ', ' padded', 'A'.repeat(61), 'Bad\nname']) await expect(append(entries, owner, 'member.rename', { id: bot.member.id, name })).rejects.toThrow('Invalid member.rename');
+  await expect(append(entries, owner, 'member.add', { member: { ...(await agent(owner.member.id)).member, name: 'Bad\u007fname' }, grants: [], kind: 'agent' })).rejects.toThrow('Invalid member.add');
+});
+
+it('keeps old agent logs without names valid', async () => {
+  const creator = await person(), bot = await agent(creator.member.id);
+  const entries = await append(await genesis(creator), creator, 'member.add', { member: bot.member, grants: [], kind: 'agent' });
+  const result = await verifyLog(entries);
+  expect(result.ok && result.state.members[bot.member.id]?.member.name).toBeUndefined();
+});
+
 it('keeps at least one person holding members.manage after every entry', async () => {
   const creator = await person(); const first = await genesis(creator);
   expect(await error(await append(first, creator, 'grant.remove', { member: creator.member.id, grant: 'members.manage' }))).toBe('last-holder');

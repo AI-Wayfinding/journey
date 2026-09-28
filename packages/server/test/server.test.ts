@@ -415,6 +415,19 @@ it('rejects a malformed journey ID when requesting an agent session', async () =
   expect((await request('/v1/agent-sessions','POST',body)).status).toBe(400);
 });
 
+it('validates a proposed agent name before storing and returning it', async () => {
+  const body = { journeyId: newId(), agentPublicKey: { recipient: 'public-recipient', signingKey: 'public-signing-key' }, requestedScope: 'read', name: 'Friendly <agent>' };
+  for (const name of ['', ' untrimmed', 'bad\nname', 'A'.repeat(61), 42, null]) {
+    expect((await request('/v1/agent-sessions', 'POST', { ...body, name })).status).toBe(400);
+  }
+  const started = await request('/v1/agent-sessions', 'POST', { ...body, extra: 'not-persisted' });
+  expect(started.status).toBe(201);
+  const { id } = await started.json() as { id: string };
+  const stored = await (await request('/v1/agent-sessions/' + id)).json() as Record<string, unknown>;
+  expect(stored.name).toBe(body.name);
+  expect(stored).not.toHaveProperty('extra');
+});
+
 it('limits unauthenticated agent-session creation by IP', async () => {
   const keys: string[] = [];
   const rate = { limit: async ({key}: {key:string}) => { keys.push(key); return {success:keys.length <= 10}; } };

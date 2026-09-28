@@ -1,17 +1,18 @@
 import type { APIRequestContext } from '@playwright/test';
 import { createAgeIdentity, createSigningIdentity, importSigningKey, newId, seal, unwrapJourneyKey } from '@ai-wayfinding/core';
 
-type Agent = { id: string; code: string; approvalUrl: string; identity: string; signingPrivateKey: CryptoKey };
+type Agent = { id: string; code: string; approvalUrl: string; principal: string; identity: string; signingPrivateKey: CryptoKey };
 const ORIGIN = 'http://localhost:18787';
 const b64url = (bytes: Uint8Array): string => btoa(String.fromCharCode(...bytes)).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
 
 /** A separate agent process never has the person's cookies or keys. */
-export async function requestAgent(request: APIRequestContext, journeyId: string): Promise<Agent> {
+export async function requestAgent(request: APIRequestContext, journeyId: string, name?: string): Promise<Agent> {
   const age = await createAgeIdentity(), signing = await createSigningIdentity();
-  const response = await request.post('/v1/agent-sessions', { data: { journeyId, agentPublicKey: { recipient: age.recipient, signingKey: signing.publicKey }, requestedScope: 'readwrite' }, headers: { 'X-Wayfinding': '1', Origin: ORIGIN } });
+  const response = await request.post('/v1/agent-sessions', { data: { journeyId, agentPublicKey: { recipient: age.recipient, signingKey: signing.publicKey }, requestedScope: 'readwrite', ...(name === undefined ? {} : { name }) }, headers: { 'X-Wayfinding': '1', Origin: ORIGIN } });
   if (!response.ok()) throw new Error(`Agent session rejected (${response.status()}): ${await response.text()}`);
   const { id, code, approvalUrl } = await response.json() as { id: string; code: string; approvalUrl: string };
-  return { id, code, approvalUrl, identity: age.identity, signingPrivateKey: await importSigningKey(signing.privateKey) };
+  const { principal } = await (await request.get('/v1/agent-sessions/' + id)).json() as { principal: string };
+  return { id, code, approvalUrl, principal, identity: age.identity, signingPrivateKey: await importSigningKey(signing.privateKey) };
 }
 
 async function signed(request: APIRequestContext, agent: Agent, method: 'GET' | 'POST', path: string, data?: unknown): Promise<unknown> {
@@ -30,6 +31,6 @@ export async function agentWritesItem(request: APIRequestContext, agent: Agent, 
   const key = await unwrapJourneyKey({ epoch: newest.epoch, recipient: 'agent', ciphertext: newest.wrap }, agent.identity);
   const reserved = await signed(request, agent, 'POST', `/journeys/${journeyId}/seq`, {}) as { seq: number; epoch: number };
   if (reserved.epoch !== key.epoch) throw new Error('Agent key changed before the write');
-  const envelope = await seal({ type: 'item', typeVersion: 1, body: { id: newId(), itemType: 'note', title: 'Agent observation', body: 'Written by the approved agent', author: 'agent', authoredBy: 'agent', tags: [], created: new Date().toISOString() } }, { id: newId(), journey: journeyId, seq: reserved.seq, epoch: reserved.epoch, createdAt: new Date().toISOString() }, key);
+  const envelope = await seal({ type: 'item', typeVersion: 1, body: { id: newId(), itemType: 'note', title: 'Agent observation', body: 'Written by the approved agent', author: agent.principal, authoredBy: 'agent', tags: [], created: new Date().toISOString() } }, { id: newId(), journey: journeyId, seq: reserved.seq, epoch: reserved.epoch, createdAt: new Date().toISOString() }, key);
   await signed(request, agent, 'POST', `/journeys/${journeyId}/records`, { envelope });
 }

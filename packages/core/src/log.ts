@@ -3,7 +3,8 @@ import { asBuffer, decode, encode, utf8 } from './codec.js';
 import { meetsMinClientVersion } from './versions.js';
 import type { JsonObject, Validation } from './types.js';
 export type Grant = 'members.manage';
-export interface Member extends JsonObject { id: string; recipient: string; signingKey: string; kind: 'person' | 'agent'; scope?: 'read' | 'readwrite'; addedBy?: string; expiresAt?: string; support?: true }
+export interface Member extends JsonObject { id: string; recipient: string; signingKey: string; kind: 'person' | 'agent'; name?: string; scope?: 'read' | 'readwrite'; addedBy?: string; expiresAt?: string; support?: true }
+export const validAgentName = (value: unknown): value is string => typeof value === 'string' && value.length >= 1 && value.length <= 60 && value.trim() === value && !/[\x00-\x1f\x7f-\x9f]/.test(value);
 export interface LogEntry { v: 1; seq: number; prev: string | null; at: string; actor: string; type: string; body: JsonObject; sig: string }
 export interface LogDefinition { name: string; fields: readonly string[]; validate(body: JsonObject): Validation; apply?: (state: LogState, body: JsonObject, actor: string, holder: boolean) => Promise<EffectError | null> }
 export interface DerivedMember { member: Member; grants: Grant[] }
@@ -21,8 +22,15 @@ function addMember(state: LogState, body: JsonObject, actor: string, holder: boo
     if (!holder) return Promise.resolve(denied('Only a holder may add people'));
     if (member.support && (body.grants as Grant[]).length) return Promise.resolve(denied('Support members cannot hold grants'));
   }
-  state.members[member.id] = { member, grants: [...body.grants as Grant[]] };
+  state.members[member.id] = { member: { ...member }, grants: [...body.grants as Grant[]] };
   state.grants[member.id] = [...body.grants as Grant[]];
+  return Promise.resolve(null);
+}
+function renameMember(state: LogState, body: JsonObject, actor: string, holder: boolean): Promise<EffectError | null> {
+  const target = state.members[body.id as string]?.member;
+  if (!target || target.kind !== 'agent') return Promise.resolve({ code: 'invalid-entry', message: 'Agent not found' });
+  if (!holder && target.addedBy !== actor) return Promise.resolve(denied('Cannot rename another member’s agent'));
+  target.name = body.name as string;
   return Promise.resolve(null);
 }
 function removeMember(state: LogState, body: JsonObject, actor: string, holder: boolean): Promise<EffectError | null> {
@@ -63,15 +71,16 @@ const object = (value: unknown): value is JsonObject => Boolean(value) && typeof
 const str = (value: unknown): value is string => typeof value === 'string' && value.length > 0;
 const shape = (body: object, required: string[], allowed: string[] = required): boolean => required.every(k => Object.hasOwn(body, k)) && Object.keys(body).every(k => allowed.includes(k));
 function validMember(value: unknown): value is Member {
-  if (!object(value) || !shape(value, ['id', 'recipient', 'signingKey', 'kind'], ['id', 'recipient', 'signingKey', 'kind', 'scope', 'addedBy', 'expiresAt', 'support'])) return false;
+  if (!object(value) || !shape(value, ['id', 'recipient', 'signingKey', 'kind'], ['id', 'recipient', 'signingKey', 'kind', 'name', 'scope', 'addedBy', 'expiresAt', 'support'])) return false;
   if (!isId(value.id) || !str(value.recipient) || !str(value.signingKey)) return false;
-  return value.kind === 'person' ? value.addedBy === undefined && (value.support === true ? value.scope === 'read' && typeof value.expiresAt === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(value.expiresAt) && Number.isFinite(Date.parse(value.expiresAt)) : value.support === undefined && value.scope === undefined && (value.expiresAt === undefined || str(value.expiresAt))) : value.kind === 'agent' && value.support === undefined && (value.scope === 'read' || value.scope === 'readwrite') && str(value.addedBy) && (value.expiresAt === undefined || str(value.expiresAt));
+  return value.kind === 'person' ? value.name === undefined && value.addedBy === undefined && (value.support === true ? value.scope === 'read' && typeof value.expiresAt === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(value.expiresAt) && Number.isFinite(Date.parse(value.expiresAt)) : value.support === undefined && value.scope === undefined && (value.expiresAt === undefined || str(value.expiresAt))) : value.kind === 'agent' && value.support === undefined && (value.name === undefined || validAgentName(value.name)) && (value.scope === 'read' || value.scope === 'readwrite') && str(value.addedBy) && (value.expiresAt === undefined || str(value.expiresAt));
 }
 const grants = (value: unknown): value is Grant[] => Array.isArray(value) && value.every(v => v === 'members.manage') && new Set(value).size === value.length;
 const memberBody = (body: JsonObject): Validation => shape(body, ['member', 'grants', 'kind']) && validMember(body.member) && body.kind === body.member.kind && grants(body.grants) ? ok : fail('Invalid member.add');
 export const logDefinitions: readonly LogDefinition[] = [
   { name: 'genesis', fields: ['journey', 'name', 'creator', 'grants', 'mode', 'visibility', 'minClientVersion', 'description', 'journeyKind'], validate: b => shape(b, ['journey', 'name', 'creator', 'grants', 'mode', 'visibility', 'minClientVersion'], ['journey', 'name', 'creator', 'grants', 'mode', 'visibility', 'minClientVersion', 'description', 'journeyKind']) && isId(b.journey) && str(b.name) && validMember(b.creator) && b.creator.kind === 'person' && grants(b.grants) && b.grants.includes('members.manage') && b.mode === 'sealed' && b.visibility === 'private' && str(b.minClientVersion) && (b.description === undefined || typeof b.description === 'string' && b.description.length <= 2000) && (b.journeyKind === undefined || b.journeyKind === 'individual' || b.journeyKind === 'team') ? ok : fail('Invalid genesis') },
   { name: 'member.add', fields: ['member', 'grants', 'kind'], validate: memberBody, apply: addMember },
+  { name: 'member.rename', fields: ['id', 'name'], validate: b => shape(b, ['id', 'name']) && isId(b.id) && validAgentName(b.name) ? ok : fail('Invalid member.rename'), apply: renameMember },
   { name: 'member.remove', fields: ['member'], validate: b => shape(b, ['member']) && isId(b.member) ? ok : fail('Invalid member.remove'), apply: removeMember },
   { name: 'grant.add', fields: ['member', 'grant'], validate: b => shape(b, ['member', 'grant']) && isId(b.member) && b.grant === 'members.manage' ? ok : fail('Invalid grant.add'), apply: setGrant(true) },
   { name: 'grant.remove', fields: ['member', 'grant'], validate: b => shape(b, ['member', 'grant']) && isId(b.member) && b.grant === 'members.manage' ? ok : fail('Invalid grant.remove'), apply: setGrant(false) },
@@ -94,7 +103,7 @@ export async function recipientsHash(members: LogState['members']): Promise<stri
 }
 function copyMember(member: JsonObject): JsonObject {
   const result: JsonObject = { id: member.id, recipient: member.recipient, signingKey: member.signingKey, kind: member.kind };
-  for (const field of ['scope', 'addedBy', 'expiresAt', 'support']) if (Object.hasOwn(member, field)) result[field] = member[field];
+  for (const field of ['name', 'scope', 'addedBy', 'expiresAt', 'support']) if (Object.hasOwn(member, field)) result[field] = member[field];
   return result;
 }
 export async function signEntry(unsigned: Omit<LogEntry, 'sig'>, privateKey: CryptoKey): Promise<LogEntry> {

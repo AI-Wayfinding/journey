@@ -48,7 +48,7 @@ export type RegistryMessage =
   | { op: 'inviteTake'; hash: string; accountHash: string; principal: string; recipient: string; signingKey: string }
   | { op: 'invitePending'; journeyId: string }
   | { op: 'pendingGet' | 'pendingDelete'; journeyId: string; principal: string }
-  | { op: 'agentCreate'; id: string; journeyId: string; principal: string; recipient: string; signingKey: string; requestedScope: Scope; code: string; remembered: boolean }
+  | { op: 'agentCreate'; id: string; journeyId: string; principal: string; recipient: string; signingKey: string; requestedScope: Scope; code: string; remembered: boolean; name: string | null }
   | { op: 'agentGet'; id: string }
   | { op: 'agentAttempt'; id: string; code: string }
   | { op: 'agentApprove'; id: string; scope: Scope; expires: number }

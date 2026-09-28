@@ -60,7 +60,8 @@ export async function saveRemembered(value: RememberedAgent, options: StoreOptio
   // security add-generic-password accepts passwords only in argv. Its interactive mode reads
   // a base64url-encoded command from stdin instead, keeping the key out of the process list.
   const encoded = Buffer.from(json).toString('base64url');
-  await run('security', ['-i'], 'add-generic-password -U -s "' + service + '" -a "' + account + '" -w "' + encoded + '"\nquit\n');
+  // security -i runs until EOF; "quit" is not a command and exits 1 even after a successful write.
+  await run('security', ['-i'], 'add-generic-password -U -s "' + service + '" -a "' + account + '" -w "' + encoded + '"\n');
 }
 export async function loadRemembered(options: StoreOptions = {}): Promise<RememberedAgent | null> {
   let raw: string;

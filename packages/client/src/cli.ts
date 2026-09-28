@@ -10,7 +10,7 @@ import { forgetRemembered, loadRemembered } from './storage.js';
 
 const help = `wayfinding — read and write an approved journey
 
-wayfinding connect <journey-id> [--scope read|readwrite] [--remember] [--server https://app.wayfinding.support] [--key-folder PATH]
+wayfinding connect <journey-id> [--name "Agent name"] [--scope read|readwrite] [--remember] [--server https://app.wayfinding.support] [--key-folder PATH]
 wayfinding disconnect [--key-folder PATH]
 wayfinding add --type TYPE --title TITLE --body TEXT [--tags a,b]
 wayfinding import <file-or-folder>
@@ -20,13 +20,13 @@ wayfinding show <id>
 wayfinding comment <id> <text>
 wayfinding comments <id>
 wayfinding status
-wayfinding mcp [--connect <journey-id>]
+wayfinding mcp [--connect <journey-id>] [--name "Agent name"]
 
 Use --journey <journey-id> with any one-shot command to ask for approval each time without remembering keys.
 Use --cache to store only encrypted journey records and a verified log head; --no-cache turns it off.
 Keys never go into the local cache. An agent cannot change journey membership or access.`;
 
-const valueFlags = new Set(['--scope', '--server', '--key-folder', '--journey', '--connect', '--type', '--title', '--body', '--tags']);
+const valueFlags = new Set(['--scope', '--name', '--server', '--key-folder', '--journey', '--connect', '--type', '--title', '--body', '--tags']);
 const boolFlags = new Set(['--remember', '--cache', '--no-cache', '--help']);
 function parse(args: string[]): { command: string; positional: string[]; flags: Record<string, string | boolean> } {
   const command = args[0] ?? '--help', flags: Record<string, string | boolean> = {}, positional: string[] = [];
@@ -83,7 +83,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   const secret = await passphrase(keyFolder);
   const server = flag(flags, '--server'), scope = flag(flags, '--scope');
   if (scope && scope !== 'read' && scope !== 'readwrite') throw new Error('Use --scope read or --scope readwrite.');
-  const connect = async (journeyId: string, mcp = false) => connectJourney(journeyId, { server, scope: scope as 'read' | 'readwrite' | undefined, remember: !!flags['--remember'], keyFolder, passphrase: secret, onApproval: (url, code) => { (mcp ? console.error : console.log)('Open this link, check the code matches, and approve access to this journey: ' + url + '\nSix-digit code: ' + code); } });
+  const connect = async (journeyId: string, mcp = false) => connectJourney(journeyId, { server, scope: scope as 'read' | 'readwrite' | undefined, name: flag(flags, '--name'), remember: !!flags['--remember'], keyFolder, passphrase: secret, onApproval: (url, code) => { (mcp ? console.error : console.log)('Open this link, check the code matches, and approve access to this journey: ' + url + '\nSix-digit code: ' + code); } });
   if (command === 'connect') {
     const journeyId = positional[0]; if (!journeyId) throw new Error('Give the journey ID to connect.');
     const { client } = await connect(journeyId);

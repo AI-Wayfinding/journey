@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { runCommand } from '../src/storage.js';
 import { join, resolve } from 'node:path';
 import { afterAll, beforeAll } from 'vitest';
 const scratch = resolve('../..', '.scratch', 'client-unit');
@@ -18,6 +19,21 @@ describe('remembered agent keys', () => {
     expect(await loadRemembered({ platform: 'darwin', run })).toEqual(sample);
     await forgetRemembered({ platform: 'darwin', run });
     expect(run.mock.calls.some(call => call[1][0] === 'delete-generic-password')).toBe(true);
+  });
+  it('ends macOS security interactive input at EOF, not with a failing quit command', async () => {
+    const run = vi.fn(async (command: string, args: string[], input?: string) => {
+      expect(command).toBe('security'); expect(args).toEqual(['-i']);
+      expect(input).toMatch(/^add-generic-password -U /);
+      expect(input).not.toContain('quit');
+      return '';
+    });
+    await saveRemembered(sample, { platform: 'darwin', run });
+    expect(run).toHaveBeenCalledOnce();
+    if (process.platform === 'darwin') {
+      const output = await runCommand('security', ['-i'], 'quit\n').then(() => 'ok', () => 'failed');
+      expect(output).toBe('failed');
+      expect(await runCommand('security', ['-i'], 'help\n')).toBeTruthy();
+    }
   });
   it('stores and retrieves through Linux secret-tool stdin, never in argv', async () => {
     let saved = '';

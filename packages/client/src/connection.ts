@@ -1,9 +1,9 @@
-import { createAgeIdentity, createSigningIdentity } from '@ai-wayfinding/core';
+import { createAgeIdentity, createSigningIdentity, validAgentName } from '@ai-wayfinding/core';
 import { JourneyClient } from './journey.js';
 import type { RememberedAgent } from './storage.js';
 import { saveRemembered } from './storage.js';
 import type { StoreOptions } from './storage.js';
-export interface ConnectOptions { server?: string; scope?: 'read' | 'readwrite'; remember?: boolean; keyFolder?: string; passphrase?: string; fetch?: typeof fetch; pollMs?: number; onApproval?: (url: string, code: string) => void }
+export interface ConnectOptions { server?: string; scope?: 'read' | 'readwrite'; name?: string; remember?: boolean; keyFolder?: string; passphrase?: string; fetch?: typeof fetch; pollMs?: number; onApproval?: (url: string, code: string) => void }
 export interface Connection { client: JourneyClient; session: RememberedAgent }
 export const DEFAULT_SERVER = 'https://app.wayfinding.support';
 const sleep = (milliseconds: number) => new Promise<void>(resolve => setTimeout(resolve, milliseconds));
@@ -12,8 +12,9 @@ export async function connectJourney(journeyId: string, options: ConnectOptions 
   const origin = new URL(server);
   if (origin.protocol !== 'https:' && !(origin.protocol === 'http:' && (origin.hostname === 'localhost' || origin.hostname === '127.0.0.1'))) throw new Error('The journey server must use HTTPS (except on this computer).');
   if (options.keyFolder && !options.remember) throw new Error('--key-folder needs --remember.');
+  if (options.name !== undefined && !validAgentName(options.name)) throw new Error('Agent name must be trimmed, 1–60 characters and contain no control characters.');
   const identity = await createAgeIdentity(), signing = await createSigningIdentity();
-  const response = await (options.fetch ?? fetch)(server + '/v1/agent-sessions', { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin.origin, 'X-Wayfinding': '1' }, body: JSON.stringify({ journeyId, agentPublicKey: { recipient: identity.recipient, signingKey: signing.publicKey }, requestedScope: options.scope ?? 'read', remembered: options.remember === true }) });
+  const response = await (options.fetch ?? fetch)(server + '/v1/agent-sessions', { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin.origin, 'X-Wayfinding': '1' }, body: JSON.stringify({ journeyId, agentPublicKey: { recipient: identity.recipient, signingKey: signing.publicKey }, requestedScope: options.scope ?? 'read', remembered: options.remember === true, ...(options.name === undefined ? {} : { name: options.name }) }) });
   if (!response.ok) throw new Error('Could not ask to join this journey (' + response.status + ').');
   const created = await response.json() as { id: string; code: string; approvalUrl: string };
   options.onApproval?.(created.approvalUrl, created.code);

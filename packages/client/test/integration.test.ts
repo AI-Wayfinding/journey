@@ -67,9 +67,10 @@ async function journey(owner: Owner) {
   return { id, key, entries: [first] };
 }
 type Fixture = Awaited<ReturnType<typeof journey>>;
-async function approve(owner: Owner, trip: Fixture, url: string, code: string, scope: 'read' | 'readwrite' = 'readwrite'): Promise<void> {
+async function approve(owner: Owner, trip: Fixture, url: string, code: string, scope: 'read' | 'readwrite' = 'readwrite', name?: string): Promise<void> {
   const sessionId = url.split('/').at(-1)!;
-  const info = await (await request('/v1/agent-sessions/' + sessionId)).json() as { principal: string; recipient: string; signingKey: string };
+  const info = await (await request('/v1/agent-sessions/' + sessionId)).json() as { principal: string; recipient: string; signingKey: string; name: string | null };
+  if (name !== undefined) expect(info.name).toBe(name);
   const expiresAt = Date.now() + 3_600_000;
   const member = { id: info.principal, kind: 'agent', recipient: info.recipient, signingKey: info.signingKey, addedBy: owner.principal, scope, expiresAt: new Date(expiresAt).toISOString() };
   const previous = trip.entries.at(-1)!;
@@ -80,9 +81,9 @@ async function approve(owner: Owner, trip: Fixture, url: string, code: string, s
   expect(approved.status).toBe(200);
   trip.entries.push(entry);
 }
-async function connected(owner: Owner, trip: Fixture, scope: 'read' | 'readwrite' = 'readwrite'): Promise<JourneyClient> {
+async function connected(owner: Owner, trip: Fixture, scope: 'read' | 'readwrite' = 'readwrite', name?: string): Promise<JourneyClient> {
   let approval: Promise<void> | undefined;
-  const connection = await connectJourney(trip.id, { server, scope, pollMs: 30, onApproval: (url, code) => { approval = approve(owner, trip, url, code, scope); } });
+  const connection = await connectJourney(trip.id, { server, scope, name, pollMs: 30, onApproval: (url, code) => { approval = approve(owner, trip, url, code, scope, name); } });
   await approval;
   return connection.client;
 }
@@ -107,6 +108,12 @@ describe('real journey server in workerd', () => {
     await expect(client.list()).rejects.toThrow('Access to this journey has ended');
     client.close();
   }, 30_000);
+  it('sends a suggested agent name with the connection request', async () => {
+    const owner = await person(), trip = await journey(owner);
+    const client = await connected(owner, trip, 'read', 'Planning assistant');
+    expect((await client.list())).toEqual([]);
+    client.close();
+  }, 30_000);
   it('refuses to write when a forged last history entry was appended by a server-side member', async () => {
     const owner = await person(), trip = await journey(owner), client = await connected(owner, trip);
     const stranger = await createSigningIdentity();
@@ -118,11 +125,11 @@ describe('real journey server in workerd', () => {
   }, 30_000);
   it('calls list, add and search through the stdio MCP SDK client', async () => {
     const owner = await person(), trip = await journey(owner);
-    const transport = new StdioClientTransport({ command: process.execPath, args: [join(root, 'packages/client/dist/cli.js'), 'mcp', '--connect', trip.id, '--server', server, '--scope', 'readwrite'], stderr: 'pipe' });
+    const transport = new StdioClientTransport({ command: process.execPath, args: [join(root, 'packages/client/dist/cli.js'), 'mcp', '--connect', trip.id, '--server', server, '--scope', 'readwrite', '--name', 'MCP assistant'], stderr: 'pipe' });
     let approval: Promise<void> | undefined;
     transport.stderr?.on('data', (chunk: Buffer) => {
       const match = /agent-sessions\/([A-Za-z0-9_-]+)[^\n]*\nSix-digit code: (\d{6})/.exec(chunk.toString());
-      if (match && !approval) approval = approve(owner, trip, server + '/agent-sessions/' + match[1], match[2]!);
+      if (match && !approval) approval = approve(owner, trip, server + '/agent-sessions/' + match[1], match[2]!, 'readwrite', 'MCP assistant');
     });
     const sdk = new Client({ name: 'journey-test', version: '1.0.0' });
     try {
