@@ -37,7 +37,7 @@ async function browserPerson(browser: Browser, hasPrf = true, omitPrfOnCreate = 
 async function signUp(page: Page, email: string): Promise<string[]> {
   await page.goto('/');
   await expect(page.getByRole('heading', { name: "Let's get started" })).toBeVisible();
-  await page.getByRole('link', { name: 'Start your journey' }).click();
+  await page.locator('#content').getByRole('link', { name: 'Start your journey' }).click();
   await page.getByLabel('Email address').fill(email);
   await page.getByRole('button', { name: 'Send sign-in link' }).click();
   await expect(page.getByRole('heading', { name: 'Check your email' })).toBeVisible();
