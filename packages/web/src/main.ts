@@ -19,7 +19,7 @@ const escape = (value: unknown): string => String(value ?? '').replace(/[&<>"']/
 const input = (form: HTMLFormElement, name: string): string => String(new FormData(form).get(name) ?? '').trim();
 const read = (name: string) => (root.querySelector(`[name="${name}"]`) as HTMLInputElement | null)?.value ?? '';
 function render(content: string): void {
-  root.innerHTML = `<header><a class="brand" href="/"><img src="/wayfinding-mark.svg" alt="" />Wayfinding <span>journeys</span></a><nav><a href="/">My journeys</a>${getPersonKeys() ? '<a href="/new">Start a journey</a><button class="secondary" id="logout">Sign out</button>' : '<a href="/sign-in">Sign in</a>'}</nav></header><main id="content">${content}</main>`;
+  root.innerHTML = `<header><a class="brand" href="/"><img src="/wayfinding-mark.svg" alt="" />AI Wayfinding <span>Journeys</span></a><nav><a href="/">My journeys</a>${getPersonKeys() ? '<a href="/new">Start a journey</a><button class="secondary" id="logout">Sign out</button>' : '<a href="/sign-in">Sign in</a>'}</nav></header><main id="content">${content}</main>`;
   root.querySelector('#logout')?.addEventListener('click', () => perform(async () => { clearPersonKeys(); sessionStorage.removeItem(INVITE_FRAGMENT); email = ''; await api('/auth/logout', 'POST', {}); navigate('/sign-in'); }));
 }
 function error(message: string): void { const main = root.querySelector('main') ?? root; const box = document.createElement('p'); box.className = 'error'; box.setAttribute('role', 'alert'); box.textContent = message; main.prepend(box); }
