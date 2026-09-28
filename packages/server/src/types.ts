@@ -26,8 +26,11 @@ export type RegistryMessage =
   | { op: 'emailStart'; ipHash: string; emailHash: string; tokenHash: string; email: string }
   | { op: 'emailVerify'; tokenHash: string; sessionHash: string }
   | { op: 'session' | 'logout'; hash: string }
-  | { op: 'credentials' | 'journeys' | 'keysGet' | 'legacySalt'; accountHash: string }
-  | { op: 'keysPut'; accountHash: string; sessionHash: string; version: 1; identity: string; signing: string; migrate?: boolean }
+  | { op: 'credentials' | 'journeys' | 'backupCount'; accountHash: string }
+  | { op: 'keysGet'; accountHash: string; sessionHash: string; credentialId: string; recovery: boolean }
+  | { op: 'credentialRemove'; accountHash: string; id: string }
+  | { op: 'backupReplace'; accountHash: string; codes: { verifierHash: string; identity: string; signing: string }[] }
+  | { op: 'backupRedeem'; verifierHash: string; ipHash: string; sessionHash: string }
   | { op: 'credentialById'; id: string }
   | { op: 'passkeySession'; id: string; accountHash: string; counter: number; sessionHash: string }
   | { op: 'credential'; id: string; accountHash: string }

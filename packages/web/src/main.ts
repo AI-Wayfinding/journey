@@ -3,7 +3,8 @@ import { prfOutput } from './prf.js';
 import { startAuthentication, startRegistration } from '@simplewebauthn/browser';
 import { newId, signEntry, verifyLog, wrapJourneyKey } from '@ai-wayfinding/core';
 import type { CommentBody, ItemBody, ProtocolRecord } from '@ai-wayfinding/core';
-import { clearPersonKeys, getPersonKeys, onPersonKeysCleared, resealPersonKeys, sealPersonKeys, unlockPersonKeys } from './keys.js';
+import { backupKey, clearPersonKeys, getPersonKeys, newBackupCode, onPersonKeysCleared, parseBackupCode, sealPersonKeys, sealUnlockedKeys, unlockPersonKeys } from './keys.js';
+import { passkeyError } from './passkey-errors.js';
 import type { PersonKeys, SealedPersonKeys } from './keys.js';
 import { allRecords, api, appendEntry, createJourney, currentKey, encryptedEntry, exportEncrypted, itemVersions, letIn, listings, removeMember, rotatePending, saveRecord, verifiedJourney } from './journey.js';
 import type { JourneyContext, JourneyListing } from './journey.js';
@@ -12,6 +13,7 @@ import './style.css';
 const root = document.querySelector<HTMLDivElement>('#app')!;
 // This is only an invitation request token, never a person or journey key. It survives the email-link navigation in this tab.
 const INVITE_FRAGMENT = 'wayfinding-invitation';
+const encode = (bytes: Uint8Array): string => btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 let email = '';
 let requestedRoute = location.pathname + location.hash;
 let recovery: { identity: string; recipient: string; wrap: string; listing: JourneyListing } | null = null;
@@ -19,11 +21,11 @@ const escape = (value: unknown): string => String(value ?? '').replace(/[&<>"']/
 const input = (form: HTMLFormElement, name: string): string => String(new FormData(form).get(name) ?? '').trim();
 const read = (name: string) => (root.querySelector(`[name="${name}"]`) as HTMLInputElement | null)?.value ?? '';
 function render(content: string): void {
-  root.innerHTML = `<header><a class="brand" href="/"><img src="/wayfinding-mark.svg" alt="" />AI Wayfinding Journeys</a><nav><a href="/">My journeys</a>${getPersonKeys() ? '<a href="/new">Start a journey</a><button class="secondary" id="logout">Sign out</button>' : '<a href="/sign-in">Sign in</a>'}</nav></header><main id="content">${content}</main>`;
+  root.innerHTML = `<header><a class="brand" href="/"><img src="/wayfinding-mark.svg" alt="" />AI Wayfinding Journeys</a><nav><a href="/">My journeys</a>${getPersonKeys() ? '<a href="/new">Start a journey</a><a href="/account">Account</a><button class="secondary" id="logout">Sign out</button>' : '<a href="/sign-in">Sign in</a>'}</nav></header><main id="content">${content}</main>`;
   root.querySelector('#logout')?.addEventListener('click', () => perform(async () => { clearPersonKeys(); sessionStorage.removeItem(INVITE_FRAGMENT); email = ''; await api('/auth/logout', 'POST', {}); navigate('/sign-in'); }));
 }
 function error(message: string): void { const main = root.querySelector('main') ?? root; const box = document.createElement('p'); box.className = 'error'; box.setAttribute('role', 'alert'); box.textContent = message; main.prepend(box); }
-function perform(action: () => Promise<void>): void { void action().catch(cause => error(cause instanceof Error ? cause.message : 'Something went wrong. Please try again.')); }
+function perform(action: () => Promise<void>): void { void action().catch(cause => error(passkeyError(cause))); }
 function form(id: string, action: (form: HTMLFormElement) => Promise<void>): void {
   root.querySelector<HTMLFormElement>(`#${id}`)?.addEventListener('submit', event => { event.preventDefault(); const target = event.currentTarget as HTMLFormElement; const button = target.querySelector<HTMLButtonElement>('button[type=submit]'); if (button) button.disabled = true; perform(async () => { try { await action(target); } finally { if (button?.isConnected) button.disabled = false; } }); });
 }
@@ -39,8 +41,8 @@ function supportedPrfBrowser(): boolean {
 }
 const noPrf = "This passkey can't protect your journey keys. Use your device's own passkeys (iCloud Keychain on Apple devices, Google Password Manager on Android or Chrome), or a password manager that supports PRF, such as a recent 1Password or Bitwarden.";
 const decode = (value: string): Uint8Array => Uint8Array.from(atob(value.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
-type PrfOptions<T> = Omit<T, 'extensions'> & { extensions: { prf: { eval: { first: string; second?: string } } } };
-type PasskeyStage = 'register-create' | 'register-get' | 'login';
+type PrfOptions<T> = Omit<T, 'extensions'> & { extensions: { prf: { eval: { first: string } } } };
+type PasskeyStage = 'register-create' | 'register-get' | 'login' | 'continue';
 // Diagnostics describe only the shape of a passkey response: never the PRF output, keys, credential ids or email.
 function prfShape(value: unknown): { prf: string; enabled: string; first: string; length: number } {
   const prf = value as { enabled?: unknown; results?: { first?: unknown } } | undefined;
@@ -76,37 +78,27 @@ function reportPasskey(report: { stage: PasskeyStage; outcome: 'ok' | 'no-prf' |
 async function authenticatedPrf(): Promise<Uint8Array> {
   const options = await api<PrfOptions<Parameters<typeof startAuthentication>[0]['optionsJSON']>>('/auth/passkey/login/options', 'POST', {});
   let response: Awaited<ReturnType<typeof startAuthentication>>;
-  try { response = await startAuthentication({ optionsJSON: { ...options, extensions: { prf: { eval: { first: decode(options.extensions.prf.eval.first), ...(options.extensions.prf.eval.second ? { second: decode(options.extensions.prf.eval.second) } : {}) } } } } }); }
-  catch (cause) { reportPasskey({ stage: 'login', outcome: 'error', error: errorName(cause) }); throw cause; }
+  try { response = await startAuthentication({ optionsJSON: { ...options, extensions: { prf: { eval: { first: decode(options.extensions.prf.eval.first) } } } } }); }
+  catch (cause) { reportPasskey({ stage: 'login', outcome: 'error', error: errorName(cause) }); throw new Error(passkeyError(cause)); }
   const output = prfOutput(response.clientExtensionResults?.prf?.results?.first);
   reportPasskey({ stage: 'login', outcome: output ? 'ok' : 'no-output', ...prfShape(response.clientExtensionResults?.prf), attachment: response.authenticatorAttachment });
   if (!output) throw new Error(noPrf);
   try {
     const { id, rawId, type, response: details } = response;
-    const result = await api<{ migrate: boolean }>('/auth/passkey/login/verify', 'POST', { response: { id, rawId, type, response: { clientDataJSON: details.clientDataJSON, authenticatorData: details.authenticatorData, signature: details.signature, userHandle: details.userHandle }, clientExtensionResults: {} } });
-    if (result.migrate) {
-      const newOutput = prfOutput(response.clientExtensionResults?.prf?.results?.second);
-      if (!newOutput) throw new Error('Your keys need updating. Use an email link and a passkey that supports two PRF values.');
-      try {
-        const sealed = await api<SealedPersonKeys | null>('/me/keys');
-        if (!sealed) throw new Error('No encrypted keys were saved for this account.');
-        const updated = await resealPersonKeys(sealed, output, new Uint8Array(newOutput));
-        await api('/me/keys', 'PUT', { ...updated, migrate: true });
-        output.fill(0);
-        return newOutput;
-      } catch (cause) { newOutput.fill(0); throw cause; }
-    }
+    await api('/auth/passkey/login/verify', 'POST', { response: { id, rawId, type, response: { clientDataJSON: details.clientDataJSON, authenticatorData: details.authenticatorData, signature: details.signature, userHandle: details.userHandle }, clientExtensionResults: {} } });
     return output;
   } catch (cause) { output.fill(0); throw cause; }
 }
 async function passkeyConfirmation(): Promise<void> { (await authenticatedPrf()).fill(0); }
 async function openWithPasskey(sealed: SealedPersonKeys): Promise<void> {
-  await unlockPersonKeys(sealed, await authenticatedPrf());
+  const output = await authenticatedPrf();
+  const matching = await api<SealedPersonKeys | null>('/me/keys');
+  await unlockPersonKeys(matching ?? sealed, output);
 }
 async function registrationPrf(credentialId: string, salt: Uint8Array): Promise<Uint8Array> {
   const status = root.querySelector<HTMLElement>('#passkey-status');
   if (status) status.textContent = 'Your passkey needs one more tap to protect your keys. Confirm it again.';
-  const credential = await navigator.credentials.get({ publicKey: { challenge: crypto.getRandomValues(new Uint8Array(32)).buffer, rpId: location.hostname, allowCredentials: [{ type: 'public-key', id: new Uint8Array(decode(credentialId)).buffer }], userVerification: 'required', extensions: { prf: { eval: { first: new Uint8Array(salt).buffer } } } } });
+  const credential = await navigator.credentials.get({ publicKey: { challenge: crypto.getRandomValues(new Uint8Array(32)).buffer, rpId: location.hostname, allowCredentials: [{ type: 'public-key', id: new Uint8Array(decode(credentialId)).buffer }], userVerification: 'required', extensions: { prf: { eval: { first: new Uint8Array(salt).buffer } } } } }).catch(cause => { throw new Error(passkeyError(cause, 'add')); });
   const result = (credential as PublicKeyCredential | null)?.getClientExtensionResults().prf;
   const output = prfOutput(result?.results?.first);
   reportPasskey({ stage: 'register-get', outcome: output ? 'ok' : 'no-output', ...prfShape(result), attachment: (credential as PublicKeyCredential | null)?.authenticatorAttachment ?? undefined });
@@ -122,34 +114,85 @@ function joinScreen(): void {
   form('join-link', async f => { const url = new URL(input(f, 'invite-link')); if (url.origin !== location.origin || url.pathname !== '/invite' || !/^[A-Za-z0-9_-]{43,}$/.test(url.hash.slice(1))) throw new Error('This is not a Wayfinding invitation link.'); navigate('/invite' + url.hash); });
 }
 function continueScreen(): void {
-  render('<section class="panel"><h1>Continue your journey</h1><p>Use your passkey to sign in and unlock your journeys.</p><div class="actions"><button id="passkey-continue">Continue with passkey</button><a href="/sign-in">Use an email link instead</a></div></section>');
+  render('<section class="panel"><h1>Continue your journey</h1><p>Use your passkey to sign in and unlock your journeys.</p><div class="actions"><button id="passkey-continue">Continue with passkey</button><a href="/sign-in">Use an email link instead</a><a href="/recover">Lost your passkey? Use a backup code</a></div></section>');
   root.querySelector('#passkey-continue')?.addEventListener('click', () => perform(async () => {
     try {
       const options = await api<PrfOptions<Parameters<typeof startAuthentication>[0]['optionsJSON']>>('/auth/passkey/start', 'POST', {});
       const response = await startAuthentication({ optionsJSON: { ...options, extensions: { prf: { eval: { first: decode(options.extensions.prf.eval.first) } } } } });
-      const output = prfOutput(response.clientExtensionResults?.prf?.results?.first);
-      if (!output) throw new Error(noPrf);
+      const first = prfOutput(response.clientExtensionResults?.prf?.results?.first);
       try {
         const { id, rawId, type, response: details } = response;
-        await api('/auth/passkey/finish', 'POST', { response: { id, rawId, type, response: { clientDataJSON: details.clientDataJSON, authenticatorData: details.authenticatorData, signature: details.signature, userHandle: details.userHandle }, clientExtensionResults: {} } });
+        try { await api('/auth/passkey/finish', 'POST', { response: { id, rawId, type, response: { clientDataJSON: details.clientDataJSON, authenticatorData: details.authenticatorData, signature: details.signature, userHandle: details.userHandle }, clientExtensionResults: {} } }); }
+        catch { throw new Error('This passkey is not set up for passkey-only sign-in yet. Sign in once with an email link to update it.'); }
+        reportPasskey({ stage: 'continue', outcome: first ? 'ok' : 'no-output', ...prfShape(response.clientExtensionResults?.prf), attachment: response.authenticatorAttachment });
         const sealed = await api<SealedPersonKeys | null>('/me/keys');
         if (!sealed) throw new Error('No encrypted keys were saved for this account.');
-        await unlockPersonKeys(sealed, output);
+        // Some password managers, including 1Password, only return PRF when the passkey is named; ask once more if so.
+        if (first) await unlockPersonKeys(sealed, first); else await openWithPasskey(sealed);
         navigate('/');
-      } finally { output.fill(0); }
-    } catch (cause) { throw new Error(`${cause instanceof Error ? cause.message : 'This passkey did not work.'} Use an email link instead if this is an older account or a different passkey.`); }
+      } finally { first?.fill(0); }
+    } catch (cause) { throw new Error(passkeyError(cause)); }
   }));
 }
 function signIn(destination = '/'): void {
   requestedRoute = destination === '/sign-in' ? '/' : destination;
-  render(`<section class="panel"><p class="eyebrow">YOUR JOURNEY STARTS HERE</p><h1>Sign in</h1><p>Enter your email address. We'll send a private link to confirm it's you.</p><form id="email-form"><label for="email">Email address</label><input id="email" name="email" type="email" autocomplete="email" required /><div class="actions"><button type="submit">Send sign-in link</button></div></form></section>`);
+  render(`<section class="panel"><p class="eyebrow">YOUR JOURNEY STARTS HERE</p><h1>Sign in</h1><p>Enter your email address. We'll send a private link to confirm it's you.</p><form id="email-form"><label for="email">Email address</label><input id="email" name="email" type="email" autocomplete="email" required /><div class="actions"><button type="submit">Send sign-in link</button></div></form><p><a href="/recover">Lost your passkey? Use a backup code</a></p></section>`);
   form('email-form', async f => { email = input(f, 'email'); await api('/auth/email/start', 'POST', { email, ...(/^\/agent-sessions\/[A-Za-z0-9_-]+$/.test(requestedRoute) ? { returnPath: requestedRoute } : {}) }); render('<section class="panel"><h1>Check your email</h1><p>Open the Wayfinding link to continue. It expires in 15 minutes. If you are joining a journey, keep this invitation open and return after signing in.</p></section>'); });
   // An already verified session can unlock this tab with PRF without another email link.
   void api<SealedPersonKeys | null>('/me/keys').then(sealed => {
     if (!sealed || getPersonKeys() || !root.querySelector('#email-form')) return;
-    render('<section class="panel"><h1>Unlock with your passkey</h1><p>Your keys are locked in this tab. Confirm your passkey once to continue.</p><div class="actions"><button id="unlock">Unlock with passkey</button></div></section>');
+    render('<section class="panel"><h1>Unlock with your passkey</h1><p>Your keys are locked in this tab. Confirm your passkey once to continue.</p><div class="actions"><button id="unlock">Unlock with passkey</button><a href="/recover">Lost your passkey? Use a backup code</a></div></section>');
     root.querySelector('#unlock')?.addEventListener('click', () => perform(async () => { await openWithPasskey(sealed); navigate(requestedRoute); }));
   }).catch(() => { /* No verified session: use the email form. */ });
+}
+async function createPasskey(first: boolean): Promise<void> {
+  if (!first && !getPersonKeys()) throw new Error('Unlock your keys before adding a passkey.');
+  const options = await api<PrfOptions<Parameters<typeof startRegistration>[0]['optionsJSON']>>('/auth/passkey/register/options', 'POST', {});
+  const salt = decode(options.extensions.prf.eval.first);
+  let stage: PasskeyStage = 'register-create';
+  let response: Awaited<ReturnType<typeof startRegistration>>;
+  let output: Uint8Array;
+  try {
+    response = await startRegistration({ optionsJSON: { ...options, extensions: { prf: { eval: { first: salt } } } } });
+    const prf = response.clientExtensionResults?.prf;
+    const created = prfOutput(prf?.results?.first);
+    reportPasskey({ stage, outcome: created ? 'ok' : prf?.enabled === false ? 'no-prf' : 'no-output', ...prfShape(prf), attachment: response.authenticatorAttachment, aaguid: aaguid(response.response.authenticatorData) });
+    if (!created && prf?.enabled === false) throw new Error(noPrf);
+    stage = 'register-get';
+    output = created ?? await registrationPrf(response.rawId, salt);
+  } catch (cause) {
+    if (!(cause instanceof Error && cause.message === noPrf)) reportPasskey({ stage, outcome: 'error', error: errorName(cause) });
+    throw new Error(passkeyError(cause, 'add'));
+  }
+  const unlockOutput = first ? new Uint8Array(output) : null;
+  try {
+    const sealed = first ? (await sealPersonKeys(output)).sealed : await sealUnlockedKeys(output);
+    const { id, rawId, type, response: details } = response;
+    await api('/auth/passkey/register/verify', 'POST', { response: { id, rawId, type, response: { clientDataJSON: details.clientDataJSON, attestationObject: details.attestationObject, transports: details.transports }, clientExtensionResults: { prf: { enabled: true } } }, sealed });
+    if (unlockOutput) await unlockPersonKeys(sealed, unlockOutput);
+  } finally { output.fill(0); unlockOutput?.fill(0); }
+}
+
+async function makeBackupCodes(): Promise<string[]> {
+  if (!getPersonKeys()) throw new Error('Unlock your keys first.');
+  const codes = Array.from({ length: 8 }, newBackupCode);
+  const sealed = await Promise.all(codes.map(async code => {
+    const bytes = parseBackupCode(code);
+    const verifier = await backupKey(bytes, 'verifier');
+    const wrapping = await backupKey(bytes, 'wrapping');
+    const verifierHash = encode(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(encode(verifier)))));
+    verifier.fill(0);
+    return { verifierHash, ...await sealUnlockedKeys(wrapping) };
+  }));
+  await api('/me/backup-codes', 'PUT', { codes: sealed.map(({ verifierHash, identity, signing }) => ({ verifierHash, identity, signing })) });
+  return codes;
+}
+function showBackupCodes(codes: string[], destination: string): void {
+  render(`<section class="panel"><h1>Save your backup codes</h1><p>These eight codes work once each. Store them away from your passkeys. A code lets you add a new passkey; it cannot open a journey on its own. We cannot show them again.</p><pre id="backup-copy-value">${escape(codes.join('\n'))}</pre><div class="actions"><button id="backup-copy" class="secondary">Copy</button><button id="backup-download" class="secondary">Download</button></div><p id="copy-status" role="status"></p><label class="checkbox" for="saved-codes"><input type="checkbox" id="saved-codes" /> I saved these codes</label><button id="backup-continue" disabled>Continue</button></section>`);
+  copy('backup-copy');
+  root.querySelector('#backup-download')?.addEventListener('click', () => download('wayfinding-backup-codes.txt', codes.join('\n') + '\n'));
+  root.querySelector('#saved-codes')?.addEventListener('change', event => { (root.querySelector<HTMLButtonElement>('#backup-continue')!).disabled = !(event.target as HTMLInputElement).checked; });
+  root.querySelector('#backup-continue')?.addEventListener('click', () => { codes.fill(''); navigate(destination); });
 }
 async function verifyEmail(): Promise<void> {
   const fragment = new URLSearchParams(location.hash.slice(1));
@@ -168,37 +211,11 @@ async function verifyEmail(): Promise<void> {
     if (!supportedPrfBrowser()) { register.disabled = true; error('This browser cannot use this kind of passkey. Use Chrome or Edge 116+, Safari 18+, or Firefox 139+ with a compatible passkey.'); return; }
     register.addEventListener('click', () => perform(async () => {
       register.disabled = true;
-      try {
-        const options = await api<PrfOptions<Parameters<typeof startRegistration>[0]['optionsJSON']>>('/auth/passkey/register/options', 'POST', {});
-        const salt = decode(options.extensions.prf.eval.first);
-        let stage: PasskeyStage = 'register-create';
-        let response: Awaited<ReturnType<typeof startRegistration>>;
-        let output: Uint8Array;
-        try {
-          response = await startRegistration({ optionsJSON: { ...options, extensions: { prf: { eval: { first: salt } } } } });
-          const prf = response.clientExtensionResults?.prf;
-          const created = prfOutput(prf?.results?.first);
-          reportPasskey({ stage, outcome: created ? 'ok' : prf?.enabled === false ? 'no-prf' : 'no-output', ...prfShape(prf), attachment: response.authenticatorAttachment, aaguid: aaguid(response.response.authenticatorData) });
-          // Only a definite "no PRF" stops here. Some password managers omit the flag, so one confirming tap decides.
-          if (!created && prf?.enabled === false) throw new Error(noPrf);
-          stage = 'register-get';
-          output = created ?? await registrationPrf(response.rawId, salt);
-        } catch (cause) {
-          if (!(cause instanceof Error && cause.message === noPrf)) reportPasskey({ stage, outcome: 'error', error: errorName(cause) });
-          throw cause;
-        }
-        const unlockOutput = new Uint8Array(output);
-        try {
-          const sealed = await sealPersonKeys(output);
-          const { id, rawId, type, response: details } = response;
-          await api('/auth/passkey/register/verify', 'POST', { response: { id, rawId, type, response: { clientDataJSON: details.clientDataJSON, attestationObject: details.attestationObject, transports: details.transports }, clientExtensionResults: { prf: { enabled: true } } }, sealed: sealed.sealed });
-          await unlockPersonKeys(sealed.sealed, unlockOutput);
-          navigate(requestedRoute);
-        } finally { output.fill(0); unlockOutput.fill(0); }
-      } finally { if (register.isConnected) register.disabled = false; }
+      try { await createPasskey(true); showBackupCodes(await makeBackupCodes(), requestedRoute); }
+      finally { if (register.isConnected) register.disabled = false; }
     }));
   } else {
-    render(`<section class="panel"><h1>Confirm your passkey</h1><p>One passkey tap signs you in and unlocks your journey keys in this tab.</p><div class="actions"><button id="confirm">Sign in with passkey</button></div></section>`);
+    render(`<section class="panel"><h1>Confirm your passkey</h1><p>One passkey tap signs you in and unlocks your journey keys in this tab.</p><div class="actions"><button id="confirm">Sign in with passkey</button><a href="/recover">Lost your passkey? Use a backup code</a></div></section>`);
     root.querySelector('#confirm')?.addEventListener('click', () => perform(async () => {
       const output = await authenticatedPrf();
       try {
@@ -209,6 +226,30 @@ async function verifyEmail(): Promise<void> {
       } finally { output.fill(0); }
     }));
   }
+}
+async function accountScreen(): Promise<void> {
+  if (!await requireKeys()) return;
+  const { passkeys, codesRemaining } = await api<{ passkeys: { id: string; name: string; created: number; lastUsed: number | null }[]; codesRemaining: number }>('/me/passkeys');
+  render(`<section class="panel"><h1>Account</h1><p>To replace a passkey, add a new one first, then remove the old one. Keep at least one passkey active.</p><ul class="list">${passkeys.map(key => `<li>${escape(key.name)} — added ${escape(new Date(key.created).toLocaleDateString())}; last used ${key.lastUsed ? escape(new Date(key.lastUsed).toLocaleDateString()) : 'never'} <button class="secondary remove-passkey" data-id="${escape(key.id)}" ${passkeys.length === 1 ? 'disabled' : ''}>Remove</button></li>`).join('')}</ul><button id="add-passkey">Add a passkey</button><p>${codesRemaining} backup codes remain.</p><button id="new-backup-codes">Make new backup codes</button><p id="passkey-status" role="status"></p></section>`);
+  root.querySelector('#add-passkey')?.addEventListener('click', () => perform(async () => { await passkeyConfirmation(); await createPasskey(false); await accountScreen(); }));
+  root.querySelectorAll<HTMLButtonElement>('.remove-passkey').forEach(button => button.addEventListener('click', () => perform(async () => { await passkeyConfirmation(); await api(`/me/passkeys/${encodeURIComponent(button.dataset.id!)}`, 'DELETE'); await accountScreen(); })));
+  root.querySelector('#new-backup-codes')?.addEventListener('click', () => perform(async () => { await passkeyConfirmation(); showBackupCodes(await makeBackupCodes(), '/account'); }));
+}
+function recoverScreen(): void {
+  render('<section class="panel"><h1>Recover with a backup code</h1><p>Use one saved code to replace a lost passkey. You must add a new passkey before opening your journeys. This code can only be used once.</p><form id="recover-form"><label for="backup-code">Backup code</label><input id="backup-code" name="backup-code" autocomplete="off" required /><button type="submit">Use backup code</button></form></section>');
+  form('recover-form', async f => {
+    const bytes = parseBackupCode(input(f, 'backup-code'));
+    const verifier = await backupKey(bytes, 'verifier');
+    const wrapping = await backupKey(bytes, 'wrapping');
+    try {
+      await api('/auth/backup-code/redeem', 'POST', { verifier: encode(verifier) });
+      const sealed = await api<SealedPersonKeys | null>('/me/keys');
+      if (!sealed) throw new Error('This backup code did not work.');
+      await unlockPersonKeys(sealed, wrapping);
+      render('<section class="panel"><h1>Add a new passkey</h1><p>Your backup code is used. Add a passkey before continuing.</p><button id="recover-passkey">Create passkey</button><p id="passkey-status" role="status"></p></section>');
+      root.querySelector('#recover-passkey')?.addEventListener('click', () => perform(async () => { await createPasskey(false); render('<section class="panel"><h1>Passkey added</h1><p>You can now remove old passkeys from your account.</p><div class="actions"><a href="/account">Manage passkeys</a><a href="/">Open my journeys</a></div></section>'); }));
+    } finally { bytes.fill(0); verifier.fill(0); wrapping.fill(0); }
+  });
 }
 async function requireKeys(): Promise<PersonKeys | null> { const keys = getPersonKeys(); if (!keys) { signIn(requestedRoute || location.pathname + location.hash); return null; } return keys; }
 async function home(): Promise<void> {
@@ -388,6 +429,8 @@ async function route(): Promise<void> {
   if (path === '/auth/verify') return verifyEmail();
   if (path === '/sign-in') return signIn();
   if (path === '/continue') return continueScreen();
+  if (path === '/recover') return recoverScreen();
+  if (path === '/account') return accountScreen();
   if (path === '/join') return joinScreen();
   if (path === '/invite') return acceptInvite();
   const agent = /^\/agent-sessions\/([A-Za-z0-9_-]+)$/.exec(path); if (agent) return agentScreen(agent[1]!);

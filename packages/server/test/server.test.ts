@@ -56,24 +56,17 @@ const as = (p: {cookie:string,principal:string}) => ({ Cookie:p.cookie, 'X-Princ
 
 // Seam: the Worker HTTP API, real Durable Objects and SQLite; email delivery is the only fake.
 describe('HTTP boundary', () => {
-  it('stores only versioned ciphertext fields for its verified account', async () => {
+  it('reads only the sealed copy for the verified credential', async () => {
     const p = await person('sealed-keys@example.org');
     const other = await person('other-sealed-keys@example.org');
-    const ciphertext = base64url(crypto.getRandomValues(new Uint8Array(96)));
-    const sealed = { version: 1, identity: ciphertext, signing: ciphertext };
-    expect((await request('/v1/me/keys', 'PUT', sealed, { Cookie: p.cookie })).status).toBe(204);
     const response = await request('/v1/me/keys', 'GET', undefined, { Cookie: p.cookie });
-    expect(await response.json()).toEqual(sealed);
+    expect(await response.json()).toMatchObject({ version: 1, identity: expect.any(String), signing: expect.any(String) });
     expect(response.headers.get('cache-control')).toBe('no-store');
-    expect(await (await request('/v1/me/keys', 'GET', undefined, { Cookie: other.cookie })).json()).not.toEqual(sealed);
+    expect(await (await request('/v1/me/keys', 'GET', undefined, { Cookie: other.cookie })).json()).not.toEqual(await (await request('/v1/me/keys', 'GET', undefined, { Cookie: p.cookie })).json());
     expect((await request('/v1/me/keys', 'GET')).status).toBe(401);
     const unverified = await account('unverified-keys@example.org');
-    expect((await request('/v1/me/keys', 'PUT', sealed, { Cookie: unverified.cookie })).status).toBe(401);
     expect((await request('/v1/me/keys', 'GET', undefined, { Cookie: unverified.cookie })).status).toBe(401);
-    expect(await (await request('/v1/me/keys', 'GET', undefined, { Cookie: p.cookie })).json()).toEqual(sealed);
-    expect((await request('/v1/me/keys', 'PUT', { ...sealed, privateKey: 'secret' }, { Cookie: p.cookie })).status).toBe(400);
-    expect((await request('/v1/me/keys', 'PUT', { ...sealed, identity: 'plaintext' }, { Cookie: p.cookie })).status).toBe(400);
-    expect((await request('/v1/me/keys', 'PUT', { identity: ciphertext, signing: ciphertext }, { Cookie: p.cookie })).status).toBe(400);
+    expect((await request('/v1/me/keys', 'PUT', testSealed(), { Cookie: p.cookie })).status).toBe(404);
   });
   it('uses one app-wide PRF salt, including discoverable options', async () => {
     const first = await account('salt-first@example.org');
@@ -95,6 +88,51 @@ describe('HTTP boundary', () => {
     expect(values.allowCredentials ?? []).toEqual([]);
     expect(values.extensions.prf.eval.first).toBe(initial.extensions.prf.eval.first);
   });
+  it('seals keys per credential and limits one-time backup recovery to passkey enrollment', async () => {
+    const owner = await person('backup-owner@example.org');
+    const first = owner.device.register('unused').id;
+    const original = await (await request('/v1/me/keys', 'GET', undefined, { Cookie: owner.cookie })).json();
+    const verifiers = Array.from({ length: 8 }, () => base64url(crypto.getRandomValues(new Uint8Array(32))));
+    const codes = await Promise.all(verifiers.map(async verifier => { const { identity, signing } = testSealed(); return { verifierHash: await digest(verifier), identity, signing }; }));
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      expect((await request('/v1/me/backup-codes', 'PUT', { codes, plaintext: 'SECRET-CODE' }, { Cookie: owner.cookie })).status).toBe(400);
+      expect((await request('/v1/me/backup-codes', 'PUT', { codes }, { Cookie: owner.cookie })).status).toBe(204);
+      const registry = (env as unknown as Env).REGISTRY.get((env as unknown as Env).REGISTRY.idFromName('registry-v2'));
+      const rows = await runInDurableObject(registry, (_object, state) => JSON.stringify(state.storage.sql.exec('SELECT * FROM backup_codes').toArray()));
+      expect(rows).not.toContain(verifiers[0]!); expect(rows).not.toContain('SECRET-CODE');
+      expect(log.mock.calls.flat().join(' ')).not.toContain(verifiers[0]!);
+      const second = await authenticator();
+      const options = await request('/v1/auth/passkey/register/options', 'POST', {}, { Cookie: owner.cookie });
+      const secondSealed = testSealed();
+      const secondId = second.register('unused').id;
+      expect((await request('/v1/auth/passkey/register/verify', 'POST', { response: second.register((await options.json() as { challenge: string }).challenge), sealed: secondSealed }, { Cookie: owner.cookie })).status).toBe(200);
+      expect(await (await request('/v1/me/keys', 'GET', undefined, { Cookie: owner.cookie })).json()).toEqual(secondSealed);
+      const next = await account(owner.email);
+      const login = await request('/v1/auth/passkey/login/options', 'POST', {}, { Cookie: next.cookie });
+      expect((await request('/v1/auth/passkey/login/verify', 'POST', { response: await owner.device.login((await login.json() as { challenge: string }).challenge) }, { Cookie: next.cookie })).status).toBe(200);
+      expect(await (await request('/v1/me/keys', 'GET', undefined, { Cookie: next.cookie })).json()).toEqual(original);
+      expect((await request('/v1/me/passkeys/' + first, 'DELETE', undefined, { Cookie: owner.cookie })).status).toBe(204);
+      expect((await request('/v1/me/passkeys/' + secondId, 'DELETE', undefined, { Cookie: owner.cookie })).status).toBe(403);
+      const wrong = base64url(crypto.getRandomValues(new Uint8Array(32)));
+      for (let i = 0; i < 5; i++) expect((await request('/v1/auth/backup-code/redeem', 'POST', { verifier: wrong })).status).toBe(401);
+      expect((await request('/v1/auth/backup-code/redeem', 'POST', { verifier: wrong })).status).toBe(429);
+      const redeemed = await request('/v1/auth/backup-code/redeem', 'POST', { verifier: verifiers[0]! });
+      expect(redeemed.status).toBe(200);
+      const recovery = { Cookie: redeemed.headers.get('set-cookie')!.split(';')[0]! };
+      expect(await (await request('/v1/me/keys', 'GET', undefined, recovery)).json()).toEqual({ version: 1, identity: codes[0]!.identity, signing: codes[0]!.signing });
+      expect((await request('/v1/auth/backup-code/redeem', 'POST', { verifier: verifiers[0]! })).status).toBe(401);
+      expect((await request('/v1/journeys', 'GET', undefined, recovery)).status).toBe(403);
+      expect((await request('/v1/journeys', 'POST', {}, recovery)).status).toBe(403);
+      expect((await request('/v1/invites/accept', 'POST', {}, recovery)).status).toBe(403);
+      expect((await request('/v1/agent-sessions/missing/approve', 'POST', {}, recovery)).status).toBe(403);
+      expect((await request('/v1/me/passkeys/' + secondId, 'DELETE', undefined, recovery)).status).toBe(403);
+      expect((await request('/v1/me/backup-codes', 'PUT', { codes }, recovery)).status).toBe(403);
+      const reEnroll = await request('/v1/auth/passkey/register/options', 'POST', {}, recovery);
+      expect((await request('/v1/auth/passkey/register/verify', 'POST', { response: (await authenticator()).register((await reEnroll.json() as { challenge: string }).challenge), sealed: testSealed() }, recovery)).status).toBe(200);
+      expect((await request('/v1/me/passkeys', 'GET', undefined, recovery)).status).toBe(200);
+    } finally { log.mockRestore(); }
+  });
   it('signs in by discoverable passkey with no prior email session; unknown and legacy credentials fail', async () => {
     const owner = await person('discovery@example.org');
     const start = await request('/v1/auth/passkey/start', 'POST', {});
@@ -109,31 +147,11 @@ describe('HTTP boundary', () => {
     const missing = await request('/v1/auth/passkey/start', 'POST', {});
     const forged = { ...response, id: 'unknown', rawId: 'unknown' };
     expect((await request('/v1/auth/passkey/finish', 'POST', { response: forged }, { Cookie: missing.headers.get('set-cookie')!.split(';')[0]! })).status).toBe(401);
-    const registry = (env as unknown as Env).REGISTRY.get((env as unknown as Env).REGISTRY.idFromName('registry-v1'));
+    const registry = (env as unknown as Env).REGISTRY.get((env as unknown as Env).REGISTRY.idFromName('registry-v2'));
     await runInDurableObject(registry, (_object, state) => { state.storage.sql.exec('UPDATE accounts SET email=NULL WHERE hash=(SELECT accountHash FROM credentials WHERE id=?)', response.id); });
     const noEmail = await request('/v1/auth/passkey/start', 'POST', {});
     const noEmailResponse = await owner.device.login((await noEmail.json() as { challenge: string }).challenge, 2);
     expect((await request('/v1/auth/passkey/finish', 'POST', { response: noEmailResponse }, { Cookie: noEmail.headers.get('set-cookie')!.split(';')[0]! })).status).toBe(401);
-  });
-  it('migrates legacy PRF keys after email sign-in, clearing the old salt only with the sealed update', async () => {
-    const owner = await person('old-salt@example.org');
-    const registry = (env as unknown as Env).REGISTRY.get((env as unknown as Env).REGISTRY.idFromName('registry-v1'));
-    const salt = base64url(crypto.getRandomValues(new Uint8Array(32)));
-    await runInDurableObject(registry, (_object, state) => { state.storage.sql.exec('UPDATE accounts SET prfSalt=? WHERE hash=(SELECT accountHash FROM credentials WHERE id=?)', salt, owner.device.register('unused').id); });
-    const next = await account(owner.email);
-    const options = await request('/v1/auth/passkey/login/options', 'POST', {}, { Cookie: next.cookie });
-    const values = await options.json() as { challenge: string; extensions: { prf: { eval: { first: string; second: string } } } };
-    expect(values.extensions.prf.eval.first).toBe(salt);
-    expect(values.extensions.prf.eval.second).toMatch(/^[A-Za-z0-9_-]{43}$/);
-    const assertion = await owner.device.login(values.challenge);
-    expect((await (await request('/v1/auth/passkey/login/verify', 'POST', { response: assertion }, { Cookie: next.cookie })).json() as { migrate: boolean }).migrate).toBe(true);
-    const sealed = testSealed();
-    expect((await request('/v1/me/keys', 'PUT', { ...sealed, migrate: true }, { Cookie: next.cookie })).status).toBe(204);
-    expect(await (await request('/v1/me/keys', 'GET', undefined, { Cookie: next.cookie })).json()).toEqual(sealed);
-    const after = await request('/v1/auth/passkey/login/options', 'POST', {}, { Cookie: next.cookie });
-    const updated = await after.json() as { extensions: { prf: { eval: { first: string; second?: string } } } };
-    expect(updated.extensions.prf.eval.first).toBe(values.extensions.prf.eval.second);
-    expect(updated.extensions.prf.eval.second).toBeUndefined();
   });
   it('emails a client-secret invitation only to a validated address, without storing or logging it', async () => {
     const owner = await person('invite-email-owner@example.org');
@@ -147,7 +165,7 @@ describe('HTTP boundary', () => {
     expect(deliveries[0]).toContain(email);
     expect(deliveries[0]).toContain(`${origin}/invite#${secret}`);
     expect((await request(path, 'POST', { inviteIdHash: await digest(secret), inviteId: secret, email: 'bad\r\nBcc: someone@example.org', expiresAt: Date.now() + 60_000 }, as(owner), { MAGIC_EMAIL: delivery })).status).toBe(400);
-    const registry = (env as unknown as Env).REGISTRY.get((env as unknown as Env).REGISTRY.idFromName('registry-v1'));
+    const registry = (env as unknown as Env).REGISTRY.get((env as unknown as Env).REGISTRY.idFromName('registry-v2'));
     const hash = await digest(secret);
     expect(await runInDurableObject(registry, (_object, state) => JSON.stringify(state.storage.sql.exec('SELECT * FROM invites WHERE hash=?', hash).toArray()))).not.toContain(email);
     const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);

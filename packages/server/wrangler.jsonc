@@ -13,11 +13,11 @@
     "bindings": [
       {
         "name": "REGISTRY",
-        "class_name": "Registry"
+        "class_name": "RegistryFresh"
       },
       {
         "name": "ENCLAVES",
-        "class_name": "EnclaveObject"
+        "class_name": "EnclaveFresh"
       }
     ]
   },
@@ -28,6 +28,11 @@
         "Registry",
         "EnclaveObject"
       ]
+    },
+    {
+      "tag": "v2-wipe-all-data",
+      "deleted_classes": ["Registry", "EnclaveObject"],
+      "new_sqlite_classes": ["RegistryFresh", "EnclaveFresh"]
     }
   ],
   "send_email": [

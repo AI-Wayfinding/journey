@@ -34,7 +34,7 @@ async function browserPerson(browser: Browser, hasPrf = true, omitPrfOnCreate = 
   page.on('request', request => requests.push(request.url()));
   return { page, context, requests, cdp, authenticatorId };
 }
-async function signUp(page: Page, email: string): Promise<void> {
+async function signUp(page: Page, email: string): Promise<string[]> {
   await page.goto('/');
   await expect(page.getByRole('heading', { name: "Let's get started" })).toBeVisible();
   await page.getByRole('link', { name: 'Start your journey' }).click();
@@ -49,11 +49,17 @@ async function signUp(page: Page, email: string): Promise<void> {
   await page.goto(link);
   await expect(page.getByRole('heading', { name: 'Create your passkey' })).toBeVisible();
   await page.getByRole('button', { name: 'Create passkey' }).click();
+  await expect(page.getByRole('heading', { name: 'Save your backup codes' })).toBeVisible({ timeout: 30_000 });
+  const codes = (await page.locator('#backup-copy-value').textContent())!.trim().split('\n');
+  expect(codes).toHaveLength(8);
+  await page.getByLabel('I saved these codes').check();
+  await page.getByRole('button', { name: 'Continue', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'A place to find your way' })).toBeVisible({ timeout: 30_000 });
   const count = await calls(page);
   expect(count.create).toBe(1);
   expect(count.get).toBeLessThanOrEqual(1);
   console.log(`Sign-up taps: ${count.create} create, ${count.get} get`);
+  return codes;
 }
 
 test('start, continue with a discoverable passkey in a new page, and email a journey invitation', async ({ browser }) => {
@@ -87,6 +93,55 @@ test('start, continue with a discoverable passkey in a new page, and email a jou
     await owner.page.getByRole('link', { name: 'A shared beginning' }).click();
     await expect(owner.page.getByRole('heading', { name: 'A shared beginning' })).toBeVisible();
   } finally { await owner.context.close(); await second.context.close(); }
+});
+
+test('add, replace and recover passkeys with a single-use backup code', async ({ browser }) => {
+  const owner = await browserPerson(browser);
+  const lost = await browserPerson(browser);
+  try {
+    const codes = await signUp(owner.page, `replace-${Date.now()}@example.org`);
+    await owner.page.getByRole('link', { name: 'Account' }).click();
+    await expect(owner.page.getByRole('button', { name: 'Remove' })).toBeDisabled();
+    const second = await owner.cdp.send('WebAuthn.addVirtualAuthenticator', { options: { protocol: 'ctap2', transport: 'usb', hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true, hasPrf: true } });
+    await owner.page.getByRole('button', { name: 'Add a passkey' }).click();
+    await expect(owner.page.getByRole('button', { name: 'Remove' })).toHaveCount(2);
+    const firstId = await owner.page.locator('.remove-passkey').first().getAttribute('data-id');
+    await owner.cdp.send('WebAuthn.removeVirtualAuthenticator', { authenticatorId: owner.authenticatorId });
+    // The second passkey can now confirm removal of the first.
+    await owner.page.locator(`.remove-passkey[data-id="${firstId}"]`).click();
+    await expect(owner.page.getByRole('button', { name: 'Remove' })).toHaveCount(1);
+    await expect(owner.page.getByRole('button', { name: 'Remove' })).toBeDisabled();
+    const remaining = await owner.page.request.get('/v1/me/passkeys');
+    expect((await remaining.json() as { passkeys: unknown[] }).passkeys).toHaveLength(1);
+    await owner.page.goto('/continue');
+    await owner.page.getByRole('button', { name: 'Continue with passkey' }).click();
+    await expect(owner.page.getByRole('heading', { name: 'A place to find your way' })).toBeVisible();
+    await owner.cdp.send('WebAuthn.removeVirtualAuthenticator', { authenticatorId: second.authenticatorId });
+    await lost.page.goto('/recover');
+    await lost.page.getByLabel('Backup code').fill(codes[0]!);
+    await lost.page.getByRole('button', { name: 'Use backup code' }).click();
+    await expect(lost.page.getByRole('heading', { name: 'Add a new passkey' })).toBeVisible();
+    expect((await lost.page.request.get('/v1/journeys')).status()).toBe(403);
+    await lost.page.getByRole('button', { name: 'Create passkey' }).click();
+    await expect(lost.page.getByRole('heading', { name: 'Passkey added' })).toBeVisible();
+    await lost.page.getByRole('link', { name: 'Open my journeys' }).click();
+    await expect(lost.page.getByRole('heading', { name: 'A place to find your way' })).toBeVisible();
+    await lost.page.goto('/recover');
+    await lost.page.getByLabel('Backup code').fill(codes[0]!);
+    await lost.page.getByRole('button', { name: 'Use backup code' }).click();
+    await expect(lost.page.getByRole('alert')).toBeVisible();
+  } finally { await owner.context.close(); await lost.context.close(); }
+});
+
+test('cancelled passkey prompt never shows a browser exception or specification URL', async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator.credentials, 'get', { value: () => Promise.reject(new DOMException('The operation either timed out or was not allowed. See: https://www.w3.org/TR/webauthn-2/#sctn-privacy-considerations-client.', 'NotAllowedError')) });
+  });
+  await page.goto('/continue');
+  await page.getByRole('button', { name: 'Continue with passkey' }).click();
+  await expect(page.getByRole('alert')).toContainText("No passkey was used. If you removed it or it's on another device, use a backup code.");
+  await expect(page.getByRole('link', { name: 'Lost your passkey? Use a backup code' })).toBeVisible();
+  expect(await page.locator('body').innerText()).not.toMatch(/w3\.org|operation either timed out/i);
 });
 
 test('missing PRF output at creation uses the same passkey once more', async ({ browser }) => {
@@ -164,6 +219,9 @@ test('two people share a journey with PRF passkeys and same-origin assets', asyn
     await bob.page.goto(/https?:\/\/[^\s]+#token=[A-Za-z0-9_-]+/.exec(bobText)![0]!);
     await expect(bob.page.getByRole('heading', { name: 'Create your passkey' })).toBeVisible();
     await bob.page.getByRole('button', { name: 'Create passkey' }).click();
+    await expect(bob.page.getByRole('heading', { name: 'Save your backup codes' })).toBeVisible();
+    await bob.page.getByLabel('I saved these codes').check();
+    await bob.page.getByRole('button', { name: 'Continue', exact: true }).click();
     await expect.poll(() => calls(bob.page).then(count => count.create)).toBe(1);
     expect((await calls(bob.page)).get).toBeLessThanOrEqual(1);
     await expect(bob.page.getByRole('heading', { name: 'Join a journey' })).toBeVisible({ timeout: 30_000 });

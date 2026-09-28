@@ -45,17 +45,20 @@ class UnlockedPersonKeys implements PersonKeys {
   #recipient: string;
   #signingKey: string;
   #signingPrivateKey: CryptoKey | null;
-  constructor(identity: string, recipient: string, signingKey: string, signingPrivateKey: CryptoKey) {
+  #signingSecret: string;
+  constructor(identity: string, recipient: string, signingKey: string, signingPrivateKey: CryptoKey, signingSecret: string) {
     this.#identity = identity;
     this.#recipient = recipient;
     this.#signingKey = signingKey;
     this.#signingPrivateKey = signingPrivateKey;
+    this.#signingSecret = signingSecret;
   }
   get identity(): string { if (!this.#identity) throw new Error('Your keys are locked. Sign in again.'); return this.#identity; }
   get recipient(): string { if (!this.#recipient) throw new Error('Your keys are locked. Sign in again.'); return this.#recipient; }
   get signingKey(): string { if (!this.#signingKey) throw new Error('Your keys are locked. Sign in again.'); return this.#signingKey; }
   get signingPrivateKey(): CryptoKey { if (!this.#signingPrivateKey) throw new Error('Your keys are locked. Sign in again.'); return this.#signingPrivateKey; }
-  clear(): void { this.#identity = ''; this.#recipient = ''; this.#signingKey = ''; this.#signingPrivateKey = null; }
+  seal(key: CryptoKey): Promise<SealedPersonKeys> { return Promise.all([encrypt(key, 'identity', this.identity), encrypt(key, 'signing', JSON.stringify({ publicKey: this.signingKey, privateKey: this.#signingSecret }))]).then(([identity, signing]) => ({ version: 1, identity, signing })); }
+  clear(): void { this.#identity = ''; this.#recipient = ''; this.#signingKey = ''; this.#signingSecret = ''; this.#signingPrivateKey = null; }
 }
 const IDLE_MS = 30 * 60_000;
 let unlocked: UnlockedPersonKeys | null = null;
@@ -97,13 +100,34 @@ export async function sealPersonKeys(prfOutput: Uint8Array): Promise<{ sealed: S
   });
 }
 
-/** Move existing ciphertext to the app-wide PRF input without changing the private keys. */
-export async function resealPersonKeys(sealed: SealedPersonKeys, oldOutput: Uint8Array, newOutput: Uint8Array): Promise<SealedPersonKeys> {
-  return withPrfKey(oldOutput, async oldKey => {
-    const identity = await decrypt(oldKey, 'identity', sealed.identity);
-    const signing = await decrypt(oldKey, 'signing', sealed.signing);
-    return withPrfKey(newOutput, async newKey => ({ version: 1, identity: await encrypt(newKey, 'identity', identity), signing: await encrypt(newKey, 'signing', signing) }));
-  });
+export async function sealUnlockedKeys(output: Uint8Array): Promise<SealedPersonKeys> {
+  const keys = getPersonKeys(); if (!keys || !unlocked) throw new Error('Unlock your keys with a passkey first.');
+  return withPrfKey(output, key => unlocked!.seal(key));
+}
+
+export async function backupKey(code: Uint8Array, purpose: 'verifier' | 'wrapping'): Promise<Uint8Array> {
+  if (code.length !== 16) throw new Error('Enter a valid backup code.');
+  const key = await crypto.subtle.importKey('raw', asBuffer(code), 'HKDF', false, ['deriveBits']);
+  return new Uint8Array(await crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt: asBuffer(encoder.encode('wayfinding/backup/v1')), info: asBuffer(encoder.encode(purpose)) }, key, 256));
+}
+
+export function newBackupCode(): string {
+  const alphabet = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  let number = BigInt('0x' + [...bytes].map(byte => byte.toString(16).padStart(2, '0')).join(''));
+  let text = '';
+  for (let i = 0; i < 26; i++) { text = alphabet[Number(number & 31n)] + text; number >>= 5n; }
+  return text.match(/.{1,4}/g)!.join('-');
+}
+
+export function parseBackupCode(value: string): Uint8Array {
+  const text = value.toUpperCase().replace(/[-\s]/g, '');
+  if (!/^[0-9A-HJKMNP-TV-Z]{26}$/.test(text)) throw new Error('Enter a valid backup code.');
+  const alphabet = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+  let number = 0n;
+  for (const letter of text) number = number * 32n + BigInt(alphabet.indexOf(letter));
+  if (number >= 1n << 128n) throw new Error('Enter a valid backup code.');
+  return Uint8Array.from({ length: 16 }, (_, i) => Number(number >> BigInt((15 - i) * 8) & 255n));
 }
 
 /** Decrypt only after one passkey tap; retain usable keys in module memory. */
@@ -113,7 +137,7 @@ export async function unlockPersonKeys(sealed: SealedPersonKeys, prfOutput: Uint
     const identity = await decrypt(key, 'identity', sealed.identity);
     const signing: unknown = JSON.parse(await decrypt(key, 'signing', sealed.signing));
     if (!signing || typeof signing !== 'object' || !('publicKey' in signing) || !('privateKey' in signing) || typeof signing.publicKey !== 'string' || typeof signing.privateKey !== 'string') throw new Error('Invalid sealed signing key');
-    const next = new UnlockedPersonKeys(identity, await deriveRecipient(identity), signing.publicKey, await importSigningKey(signing.privateKey));
+    const next = new UnlockedPersonKeys(identity, await deriveRecipient(identity), signing.publicKey, await importSigningKey(signing.privateKey), signing.privateKey);
     clearPersonKeys();
     unlocked = next;
     idleTimer = setTimeout(clearPersonKeys, IDLE_MS);

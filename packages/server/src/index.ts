@@ -8,6 +8,8 @@ import { Registry } from './registry.js';
 import { failure, limitNumber, object, sequenceCursor, validEpoch, validExpiry, validKind, validScope, validSeq, validString } from './types.js';
 import type { AccessChange, CreateJourney, EnclaveMessage, EpochWrap, RegistryMessage, Subject } from './types.js';
 export { EnclaveObject, Registry };
+export class EnclaveFresh extends EnclaveObject {}
+export class RegistryFresh extends Registry {}
 
 export interface Env {
   REGISTRY: DurableObjectNamespace;
@@ -22,7 +24,7 @@ export interface Env {
   EMAIL_ACCOUNT_RATE?: { limit(input: { key: string }): Promise<{ success: boolean }> };
   AGENT_SESSION_RATE?: { limit(input: { key: string }): Promise<{ success: boolean }> };
 }
-type Auth = { accountHash: string; sessionHash: string; verifiedAt: number | null; email: string | null };
+type Auth = { accountHash: string; sessionHash: string; verifiedAt: number | null; email: string | null; credentialId: string | null; recovery: boolean };
 type Context = { Bindings: Env; Variables: { subject: Subject } };
 const app = new Hono<Context>();
 const json = (data: unknown, status = 200): Response => Response.json(data, { status });
@@ -30,7 +32,7 @@ const cookie = (value: string): string => 'wayfinding_session=' + value + '; Pat
 const discoveryCookie = (value: string): string => 'wayfinding_discovery=' + value + '; Path=/v1/auth/passkey; HttpOnly; Secure; SameSite=Strict; Max-Age=300';
 type AppContext = import('hono').Context<Context>;
 async function registry(env: Env, data: RegistryMessage): Promise<any> {
-  const stub = env.REGISTRY.get(env.REGISTRY.idFromName('registry-v1'));
+  const stub = env.REGISTRY.get(env.REGISTRY.idFromName('registry-v2'));
   const response = await stub.fetch('https://internal/', { method: 'POST', body: JSON.stringify(data) });
   if (!response.ok) throw new Error('registry failed');
   return response.json();
@@ -53,7 +55,7 @@ async function session(c: AppContext): Promise<Auth | null> {
   if (!match) return null;
   const sessionHash = await digest(match[1]!);
   const row = await registry(c.env, { op: 'session', hash: sessionHash });
-  return row ? { accountHash: row.accountHash, sessionHash, verifiedAt: row.verifiedAt, email: typeof row.email === 'string' ? row.email : null } : null;
+  return row ? { accountHash: row.accountHash, sessionHash, verifiedAt: row.verifiedAt, email: typeof row.email === 'string' ? row.email : null, credentialId: row.credentialId, recovery: row.recovery } : null;
 }
 async function agent(c: AppContext): Promise<Subject | null> {
   const id = c.req.header('x-agent-session'), timestamp = c.req.header('x-agent-timestamp');
@@ -88,8 +90,8 @@ function sealedPersonKey(value: unknown): value is string {
   if (!validString(value, 100_000) || !/^[A-Za-z0-9_-]+$/.test(value)) return false;
   try { return unbase64url(value).length >= 64; } catch { return false; }
 }
-function sealedKeys(value: unknown, migration = false): value is { version: 1; identity: string; signing: string; migrate?: true } {
-  return object(value) && Object.keys(value).every(key => ['version', 'identity', 'signing', ...(migration ? ['migrate'] : [])].includes(key)) && value.version === 1 && (value.migrate === undefined || migration && value.migrate === true) && sealedPersonKey(value.identity) && sealedPersonKey(value.signing);
+function sealedKeys(value: unknown): value is { version: 1; identity: string; signing: string } {
+  return object(value) && Object.keys(value).every(key => ['version', 'identity', 'signing'].includes(key)) && value.version === 1 && sealedPersonKey(value.identity) && sealedPersonKey(value.signing);
 }
 type RegistrationResponse = Parameters<typeof verifyRegistrationResponse>[0]['response'];
 type AuthenticationResponse = Parameters<typeof verifyAuthenticationResponse>[0]['response'];
@@ -102,6 +104,12 @@ function authenticationResponse(value: unknown): value is AuthenticationResponse
 app.onError(() => failure('internal', 500));
 app.use('/v1/*', async (c, next) => {
   if (!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method) && (!validString(c.env.ORIGIN) || c.req.header('x-wayfinding') !== '1' || c.req.header('origin') !== c.env.ORIGIN)) return failure('csrf', 403);
+  await next();
+});
+// A recovery cookie cannot be used as a general account session, even on public routes.
+app.use('/v1/*', async (c, next) => {
+  const auth = await session(c);
+  if (auth?.recovery && !['/v1/me/keys', '/v1/auth/passkey/register/options', '/v1/auth/passkey/register/verify', '/v1/auth/logout'].includes(c.req.path)) return failure('forbidden', 403);
   await next();
 });
 app.post('/v1/auth/email/start', async c => {
@@ -144,7 +152,7 @@ app.post('/v1/auth/passkey/register/options', async c => {
   const auth = await session(c);
   if (!auth) return failure('unauthorized', 401);
   const existing = await registry(c.env, { op: 'credentials', accountHash: auth.accountHash });
-  if (existing.length) return failure('forbidden', 403);
+  if (existing.length && !auth.recovery && (auth.verifiedAt === null || auth.verifiedAt < Date.now() - 300_000)) return failure('forbidden', 403);
   if (!validString(c.env.EMAIL_HASH_KEY)) return failure('internal', 500);
   const options = await generateRegistrationOptions({ rpName: 'Wayfinding', rpID: c.env.RP_ID, userName: auth.accountHash, userID: new Uint8Array(unbase64url(auth.accountHash)), authenticatorSelection: { residentKey: 'required', userVerification: 'required' }, extensions: { prf: { eval: { first: unbase64url(await appPrfSalt(c.env.EMAIL_HASH_KEY)) } } }, excludeCredentials: existing.map((r: any) => ({ id: r.id, transports: transportList(r.transports) })) });
   await registry(c.env, { op: 'challengeSet', sessionHash: auth.sessionHash, challenge: options.challenge, kind: 'register' });
@@ -153,7 +161,8 @@ app.post('/v1/auth/passkey/register/options', async c => {
 app.post('/v1/auth/passkey/register/verify', async c => {
   const auth = await session(c); if (!auth) return failure('unauthorized', 401);
   const data = await payload(c).catch(() => null); if (!data || !registrationResponse(data.response) || !sealedKeys(data.sealed)) return failure('invalid-request', 400);
-  if ((await registry(c.env, { op: 'credentials', accountHash: auth.accountHash })).length) return failure('forbidden', 403);
+  const existing = await registry(c.env, { op: 'credentials', accountHash: auth.accountHash });
+  if (existing.length && !auth.recovery && (auth.verifiedAt === null || auth.verifiedAt < Date.now() - 300_000)) return failure('forbidden', 403);
   const challenge = await registry(c.env, { op: 'challengeTake', sessionHash: auth.sessionHash, kind: 'register' });
   if (!challenge) return failure('unauthorized', 401);
   if (data.response.clientExtensionResults.prf?.enabled !== true) { console.warn('passkey-register refused', 'prf-not-enabled'); return failure('invalid-request', 400); }
@@ -167,7 +176,7 @@ app.post('/v1/auth/passkey/register/verify', async c => {
   } catch (cause) { console.warn('passkey-register refused', cause instanceof Error ? cause.name + ': ' + cause.message.slice(0, 160) : 'unknown'); return failure('unauthorized', 401); }
 });
 const diagnosticValues: Record<string, RegExp> = {
-  stage: /^(register-create|register-get|login)$/, outcome: /^(ok|no-prf|no-output|error)$/, prf: /^(present|absent)$/, enabled: /^(true|false|absent)$/,
+  stage: /^(register-create|register-get|login|continue)$/,  outcome: /^(ok|no-prf|no-output|error)$/, prf: /^(present|absent)$/, enabled: /^(true|false|absent)$/,
   first: /^(absent|string|arraybuffer|view|other)$/, attachment: /^(platform|cross-platform)$/, aaguid: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
   error: /^[A-Za-z_]{1,60}$/, browser: /^([A-Za-z]{1,10} \d{1,4}|other)$/,
 };
@@ -183,18 +192,17 @@ app.post('/v1/diagnostics/passkey', async c => {
   return new Response(null, { status: 204 });
 });
 app.post('/v1/auth/passkey/login/options', async c => {
-  const auth = await session(c); if (!auth) return failure('unauthorized', 401);
+  const auth = await session(c); if (!auth || auth.recovery) return failure('unauthorized', 401);
   const credentials = await registry(c.env, { op: 'credentials', accountHash: auth.accountHash });
   if (!credentials.length) return failure('unauthorized', 401);
   if (!validString(c.env.EMAIL_HASH_KEY)) return failure('internal', 500);
-  const legacy = await registry(c.env, { op: 'legacySalt', accountHash: auth.accountHash });
   const appSalt = await appPrfSalt(c.env.EMAIL_HASH_KEY);
-  const options = await generateAuthenticationOptions({ rpID: c.env.RP_ID, userVerification: 'required', extensions: { prf: { eval: { first: unbase64url(legacy?.prfSalt || appSalt), ...(legacy?.prfSalt ? { second: unbase64url(appSalt) } : {}) } } }, allowCredentials: credentials.map((r: any) => ({ id: r.id, transports: transportList(r.transports) })) });
+  const options = await generateAuthenticationOptions({ rpID: c.env.RP_ID, userVerification: 'required', extensions: { prf: { eval: { first: unbase64url(appSalt) } } }, allowCredentials: credentials.map((r: any) => ({ id: r.id, transports: transportList(r.transports) })) });
   await registry(c.env, { op: 'challengeSet', sessionHash: auth.sessionHash, challenge: options.challenge, kind: 'login' });
-  return json({ ...options, extensions: { prf: { eval: { first: legacy?.prfSalt || appSalt, ...(legacy?.prfSalt ? { second: appSalt } : {}) } } } });
+  return json({ ...options, extensions: { prf: { eval: { first: appSalt } } } });
 });
 app.post('/v1/auth/passkey/login/verify', async c => {
-  const auth = await session(c); if (!auth) return failure('unauthorized', 401);
+  const auth = await session(c); if (!auth || auth.recovery) return failure('unauthorized', 401);
   const data = await payload(c).catch(() => null);
   if (!data || !authenticationResponse(data.response)) return failure('invalid-request', 400);
   const challenge = await registry(c.env, { op: 'challengeTake', sessionHash: auth.sessionHash, kind: 'login' });
@@ -206,8 +214,7 @@ app.post('/v1/auth/passkey/login/verify', async c => {
     if (!result.verified) return failure('unauthorized', 401);
     const used = await registry(c.env, { op: 'credentialUse', id: credential.id, accountHash: auth.accountHash, counter: result.authenticationInfo.newCounter, sessionHash: auth.sessionHash });
     if (!used) return failure('unauthorized', 401);
-    const legacy = await registry(c.env, { op: 'legacySalt', accountHash: auth.accountHash });
-    return json({ verified: true, migrate: Boolean(legacy?.prfSalt) });
+    return json({ verified: true });
   } catch { return failure('unauthorized', 401); }
 });
 app.post('/v1/auth/passkey/start', async c => {
@@ -227,7 +234,7 @@ app.post('/v1/auth/passkey/finish', async c => {
   const challenge = await registry(c.env, { op: 'challengeTake', sessionHash: await digest(id), kind: 'discover' });
   if (!challenge) return failure('unauthorized', 401);
   const credential = await registry(c.env, { op: 'credentialById', id: data.response.id });
-  if (!credential?.email || credential.prfSalt) return failure('unauthorized', 401);
+  if (!credential?.email) return failure('unauthorized', 401);
   try {
     const result = await verifyAuthenticationResponse({ response: data.response, expectedChallenge: challenge.challenge, expectedOrigin: c.env.ORIGIN, expectedRPID: c.env.RP_ID, requireUserVerification: true, credential: { id: credential.id, publicKey: new Uint8Array(unbase64url(credential.publicKey)), counter: credential.counter, transports: transportList(credential.transports) } });
     if (!result.verified) return failure('unauthorized', 401);
@@ -248,18 +255,38 @@ app.post('/v1/auth/logout', async c => {
 
 app.get('/v1/me/keys', async c => {
   const auth = await session(c);
-  if (!auth || auth.verifiedAt === null) return failure('unauthorized', 401);
-  const keys = await registry(c.env, { op: 'keysGet', accountHash: auth.accountHash });
+  if (!auth || !auth.recovery && (auth.verifiedAt === null || !auth.credentialId)) return failure('unauthorized', 401);
+  const keys = await registry(c.env, { op: 'keysGet', accountHash: auth.accountHash, credentialId: auth.credentialId ?? '', sessionHash: auth.sessionHash, recovery: auth.recovery });
   return new Response(JSON.stringify(keys), { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
 });
-app.put('/v1/me/keys', async c => {
-  const auth = await session(c);
-  if (!auth || auth.verifiedAt === null) return failure('unauthorized', 401);
-  const b = await payload(c).catch(() => null);
-  if (!sealedKeys(b, true)) return failure('invalid-request', 400);
-  const saved = await registry(c.env, { op: 'keysPut', accountHash: auth.accountHash, sessionHash: auth.sessionHash, version: 1, identity: b.identity, signing: b.signing, migrate: b.migrate === true });
-  if (!saved) return failure('forbidden', 403);
+app.get('/v1/me/passkeys', async c => {
+  const auth = await session(c); if (!auth || auth.recovery || auth.verifiedAt === null) return failure('unauthorized', 401);
+  const credentials = await registry(c.env, { op: 'credentials', accountHash: auth.accountHash });
+  return json({ passkeys: credentials.map((r: any) => ({ id: r.id, name: r.name, created: r.created, lastUsed: r.lastUsed })), codesRemaining: await registry(c.env, { op: 'backupCount', accountHash: auth.accountHash }) });
+});
+app.delete('/v1/me/passkeys/:id', async c => {
+  const auth = await session(c); if (!auth || auth.recovery || auth.verifiedAt === null || auth.verifiedAt < Date.now() - 300_000) return failure('unauthorized', 401);
+  const removed = await registry(c.env, { op: 'credentialRemove', accountHash: auth.accountHash, id: c.req.param('id') });
+  return removed ? new Response(null, { status: 204 }) : failure('forbidden', 403);
+});
+function backupCodes(value: unknown): value is { verifierHash: string; identity: string; signing: string }[] {
+  return Array.isArray(value) && value.length === 8 && new Set(value.map(c => object(c) ? c.verifierHash : null)).size === 8 && value.every(c => object(c) && Object.keys(c).every(k => ['verifierHash', 'identity', 'signing'].includes(k)) && typeof c.verifierHash === 'string' && /^[A-Za-z0-9_-]{43}$/.test(c.verifierHash) && sealedPersonKey(c.identity) && sealedPersonKey(c.signing));
+}
+app.put('/v1/me/backup-codes', async c => {
+  const auth = await session(c); if (!auth || auth.recovery || auth.verifiedAt === null || auth.verifiedAt < Date.now() - 300_000) return failure('unauthorized', 401);
+  const data = await payload(c).catch(() => null);
+  if (!data || !backupCodes(data.codes) || Object.keys(data).some(k => k !== 'codes')) return failure('invalid-request', 400);
+  await registry(c.env, { op: 'backupReplace', accountHash: auth.accountHash, codes: data.codes.map(code => ({ verifierHash: code.verifierHash, identity: code.identity, signing: code.signing })) });
   return new Response(null, { status: 204, headers: { 'Cache-Control': 'no-store' } });
+});
+app.post('/v1/auth/backup-code/redeem', async c => {
+  const data = await payload(c).catch(() => null);
+  if (!data || Object.keys(data).length !== 1 || typeof data.verifier !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(data.verifier)) return failure('invalid-request', 400);
+  const id = randomToken();
+  const result = await registry(c.env, { op: 'backupRedeem', verifierHash: await digest(data.verifier), ipHash: await digest(c.req.header('cf-connecting-ip') ?? 'unknown'), sessionHash: await digest(id) });
+  if (result?.status === 'rate-limited') return failure('rate-limited', 429);
+  if (!result) return failure('unauthorized', 401);
+  return new Response(JSON.stringify({ ok: true }), { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'Set-Cookie': cookie(id) } });
 });
 
 app.post('/v1/journeys', async c => {
