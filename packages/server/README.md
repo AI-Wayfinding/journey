@@ -1,6 +1,6 @@
 # Journey server
 
-This Worker serves `/v1/*` with Hono and non-API paths from the web build (`ASSETS`, with SPA fallback). Each journey lives in one SQLite-backed Durable Object (`EnclaveFresh`). A second, fixed-name SQLite-backed object (`RegistryFresh`, ID `registry-v2`) holds accounts and the operator registry. We chose it instead of D1 to avoid a second storage product. The `v2-wipe-all-data` migration deletes the old `Registry` and `EnclaveObject` classes and creates both fresh SQLite classes, clearing every account, journey and journey object. API errors are always `{ "error": { "code": "..." } }` and never include internals.
+This Worker serves `/v1/*` with Hono and non-API paths from the web build (`ASSETS`, with SPA fallback). Each journey lives in one SQLite-backed Durable Object (`EnclaveFresh`). A second, fixed-name SQLite-backed object (`RegistryFresh`, ID `registry-v2`) holds accounts and the operator registry. We chose it instead of D1 to avoid a second storage product. The `v2-fresh-storage` migration switches bindings to fresh SQLite classes; `v3-delete-old-storage` deletes the unbound old `Registry` and `EnclaveObject` classes, clearing every account, journey and journey object. API errors are always `{ "error": { "code": "..." } }` and never include internals.
 
 ## API
 

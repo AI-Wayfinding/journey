@@ -30,9 +30,12 @@
       ]
     },
     {
-      "tag": "v2-wipe-all-data",
-      "deleted_classes": ["Registry", "EnclaveObject"],
+      "tag": "v2-fresh-storage",
       "new_sqlite_classes": ["RegistryFresh", "EnclaveFresh"]
+    },
+    {
+      "tag": "v3-delete-old-storage",
+      "deleted_classes": ["Registry", "EnclaveObject"]
     }
   ],
   "send_email": [
