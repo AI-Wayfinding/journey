@@ -34,5 +34,14 @@
     "typescript": "^5.9.3",
     "vitest": "^4.1.0",
     "wrangler": "^4.138.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AI-Wayfinding/journey.git",
+    "directory": "packages/client"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

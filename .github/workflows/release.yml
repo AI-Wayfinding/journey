@@ -1,0 +1,38 @@
+name: Release
+
+# Publishing a GitHub release (tag vX.Y.Z) publishes @ai-wayfinding/core and
+# @ai-wayfinding/client to npm at that version, via npm trusted publishing (no token).
+# Run it by hand (Actions > Release > Run workflow) for a dry run that publishes nothing.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - run: npm install -g npm@latest
+      - run: npm ci
+      - name: Set version
+        run: |
+          if [ "${{ github.event_name }}" = release ]; then V="${GITHUB_REF_NAME#v}"; else V="0.0.0-dryrun"; fi
+          for p in core client; do (cd packages/$p && npm pkg set version="$V"); done
+          (cd packages/client && npm pkg set "dependencies.@ai-wayfinding/core=$V")
+      - run: npm run build -w packages/core && npm run build -w packages/client
+      - run: npm test -w packages/core && npm test -w packages/client
+      - name: Publish
+        run: |
+          FLAG=""; [ "${{ github.event_name }}" = release ] || FLAG="--dry-run"
+          npm publish -w packages/core $FLAG
+          npm publish -w packages/client $FLAG
