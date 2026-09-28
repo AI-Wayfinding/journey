@@ -28,7 +28,7 @@ type Auth = { accountHash: string; sessionHash: string; verifiedAt: number | nul
 type Context = { Bindings: Env; Variables: { subject: Subject } };
 const app = new Hono<Context>();
 const json = (data: unknown, status = 200): Response => Response.json(data, { status });
-const cookie = (value: string): string => 'wayfinding_session=' + value + '; Path=/v1; HttpOnly; Secure; SameSite=Strict; Max-Age=43200';
+const cookie = (value: string): string => 'wayfinding_session=' + value + '; Path=/v1; HttpOnly; Secure; SameSite=Strict; Max-Age=2592000';
 const discoveryCookie = (value: string): string => 'wayfinding_discovery=' + value + '; Path=/v1/auth/passkey; HttpOnly; Secure; SameSite=Strict; Max-Age=300';
 type AppContext = import('hono').Context<Context>;
 async function registry(env: Env, data: RegistryMessage): Promise<any> {

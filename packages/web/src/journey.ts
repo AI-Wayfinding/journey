@@ -4,6 +4,9 @@ import type { Envelope, ItemBody, JourneyKey, KeyWrap, LogEntry, LogState, Membe
 import { getPersonKeys, rememberJourneyKey } from './keys.js';
 import type { PersonKeys } from './keys.js';
 
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) { super(message); }
+}
 export type JourneyListing = { id: string; name: string; principal: string };
 export type EntryRow = { seq: number; entry: string };
 export type JourneyContext = { id: string; principal: string; keys: PersonKeys; state: LogState; epochs: Map<number, JourneyKey>; log: LogEntry[] };
@@ -16,7 +19,7 @@ export async function api<T>(path: string, method = 'GET', data?: unknown, princ
   const response = await fetch('/v1' + path, { method, credentials: 'same-origin', cache: 'no-store', headers: { ...(data === undefined ? {} : { 'Content-Type': 'application/json' }), ...(method === 'GET' ? {} : { 'X-Wayfinding': '1' }), ...(principal ? { 'X-Principal': principal } : {}) }, ...(data === undefined ? {} : { body: JSON.stringify(data) }) });
   if (!response.ok) {
     const error = await response.json().catch(() => null) as { error?: { code?: string } } | null;
-    throw new Error(plainError(error?.error?.code, response.status));
+    throw new ApiError(plainError(error?.error?.code, response.status), response.status);
   }
   return response.status === 204 ? undefined as T : response.json() as Promise<T>;
 }

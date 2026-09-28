@@ -60,20 +60,17 @@ class UnlockedPersonKeys implements PersonKeys {
   seal(key: CryptoKey): Promise<SealedPersonKeys> { return Promise.all([encrypt(key, 'identity', this.identity), encrypt(key, 'signing', JSON.stringify({ publicKey: this.signingKey, privateKey: this.#signingSecret }))]).then(([identity, signing]) => ({ version: 1, identity, signing })); }
   clear(): void { this.#identity = ''; this.#recipient = ''; this.#signingKey = ''; this.#signingSecret = ''; this.#signingPrivateKey = null; }
 }
-const IDLE_MS = 30 * 60_000;
 let unlocked: UnlockedPersonKeys | null = null;
 const openJourneyKeys = new Set<JourneyKey>();
 /** Retain epoch keys only in memory, and zero their byte arrays when the person locks. */
 export function rememberJourneyKey(key: JourneyKey): void { openJourneyKeys.add(key); }
-let idleTimer: ReturnType<typeof setTimeout> | undefined;
 let onClear: (() => void) | null = null;
 /** Let the UI clear decrypted text and any unsaved recovery identity when keys lock. */
 export function onPersonKeysCleared(callback: (() => void) | null): void { onClear = callback; }
 
-export function clearPersonKeys(): void {
+/** Clear only this page's decrypted material; a reload must not sign the person out. */
+export function lockPersonKeys(): void {
   const hadKeys = unlocked !== null || openJourneyKeys.size > 0;
-  if (idleTimer !== undefined) clearTimeout(idleTimer);
-  idleTimer = undefined;
   unlocked?.clear();
   unlocked = null;
   for (const key of openJourneyKeys) key.key.fill(0);
@@ -81,11 +78,49 @@ export function clearPersonKeys(): void {
   if (hadKeys) onClear?.();
 }
 
-export function getPersonKeys(): PersonKeys | null {
-  if (unlocked) {
-    if (idleTimer !== undefined) clearTimeout(idleTimer);
-    idleTimer = setTimeout(clearPersonKeys, IDLE_MS);
-  }
+const databaseName = 'wayfinding-person-keys';
+const storeName = 'person';
+type SavedKeys = { key: CryptoKey; sealed: SealedPersonKeys };
+function openDatabase(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(databaseName, 1);
+    request.onupgradeneeded = () => { request.result.createObjectStore(storeName); };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+async function savedKeys(mode: IDBTransactionMode, operation: (store: IDBObjectStore) => IDBRequest): Promise<unknown> {
+  const db = await openDatabase();
+  try {
+    return await new Promise((resolve, reject) => {
+      const transaction = db.transaction(storeName, mode);
+      const request = operation(transaction.objectStore(storeName));
+      transaction.oncomplete = () => resolve(request.result);
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+  } finally { db.close(); }
+}
+
+/** Sign out removes the persistent wrapping key as well as this page's decrypted keys. */
+export async function clearPersonKeys(): Promise<void> {
+  lockPersonKeys();
+  await savedKeys('readwrite', store => store.delete('current'));
+}
+
+export function getPersonKeys(): PersonKeys | null { return unlocked; }
+
+/** Restore only the keys protected by the non-extractable key in this browser profile. */
+export async function restorePersonKeys(): Promise<PersonKeys | null> {
+  if (unlocked) return unlocked;
+  const saved = await savedKeys('readonly', store => store.get('current')) as SavedKeys | undefined;
+  if (!saved) return null;
+  const { key, sealed } = saved;
+  if (sealed.version !== 1) throw new Error('Your saved journey keys need a new sign-up.');
+  const identity = await decrypt(key, 'identity', sealed.identity);
+  const signing: unknown = JSON.parse(await decrypt(key, 'signing', sealed.signing));
+  if (!signing || typeof signing !== 'object' || !('publicKey' in signing) || !('privateKey' in signing) || typeof signing.publicKey !== 'string' || typeof signing.privateKey !== 'string') throw new Error('Invalid sealed signing key');
+  unlocked = new UnlockedPersonKeys(identity, await deriveRecipient(identity), signing.publicKey, await importSigningKey(signing.privateKey), signing.privateKey);
   return unlocked;
 }
 
@@ -130,7 +165,7 @@ export function parseBackupCode(value: string): Uint8Array {
   return Uint8Array.from({ length: 16 }, (_, i) => Number(number >> BigInt((15 - i) * 8) & 255n));
 }
 
-/** Decrypt only after one passkey tap; retain usable keys in module memory. */
+/** Decrypt after a passkey tap, then protect a local copy for future visits. */
 export async function unlockPersonKeys(sealed: SealedPersonKeys, prfOutput: Uint8Array): Promise<PersonKeys> {
   return withPrfKey(prfOutput, async key => {
     if (sealed.version !== 1) throw new Error('Your saved journey keys need a new sign-up.');
@@ -138,9 +173,11 @@ export async function unlockPersonKeys(sealed: SealedPersonKeys, prfOutput: Uint
     const signing: unknown = JSON.parse(await decrypt(key, 'signing', sealed.signing));
     if (!signing || typeof signing !== 'object' || !('publicKey' in signing) || !('privateKey' in signing) || typeof signing.publicKey !== 'string' || typeof signing.privateKey !== 'string') throw new Error('Invalid sealed signing key');
     const next = new UnlockedPersonKeys(identity, await deriveRecipient(identity), signing.publicKey, await importSigningKey(signing.privateKey), signing.privateKey);
-    clearPersonKeys();
+    const wrappingKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+    const local = await next.seal(wrappingKey);
+    await savedKeys('readwrite', store => store.put({ key: wrappingKey, sealed: local }, 'current'));
+    lockPersonKeys();
     unlocked = next;
-    idleTimer = setTimeout(clearPersonKeys, IDLE_MS);
     return next;
   });
 }

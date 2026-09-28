@@ -3,14 +3,16 @@ import { prfOutput } from './prf.js';
 import { startAuthentication, startRegistration } from '@simplewebauthn/browser';
 import { newId, signEntry, validAgentName, verifyLog, wrapJourneyKey } from '@ai-wayfinding/core';
 import type { CommentBody, ItemBody, ProtocolRecord } from '@ai-wayfinding/core';
-import { backupKey, clearPersonKeys, getPersonKeys, newBackupCode, onPersonKeysCleared, parseBackupCode, sealPersonKeys, sealUnlockedKeys, unlockPersonKeys } from './keys.js';
+import { backupKey, clearPersonKeys, getPersonKeys, lockPersonKeys, newBackupCode, onPersonKeysCleared, parseBackupCode, restorePersonKeys, sealPersonKeys, sealUnlockedKeys, unlockPersonKeys } from './keys.js';
 import { passkeyError } from './passkey-errors.js';
 import type { PersonKeys, SealedPersonKeys } from './keys.js';
-import { allRecords, api, appendEntry, createJourney, currentKey, encryptedEntry, exportEncrypted, itemVersions, letIn, listings, removeMember, rotatePending, saveRecord, verifiedJourney } from './journey.js';
+import { ApiError, allRecords, api, appendEntry, createJourney, currentKey, encryptedEntry, exportEncrypted, itemVersions, letIn, listings, removeMember, rotatePending, saveRecord, verifiedJourney } from './journey.js';
 import type { JourneyContext, JourneyListing } from './journey.js';
 import './style.css';
 
 const root = document.querySelector<HTMLDivElement>('#app')!;
+const signOutChannel = new BroadcastChannel('wayfinding-sign-out');
+signOutChannel.onmessage = () => { lockPersonKeys(); navigate('/sign-in'); };
 // This is only an invitation request token, never a person or journey key. It survives the email-link navigation in this tab.
 const INVITE_FRAGMENT = 'wayfinding-invitation';
 const encode = (bytes: Uint8Array): string => btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -25,10 +27,13 @@ const read = (name: string) => (root.querySelector(`[name="${name}"]`) as HTMLIn
 const FOOTER = `<footer class="site-footer"><span>Wayfinding is how you move when the destination is uncertain.</span><nav aria-label="Footer"><a href="https://wayfinding.support/#start">Start your journey</a><a href="https://app.wayfinding.support">Sign in to your journey</a><a href="https://wayfinding.support/agents/start.md">Agent instructions</a><a href="https://wayfinding.support/#facilitator">Work with a facilitator</a><a href="https://github.com/AI-Wayfinding">Source code</a><a href="https://wayfinding.support/privacy/">Privacy policy</a><a href="mailto:hello@wayfinding.support">hello@wayfinding.support</a></nav></footer>`;
 function render(content: string): void {
   root.innerHTML = `<header><a class="brand" href="/"><img src="/wayfinding-mark.svg" alt="" />AI Wayfinding Journeys</a><nav><a href="/">My journeys</a>${getPersonKeys() ? '<a href="/new">Start a journey</a><a href="/account">Account</a><button class="secondary" id="logout">Sign out</button>' : '<a href="/sign-in">Sign in</a>'}</nav></header><main id="content">${content}</main>${FOOTER}`;
-  root.querySelector('#logout')?.addEventListener('click', () => perform(async () => { clearPersonKeys(); sessionStorage.removeItem(INVITE_FRAGMENT); email = ''; await api('/auth/logout', 'POST', {}); navigate('/sign-in'); }));
+  root.querySelector('#logout')?.addEventListener('click', () => perform(async () => { await clearPersonKeys(); sessionStorage.removeItem(INVITE_FRAGMENT); email = ''; try { await api('/auth/logout', 'POST', {}); } catch (cause) { if (!(cause instanceof ApiError && cause.status === 401)) throw cause; } signOutChannel.postMessage('signed-out'); navigate('/sign-in'); }));
 }
 function error(message: string): void { const main = root.querySelector('main') ?? root; const box = document.createElement('p'); box.className = 'error'; box.setAttribute('role', 'alert'); box.textContent = message; main.prepend(box); }
-function perform(action: () => Promise<void>): void { void action().catch(cause => error(passkeyError(cause))); }
+function perform(action: () => Promise<void>): void { void action().catch(cause => {
+  if (cause instanceof ApiError && cause.status === 401 && getPersonKeys() && !['/recover', '/sign-in', '/continue', '/auth/verify'].includes(location.pathname)) { lockPersonKeys(); navigate('/continue'); return; }
+  error(passkeyError(cause));
+}); }
 function form(id: string, action: (form: HTMLFormElement) => Promise<void>): void {
   root.querySelector<HTMLFormElement>(`#${id}`)?.addEventListener('submit', event => { event.preventDefault(); const target = event.currentTarget as HTMLFormElement; const button = target.querySelector<HTMLButtonElement>('button[type=submit]'); if (button) button.disabled = true; perform(async () => { try { await action(target); } finally { if (button?.isConnected) button.disabled = false; } }); });
 }
@@ -141,10 +146,10 @@ function signIn(destination = '/'): void {
   requestedRoute = destination === '/sign-in' ? '/' : destination;
   render(`<section class="panel"><p class="eyebrow">YOUR JOURNEY STARTS HERE</p><h1>Sign in</h1><p>Enter your email address. We'll send a private link to confirm it's you.</p><form id="email-form"><label for="email">Email address</label><input id="email" name="email" type="email" autocomplete="email" required /><div class="actions"><button type="submit">Send sign-in link</button></div></form><p><a href="/recover">Lost your passkey? Use a backup code</a></p></section>`);
   form('email-form', async f => { email = input(f, 'email'); await api('/auth/email/start', 'POST', { email, ...(/^\/agent-sessions\/[A-Za-z0-9_-]+$/.test(requestedRoute) ? { returnPath: requestedRoute } : {}) }); render('<section class="panel"><h1>Check your email</h1><p>Open the Wayfinding link to continue. It expires in 15 minutes. If you are joining a journey, keep this invitation open and return after signing in.</p></section>'); });
-  // An already verified session can unlock this tab with PRF without another email link.
+  // An already verified session can unlock this browser with PRF without another email link.
   void api<SealedPersonKeys | null>('/me/keys').then(sealed => {
     if (!sealed || getPersonKeys() || !root.querySelector('#email-form')) return;
-    render('<section class="panel"><h1>Unlock with your passkey</h1><p>Your keys are locked in this tab. Confirm your passkey once to continue.</p><div class="actions"><button id="unlock">Unlock with passkey</button><a href="/recover">Lost your passkey? Use a backup code</a></div></section>');
+    render('<section class="panel"><h1>Unlock with your passkey</h1><p>Confirm your passkey once to continue.</p><div class="actions"><button id="unlock">Unlock with passkey</button><a href="/recover">Lost your passkey? Use a backup code</a></div></section>');
     root.querySelector('#unlock')?.addEventListener('click', () => perform(async () => { await openWithPasskey(sealed); navigate(requestedRoute); }));
   }).catch(() => { /* No verified session: use the email form. */ });
 }
@@ -209,7 +214,7 @@ async function verifyEmail(): Promise<void> {
   try { result = await api<{ challenge: 'register' | 'login' }>('/auth/email/verify', 'POST', { token }); }
   catch { render(`<section class="panel"><h1>This sign-in link doesn't work</h1><p>${escape(EXPIRED_LINK)}</p><div class="actions"><a class="button" href="/sign-in">Send a new link</a></div></section>`); return; }
   if (result.challenge === 'register') {
-    render(`<section class="panel"><h1>Create your passkey</h1><p>One passkey signs you in and protects your journey keys. No private key is saved on this device.</p><p>Works with Chrome or Edge 116+, Safari 18+, or Firefox 139+ with a passkey that supports protecting keys. There is no weaker fallback.</p><div class="actions"><button id="register">Create passkey</button></div><p id="passkey-status" role="status"></p></section>`);
+    render(`<section class="panel"><h1>Create your passkey</h1><p>One passkey signs you in and protects your journey keys. An encrypted copy stays in this browser so you can return without another passkey tap.</p><p>Works with Chrome or Edge 116+, Safari 18+, or Firefox 139+ with a passkey that supports protecting keys. There is no weaker fallback.</p><div class="actions"><button id="register">Create passkey</button></div><p id="passkey-status" role="status"></p></section>`);
     const register = root.querySelector<HTMLButtonElement>('#register')!;
     if (!supportedPrfBrowser()) { register.disabled = true; error('This browser cannot use this kind of passkey. Use Chrome or Edge 116+, Safari 18+, or Firefox 139+ with a compatible passkey.'); return; }
     register.addEventListener('click', () => perform(async () => {
@@ -218,7 +223,7 @@ async function verifyEmail(): Promise<void> {
       finally { if (register.isConnected) register.disabled = false; }
     }));
   } else {
-    render(`<section class="panel"><h1>Confirm your passkey</h1><p>One passkey tap signs you in and unlocks your journey keys in this tab.</p><div class="actions"><button id="confirm">Sign in with passkey</button><a href="/recover">Lost your passkey? Use a backup code</a></div></section>`);
+    render(`<section class="panel"><h1>Confirm your passkey</h1><p>One passkey tap signs you in and unlocks your journey keys in this browser.</p><div class="actions"><button id="confirm">Sign in with passkey</button><a href="/recover">Lost your passkey? Use a backup code</a></div></section>`);
     root.querySelector('#confirm')?.addEventListener('click', () => perform(async () => {
       const output = await authenticatedPrf();
       try {
@@ -444,7 +449,7 @@ onPersonKeysCleared(() => {
 });
 root.addEventListener('click', event => { const link = (event.target as Element).closest('a[href]') as HTMLAnchorElement | null; if (link && link.origin === location.origin && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) { event.preventDefault(); navigate(link.pathname + link.hash); } });
 window.addEventListener('popstate', () => perform(route));
-window.addEventListener('pagehide', clearPersonKeys);
+window.addEventListener('pagehide', lockPersonKeys);
 async function route(): Promise<void> {
   const path = location.pathname;
   if (path === '/auth/verify') return verifyEmail();
@@ -471,4 +476,14 @@ async function route(): Promise<void> {
   if (path === '/') return getPersonKeys() ? home() : startScreen();
   render('<section class="panel"><h1>Page not found</h1><p><a href="/">Return to your journeys</a></p></section>');
 }
-perform(route);
+perform(async () => {
+  await restorePersonKeys();
+  if (getPersonKeys()) {
+    try { await api('/me/keys'); }
+    catch (cause) {
+      if (cause instanceof ApiError && cause.status === 401) { lockPersonKeys(); navigate('/continue'); return; }
+      throw cause;
+    }
+  }
+  await route();
+});

@@ -56,6 +56,27 @@ const as = (p: {cookie:string,principal:string}) => ({ Cookie:p.cookie, 'X-Princ
 
 // Seam: the Worker HTTP API, real Durable Objects and SQLite; email delivery is the only fake.
 describe('HTTP boundary', () => {
+  it('keeps verified sessions for 30 days and rejects an expired session', async () => {
+    const owner = await person('session-duration@example.org');
+    const registry = (env as unknown as Env).REGISTRY.get((env as unknown as Env).REGISTRY.idFromName('registry-v2'));
+    const hash = await digest(owner.cookie.split('=')[1]!);
+    const issued = await account('email-session-duration@example.org');
+    expect(issued.cookie).toMatch(/^wayfinding_session=/);
+    const cookieResponse = await request('/v1/auth/email/verify', 'POST', { token: issued.token });
+    expect(cookieResponse.status).toBe(401); // One-use link cannot issue another cookie.
+    const row = await runInDurableObject(registry, (_object, state) => state.storage.sql.exec('SELECT expires FROM sessions WHERE hash=?', hash).toArray()[0] as { expires: number });
+    expect(row.expires).toBeGreaterThanOrEqual(Date.now() + 2_592_000_000 - 60_000);
+    expect(row.expires).toBeLessThanOrEqual(Date.now() + 2_592_000_000);
+    expect((await request('/v1/me/keys', 'GET', undefined, { Cookie: owner.cookie })).status).toBe(200);
+    await runInDurableObject(registry, (_object, state) => { state.storage.sql.exec('UPDATE sessions SET expires=? WHERE hash=?', Date.now() - 1, hash); });
+    expect((await request('/v1/me/keys', 'GET', undefined, { Cookie: owner.cookie })).status).toBe(401);
+    const started = await request('/v1/auth/passkey/start', 'POST', {});
+    const discovery = started.headers.get('set-cookie')!.split(';')[0]!;
+    const { challenge } = await started.json() as { challenge: string };
+    const finished = await request('/v1/auth/passkey/finish', 'POST', { response: await owner.device.login(challenge) }, { Cookie: discovery });
+    expect(finished.status).toBe(200);
+    expect(finished.headers.get('set-cookie')).toContain('Max-Age=2592000');
+  });
   it('reads only the sealed copy for the verified credential', async () => {
     const p = await person('sealed-keys@example.org');
     const other = await person('other-sealed-keys@example.org');

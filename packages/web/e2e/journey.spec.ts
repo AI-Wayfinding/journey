@@ -62,6 +62,30 @@ async function signUp(page: Page, email: string): Promise<string[]> {
   return codes;
 }
 
+test('sign-in survives a reload and a new tab until sign out', async ({ browser }) => {
+  const person = await browserPerson(browser);
+  try {
+    await signUp(person.page, `persistent-${Date.now()}@example.org`);
+    await person.page.reload();
+    await expect(person.page.getByRole('heading', { name: 'A place to find your way' })).toBeVisible();
+    expect((await calls(person.page)).get).toBe(0);
+    const second = await person.context.newPage();
+    await second.goto('/');
+    await expect(second.getByRole('heading', { name: 'A place to find your way' })).toBeVisible();
+    await person.context.clearCookies(); // The local keys outlast an expired server session.
+    await person.page.reload();
+    await expect(person.page.getByRole('heading', { name: 'Continue your journey' })).toBeVisible();
+    await person.page.getByRole('button', { name: 'Continue with passkey' }).click();
+    await expect(person.page.getByRole('heading', { name: 'A place to find your way' })).toBeVisible();
+    await person.page.getByRole('button', { name: 'Sign out' }).click();
+    await expect(person.page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
+    await second.reload();
+    await expect(second.getByRole('heading', { name: 'Sign in' })).toBeVisible();
+    await person.page.reload();
+    await expect(person.page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
+  } finally { await person.context.close(); }
+});
+
 test('start, continue with a discoverable passkey in a new page, and email a journey invitation', async ({ browser }) => {
   const owner = await browserPerson(browser);
   const second = await browserPerson(browser);
@@ -88,11 +112,7 @@ test('start, continue with a discoverable passkey in a new page, and email a jou
     expect(text).toContain('/invite#');
     await second.page.goto(/https?:\/\/[^\s]+\/invite#[A-Za-z0-9_-]+/.exec(text)![0]!);
     await expect(second.page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
-    await owner.page.goto('/'); // A fresh load clears the in-memory keys; the CDP authenticator stays with this page.
-    await expect(owner.page.getByRole('heading', { name: "Let's get started" })).toBeVisible();
-    await owner.page.getByRole('link', { name: 'Continue your journey' }).click();
-    await expect(owner.page.getByLabel('Email address')).toHaveCount(0);
-    await owner.page.getByRole('button', { name: 'Continue with passkey' }).click();
+    await owner.page.goto('/');
     await expect(owner.page.getByRole('heading', { name: 'A place to find your way' })).toBeVisible();
     await owner.page.getByRole('link', { name: 'A shared beginning' }).click();
     await expect(owner.page.getByRole('heading', { name: 'A shared beginning' })).toBeVisible();
@@ -263,12 +283,9 @@ test('two people share a journey with PRF passkeys and same-origin assets', asyn
     expect(bobWraps.wraps.map(w => w.epoch)).toContain(1);
     const agent = await requestAgent(request, journeyPath.split('/').at(-1)!, 'Proposed <guide>');
     await alice.page.goto(agent.approvalUrl);
-    await expect(alice.page.getByRole('heading', { name: 'Unlock with your passkey' })).toBeVisible();
-    const beforeUnlock = await calls(alice.page);
-    await alice.page.getByRole('button', { name: 'Unlock with passkey' }).click();
     await expect(alice.page.getByRole('heading', { name: 'Approve an agent' })).toBeVisible();
-    expect((await calls(alice.page)).get - beforeUnlock.get).toBe(1);
-    console.log('New-tab unlock taps: 1 get');
+    expect((await calls(alice.page)).get).toBe(0);
+    console.log('New-tab unlock taps: 0 get');
     await expect(alice.page.getByLabel('Name', { exact: true })).toHaveValue('Proposed <guide>');
     await alice.page.getByLabel('Name', { exact: true }).fill('Alice’s guide');
     await alice.page.getByLabel('Six-digit code').fill(agent.code);

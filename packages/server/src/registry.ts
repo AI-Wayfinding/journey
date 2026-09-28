@@ -56,7 +56,7 @@ export class Registry {
             const needsRegistration = !account || !this.one('SELECT id FROM credentials WHERE accountHash=? LIMIT 1', hash);
             if (!account) { this.sql.exec('INSERT INTO accounts(hash,id) VALUES(?,?)', hash, randomToken(16)); account = this.one('SELECT id FROM accounts WHERE hash=?', hash); }
             if (row.email) this.sql.exec('UPDATE accounts SET email=? WHERE hash=?', row.email, hash);
-            this.sql.exec('INSERT INTO sessions(hash,accountHash,created,expires,lastUsed,verifiedAt,email) VALUES(?,?,?,?,?,NULL,?)', input.sessionHash, hash, now, now + 43_200_000, now, row.email ?? null);
+            this.sql.exec('INSERT INTO sessions(hash,accountHash,created,expires,lastUsed,verifiedAt,email) VALUES(?,?,?,?,?,NULL,?)', input.sessionHash, hash, now, now + 2_592_000_000, now, row.email ?? null);
             return { accountHash: hash, accountId: account!.id, newAccount: needsRegistration };
           }
           case 'session': {
@@ -112,7 +112,7 @@ export class Registry {
             if (!current || !current.recovery && this.one('SELECT id FROM credentials WHERE accountHash=? LIMIT 1', input.accountHash) && (current.verifiedAt === null || Number(current.verifiedAt) < now - 300_000)) return null;
             this.sql.exec('INSERT INTO sealed_keys(credentialId,identity,signing) VALUES(?,?,?)', input.id, input.identity, input.signing);
             this.sql.exec('INSERT INTO credentials(id,accountHash,publicKey,counter,transports,name,created) VALUES(?,?,?,?,?,?,?)', input.id, input.accountHash, input.publicKey, input.counter, input.transports, 'Passkey added ' + new Date(now).toLocaleDateString('en-GB', { timeZone: 'UTC' }), now);
-            this.sql.exec('UPDATE sessions SET verifiedAt=?,credentialId=?,recovery=0,recoveryIdentity=NULL,recoverySigning=NULL,expires=?,email=(SELECT email FROM accounts WHERE hash=?) WHERE hash=?', now, input.id, now + 43_200_000, input.accountHash, input.sessionHash);
+            this.sql.exec('UPDATE sessions SET verifiedAt=?,credentialId=?,recovery=0,recoveryIdentity=NULL,recoverySigning=NULL,expires=?,email=(SELECT email FROM accounts WHERE hash=?) WHERE hash=?', now, input.id, now + 2_592_000_000, input.accountHash, input.sessionHash);
             return { ok: true };
           }
           case 'credentialUse': {
@@ -125,7 +125,7 @@ export class Registry {
             if (updated.rowsWritten !== 1) return null;
             const account = this.one('SELECT email FROM accounts WHERE hash=?', input.accountHash);
             if (!account?.email) return null;
-            this.sql.exec('INSERT INTO sessions(hash,accountHash,created,expires,lastUsed,verifiedAt,email,credentialId) VALUES(?,?,?,?,?,?,?,?)', input.sessionHash, input.accountHash, now, now + 43_200_000, now, now, account.email, input.id);
+            this.sql.exec('INSERT INTO sessions(hash,accountHash,created,expires,lastUsed,verifiedAt,email,credentialId) VALUES(?,?,?,?,?,?,?,?)', input.sessionHash, input.accountHash, now, now + 2_592_000_000, now, now, account.email, input.id);
             return { ok: true };
           }
           case 'journeyCreate': {
