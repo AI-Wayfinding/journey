@@ -4,17 +4,13 @@ The `wayfinding` command gives an agent access to one encrypted journey after a 
 
 ## Install
 
-Node.js 22 or newer is required. Download both packages from the [latest release](https://github.com/AI-Wayfinding/journey/releases/latest), then install them together:
+Node.js 22 or newer is required. Install from npm:
 
 ```sh
-R=https://github.com/AI-Wayfinding/journey/releases/latest/download
-curl -fsSLO "$R/ai-wayfinding-core.tgz"
-curl -fsSLO "$R/ai-wayfinding-client.tgz"
-npm install -g ./ai-wayfinding-core.tgz ./ai-wayfinding-client.tgz
+npm install -g @ai-wayfinding/client
 wayfinding --help
 ```
 
-Downloading first works even where npm is set to refuse installs from a URL.
 
 ### Build from this repository
 
