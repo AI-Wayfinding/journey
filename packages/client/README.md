@@ -4,13 +4,13 @@ The `wayfinding` command gives an agent access to one encrypted journey after a 
 
 ## Install
 
-Node.js 22 or newer is required. Download both packages from the [v0.1.0 release](https://github.com/AI-Wayfinding/journey/releases/tag/v0.1.0), then install them together:
+Node.js 22 or newer is required. Download both packages from the [latest release](https://github.com/AI-Wayfinding/journey/releases/latest), then install them together:
 
 ```sh
-R=https://github.com/AI-Wayfinding/journey/releases/download/v0.1.0
-curl -fsSLO "$R/ai-wayfinding-core-0.1.0.tgz"
-curl -fsSLO "$R/ai-wayfinding-client-0.1.0.tgz"
-npm install -g ./ai-wayfinding-core-0.1.0.tgz ./ai-wayfinding-client-0.1.0.tgz
+R=https://github.com/AI-Wayfinding/journey/releases/latest/download
+curl -fsSLO "$R/ai-wayfinding-core.tgz"
+curl -fsSLO "$R/ai-wayfinding-client.tgz"
+npm install -g ./ai-wayfinding-core.tgz ./ai-wayfinding-client.tgz
 wayfinding --help
 ```
 
@@ -27,7 +27,7 @@ npm run build -w packages/client
 npm pack -w packages/core
 npm pack -w packages/client
 # Install both local tarballs together. The client needs the unpublished core package.
-npm install -g ./ai-wayfinding-core-0.1.0.tgz ./ai-wayfinding-client-0.1.0.tgz
+npm install -g ./ai-wayfinding-core-*.tgz ./ai-wayfinding-client-*.tgz
 wayfinding --help
 ```
 
