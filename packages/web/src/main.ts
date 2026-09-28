@@ -295,12 +295,17 @@ async function context(id: string): Promise<JourneyContext | null> {
   }
   return ctx;
 }
+function agentPromptScreen(id: string): void {
+  const prompt = `Connect to my AI Wayfinding journey. Follow the instructions at https://wayfinding.support/agents/install.md\nMy journey ID is ${id}.`;
+  render(`<section class="panel"><p><a href="/journeys/${id}">← Back to journey</a></p><p class="eyebrow">ADD YOUR AGENT</p><h1>Add your agent</h1><p>Your AI agent can read this journey and, if you allow it, add to it. Copy this prompt into your agent, such as Claude, ChatGPT, Codex or Cursor.</p><pre id="agent-copy-value">${escape(prompt)}</pre><div class="actions"><button id="agent-copy" class="secondary">Copy prompt</button></div><p id="copy-status" role="status"></p><h2>What happens next</h2><ol><li>Your agent installs the <code>wayfinding</code> tool, asking you before each command.</li><li>It shows you a link and a six-digit code.</li><li>Open the link, check the code matches, choose what it can do and for how long, and confirm with your passkey.</li></ol><p>You can see and remove your agent at any time under <a href="/journeys/${id}/members">People &amp; agents</a>.</p></section>`);
+  copy('agent-copy');
+}
 async function journeyHome(id: string): Promise<void> {
   const ctx = await context(id); if (!ctx) return;
   const records = await allRecords(ctx), items = itemVersions(records).filter(v => !v.deleted && v.item.itemType !== 'recovery');
   const readOnly = ctx.state.members[ctx.principal]?.member.scope === 'read';
   const name = String(ctx.log[0]?.body.name ?? 'Journey');
-  render(`<section class="panel"><p class="eyebrow">JOURNEY</p><h1>${escape(name)}</h1>${ctx.log[0]?.body.description ? `<p>${escape(String(ctx.log[0].body.description))}</p>` : ''}<div class="actions">${readOnly ? '<p class="meta">Your access is read-only.</p>' : `<a class="button" href="/journeys/${id}/add">Add an item</a>`}<a class="button" href="/journeys/${id}/members">Share this journey</a><a class="button" href="/journeys/${id}/export">Export</a></div></section><section class="panel"><h2>Items</h2><div class="grid"><div><label for="filter">Filter by type</label><select id="filter"><option value="">All types</option>${[...new Set(items.map(v => v.item.itemType))].map(t => `<option value="${escape(t)}">${escape(t)}</option>`).join('')}</select></div><div><label for="search">Search your items</label><input id="search" type="search" placeholder="Search titles and text" /></div></div><div id="items" class="cards"></div></section>`);
+  render(`<section class="panel"><p class="eyebrow">JOURNEY</p><h1>${escape(name)}</h1>${ctx.log[0]?.body.description ? `<p>${escape(String(ctx.log[0].body.description))}</p>` : ''}<div class="actions">${readOnly ? '<p class="meta">Your access is read-only.</p>' : `<a class="button" href="/journeys/${id}/add">Add an item</a>`}<a class="button" href="/journeys/${id}/agent">Add your agent</a><a class="button" href="/journeys/${id}/members">Share this journey</a><a class="button" href="/journeys/${id}/export">Export</a></div></section><section class="panel"><h2>Items</h2><div class="grid"><div><label for="filter">Filter by type</label><select id="filter"><option value="">All types</option>${[...new Set(items.map(v => v.item.itemType))].map(t => `<option value="${escape(t)}">${escape(t)}</option>`).join('')}</select></div><div><label for="search">Search your items</label><input id="search" type="search" placeholder="Search titles and text" /></div></div><div id="items" class="cards"></div></section>`);
   const showItems = () => { const filter = read('filter'), query = read('search').toLocaleLowerCase(); root.querySelector('#items')!.innerHTML = items.filter(({ item }) => (!filter || item.itemType === filter) && (!query || `${item.title} ${item.body}`.toLocaleLowerCase().includes(query))).map(({ item, root: itemRoot }) => `<article class="card"><p class="meta">${escape(item.itemType)}</p><h3><a href="/journeys/${id}/items/${escape(itemRoot)}">${escape(item.title)}</a></h3><p>${escape(item.body.slice(0, 160))}</p></article>`).join('') || '<p>No matching items.</p>'; };
   root.querySelector('#search')?.addEventListener('input', showItems); root.querySelector('#filter')?.addEventListener('change', showItems); showItems();
 }
@@ -442,6 +447,7 @@ async function route(): Promise<void> {
     const id = journey[1]!, sub = journey[2] ?? '';
     if (sub === 'recovery') return recoveryScreen();
     if (sub === 'members') return membersScreen(id);
+    if (sub === 'agent') return agentPromptScreen(id);
     if (sub === 'export') return exportScreen(id);
     if (sub === 'add') return itemForm(id);
     const item = /^items\/([0-7][0-9A-HJKMNP-TV-Z]{25})(?:\/(edit))?$/.exec(sub);

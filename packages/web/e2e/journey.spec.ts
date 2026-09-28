@@ -74,6 +74,10 @@ test('start, continue with a discoverable passkey in a new page, and email a jou
     await owner.page.getByRole('button', { name: 'Create journey' }).click();
     await owner.page.getByLabel('I have saved my recovery key somewhere safe.').check();
     await owner.page.getByRole('button', { name: 'Continue to journey' }).click();
+    await owner.page.getByRole('link', { name: 'Add your agent' }).click();
+    await expect(owner.page.locator('#agent-copy-value')).toContainText('https://wayfinding.support/agents/install.md');
+    await expect(owner.page.locator('#agent-copy-value')).toContainText(owner.page.url().split('/journeys/')[1]!.split('/')[0]!);
+    await owner.page.getByRole('link', { name: '← Back to journey' }).click();
     await owner.page.getByRole('link', { name: 'Share this journey' }).click();
     const guestEmail = `invited-${Date.now()}@example.org`;
     await owner.page.getByLabel('Email addresses (separate with commas)').fill(guestEmail);
