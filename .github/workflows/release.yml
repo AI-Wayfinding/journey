@@ -30,6 +30,7 @@ jobs:
           for p in core client; do (cd packages/$p && npm pkg set version="$V"); done
           (cd packages/client && npm pkg set "dependencies.@ai-wayfinding/core=$V")
       - run: npm run build -w packages/core && npm run build -w packages/client
+      - run: cd packages/web && npx vite build   # the client integration test serves the web build
       - run: npm test -w packages/core && npm test -w packages/client
       - name: Publish
         run: |
