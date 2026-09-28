@@ -49,7 +49,7 @@ type PasskeyStage = 'register-create' | 'register-get' | 'login' | 'continue';
 function prfShape(value: unknown): { prf: string; enabled: string; first: string; length: number } {
   const prf = value as { enabled?: unknown; results?: { first?: unknown } } | undefined;
   const first = prf?.results?.first;
-  const kind = first === undefined ? 'absent' : typeof first === 'string' ? 'string' : Object.prototype.toString.call(first) === '[object ArrayBuffer]' ? 'arraybuffer' : ArrayBuffer.isView(first) ? 'view' : 'other';
+  const kind = first === undefined ? 'absent' : typeof first === 'string' ? 'string' : Object.prototype.toString.call(first) === '[object ArrayBuffer]' ? 'arraybuffer' : ArrayBuffer.isView(first) ? 'view' : Array.isArray(first) ? 'array' : first && typeof first === 'object' ? 'object' : 'other';
   const length = typeof first === 'string' ? first.length : kind === 'arraybuffer' || kind === 'view' ? (first as ArrayBuffer).byteLength : 0;
   return { prf: prf ? 'present' : 'absent', enabled: prf?.enabled === true ? 'true' : prf?.enabled === false ? 'false' : 'absent', first: kind, length };
 }

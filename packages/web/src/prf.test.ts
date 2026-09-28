@@ -10,3 +10,12 @@ it('reads a cross-realm ArrayBuffer directly instead of requesting a second pass
   expect(prfOutput(new Uint8Array(32).fill(7).subarray(0))).toEqual(new Uint8Array(32).fill(7));
   expect(prfOutput(undefined)).toBeNull();
 });
+
+it('reads PRF bytes that a password-manager extension returns as a plain or array-like object', () => {
+  const bytes = Array.from({ length: 32 }, (_, i) => i);
+  expect(prfOutput(bytes)).toEqual(Uint8Array.from(bytes));
+  expect(prfOutput(Object.fromEntries(bytes.map((b, i) => [i, b])))).toEqual(Uint8Array.from(bytes));
+  expect(prfOutput(runInNewContext('new Uint8Array(32).fill(9)'))).toEqual(new Uint8Array(32).fill(9));
+  expect(prfOutput([...bytes.slice(0, 31), 256])).toBeNull();
+  expect(prfOutput(bytes.slice(0, 16))).toBeNull();
+});

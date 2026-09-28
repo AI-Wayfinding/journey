@@ -154,7 +154,7 @@ app.post('/v1/auth/passkey/register/options', async c => {
   const existing = await registry(c.env, { op: 'credentials', accountHash: auth.accountHash });
   if (existing.length && !auth.recovery && (auth.verifiedAt === null || auth.verifiedAt < Date.now() - 300_000)) return failure('forbidden', 403);
   if (!validString(c.env.EMAIL_HASH_KEY)) return failure('internal', 500);
-  const options = await generateRegistrationOptions({ rpName: 'Wayfinding', rpID: c.env.RP_ID, userName: auth.accountHash, userID: new Uint8Array(unbase64url(auth.accountHash)), authenticatorSelection: { residentKey: 'required', userVerification: 'required' }, extensions: { prf: { eval: { first: unbase64url(await appPrfSalt(c.env.EMAIL_HASH_KEY)) } } }, excludeCredentials: existing.map((r: any) => ({ id: r.id, transports: transportList(r.transports) })) });
+  const options = await generateRegistrationOptions({ rpName: 'AI Wayfinding', rpID: c.env.RP_ID, userName: auth.email ?? 'AI Wayfinding account', userDisplayName: auth.email ?? 'AI Wayfinding account', userID: new Uint8Array(unbase64url(auth.accountHash)), authenticatorSelection: { residentKey: 'required', userVerification: 'required' }, extensions: { prf: { eval: { first: unbase64url(await appPrfSalt(c.env.EMAIL_HASH_KEY)) } } }, excludeCredentials: existing.map((r: any) => ({ id: r.id, transports: transportList(r.transports) })) });
   await registry(c.env, { op: 'challengeSet', sessionHash: auth.sessionHash, challenge: options.challenge, kind: 'register' });
   return json({ ...options, extensions: { prf: { eval: { first: await appPrfSalt(c.env.EMAIL_HASH_KEY) } } } });
 });
@@ -177,7 +177,7 @@ app.post('/v1/auth/passkey/register/verify', async c => {
 });
 const diagnosticValues: Record<string, RegExp> = {
   stage: /^(register-create|register-get|login|continue)$/,  outcome: /^(ok|no-prf|no-output|error)$/, prf: /^(present|absent)$/, enabled: /^(true|false|absent)$/,
-  first: /^(absent|string|arraybuffer|view|other)$/, attachment: /^(platform|cross-platform)$/, aaguid: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+  first: /^(absent|string|arraybuffer|view|array|object|other)$/, attachment: /^(platform|cross-platform)$/, aaguid: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
   error: /^[A-Za-z_]{1,60}$/, browser: /^([A-Za-z]{1,10} \d{1,4}|other)$/,
 };
 // Accepts only the named shape fields from a signed-in browser; everything else is dropped before logging.
