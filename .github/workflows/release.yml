@@ -34,6 +34,6 @@ jobs:
       - run: npm test -w packages/core && npm test -w packages/client
       - name: Publish
         run: |
-          FLAG=""; [ "${{ github.event_name }}" = release ] || FLAG="--dry-run"
+          FLAG=""; [ "${{ github.event_name }}" = release ] || FLAG="--dry-run --tag dryrun"
           npm publish -w packages/core $FLAG
           npm publish -w packages/client $FLAG
