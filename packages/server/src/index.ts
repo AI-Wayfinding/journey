@@ -436,19 +436,19 @@ app.get('/v1/journeys/:id/invites/pending', async c => {
 });
 app.post('/v1/agent-sessions', async c => {
   const b = await payload(c).catch(() => null);
-  if (!b || !isId(b.journeyId) || !object(b.agentPublicKey) || !validString(b.agentPublicKey.recipient, 1024) || !validString(b.agentPublicKey.signingKey, 1024) || !validScope(b.requestedScope) || b.name !== undefined && !validAgentName(b.name)) return failure('invalid-request', 400);
+  if (!b || !isId(b.journeyId) || !object(b.agentPublicKey) || !validString(b.agentPublicKey.recipient, 1024) || !validString(b.agentPublicKey.signingKey, 1024) || !validScope(b.requestedScope) || b.name !== undefined && !validAgentName(b.name) || b.keyStorage !== undefined && b.keyStorage !== 'file' && b.keyStorage !== 'memory' || b.keyStorage === 'file' && b.remembered === true) return failure('invalid-request', 400);
   if (!c.env.AGENT_SESSION_RATE) return failure('internal', 500);
   const ipHash = await digest(c.req.header('cf-connecting-ip') ?? 'unknown');
   if (!(await c.env.AGENT_SESSION_RATE.limit({ key: ipHash })).success) return failure('rate-limited', 429);
   const id = randomToken(), principal = newId(), code = String(crypto.getRandomValues(new Uint32Array(1))[0]! % 1_000_000).padStart(6, '0');
-  await registry(c.env, { op: 'agentCreate', id, journeyId: b.journeyId, principal, recipient: b.agentPublicKey.recipient, signingKey: b.agentPublicKey.signingKey, requestedScope: b.requestedScope, code, remembered: b.remembered === true, name: typeof b.name === 'string' ? b.name : null });
+  await registry(c.env, { op: 'agentCreate', id, journeyId: b.journeyId, principal, recipient: b.agentPublicKey.recipient, signingKey: b.agentPublicKey.signingKey, requestedScope: b.requestedScope, code, remembered: b.remembered === true, keyStorage: b.keyStorage === 'file' ? 'file' : 'memory', name: typeof b.name === 'string' ? b.name : null });
   return json({ id, code, approvalUrl: c.env.ORIGIN + '/agent-sessions/' + id }, 201);
 });
 app.get('/v1/agent-sessions/:id', async c => {
   const row = await registry(c.env, { op: 'agentGet', id: c.req.param('id') });
   if (!row) return failure('not-found', 404);
   const expired = row.status === 'pending' ? Number(row.createdAt) + 600_000 <= Date.now() : row.status === 'approved' && Number(row.expires) <= Date.now();
-  return json({ status: expired ? 'expired' : row.status, journeyId: row.journeyId, principal: row.principal, recipient: row.recipient, signingKey: row.signingKey, requestedScope: row.requestedScope, remembered: row.remembered === 1, name: row.name, scope: row.scope, expiresAt: row.expires });
+  return json({ status: expired ? 'expired' : row.status, journeyId: row.journeyId, principal: row.principal, recipient: row.recipient, signingKey: row.signingKey, requestedScope: row.requestedScope, remembered: row.remembered === 1, keyStorage: row.keyStorage, name: row.name, scope: row.scope, expiresAt: row.expires });
 });
 app.post('/v1/agent-sessions/:id/approve', async c => {
   const auth = await session(c); if (!auth || auth.verifiedAt === null || Date.now() - auth.verifiedAt > 300_000) return failure('unauthorized', 401);

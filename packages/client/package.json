@@ -1,6 +1,6 @@
 {
   "name": "@ai-wayfinding/client",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "engines": {
     "node": ">=22"
@@ -26,7 +26,8 @@
     "test:mcp": "vitest run test/integration.test.ts -t MCP"
   },
   "dependencies": {
-    "@ai-wayfinding/core": "0.1.1",
+    "@ai-wayfinding/core": "0.1.2",
+    "undici": "^7.29.0",
     "@modelcontextprotocol/sdk": "^1.30.1"
   },
   "devDependencies": {

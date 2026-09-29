@@ -1,5 +1,6 @@
-import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdir, rm } from 'node:fs/promises';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { promisify } from 'node:util';
+import { lstat, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createAgeIdentity, createSigningIdentity, generateJourneyKey, hashEntry, importSigningKey, newId, seal, signEntry, verifyLog, wrapJourneyKey, type JourneyKey, type LogEntry } from '@ai-wayfinding/core';
@@ -10,6 +11,7 @@ import { connectJourney } from '../src/connection.js';
 import type { JourneyClient } from '../src/journey.js';
 
 const root = resolve('../..'), server = 'http://localhost:18787';
+const exec = promisify(execFile);
 const scratch = join(root, '.scratch', 'client-integration');
 let worker: ChildProcess, workerOutput = '';
 const headers = { Origin: server, 'X-Wayfinding': '1', 'Content-Type': 'application/json' };
@@ -108,6 +110,37 @@ describe('real journey server in workerd', () => {
     await expect(client.list()).rejects.toThrow('Access to this journey has ended');
     client.close();
   }, 30_000);
+  it('connects across separate CLI commands using a private state file and a verified log', async () => {
+    const owner = await person(), trip = await journey(owner);
+    const statePath = join(scratch, 'agent-' + newId() + '.json');
+    try {
+      const cli = join(root, 'packages/client/dist/cli.js');
+      const created = await exec(process.execPath, [cli, 'connect', trip.id, '--scope', 'read', '--name', 'File agent', '--server', server, '--state', statePath, '--no-wait', '--json']);
+      const pending = JSON.parse(created.stdout) as { link: string; code: string; requestId: string; expiresAt: string; status: string };
+      expect(pending).toMatchObject({ link: expect.any(String), code: expect.any(String), requestId: expect.any(String), expiresAt: expect.any(String), status: 'pending' });
+      expect((await lstat(statePath)).mode & 0o777).toBe(0o600);
+      await expect(exec(process.execPath, [cli, 'connect', '--state', statePath, '--wait', '--timeout', '1', '--json'])).rejects.toMatchObject({ code: 2, stdout: expect.stringContaining('"status":"pending"') });
+      const expiredPath = join(scratch, 'expired-' + newId() + '.json');
+      const expired = JSON.parse(await readFile(statePath, 'utf8')) as Record<string, unknown>;
+      await writeFile(expiredPath, JSON.stringify({ ...expired, createdAt: Date.now() - 600_000, expiresAt: Date.now() - 1 }), { mode: 0o600 });
+      await expect(exec(process.execPath, [cli, 'connect', '--state', expiredPath, '--wait', '--json'])).rejects.toMatchObject({ code: 3, stdout: expect.stringContaining('"status":"expired"') });
+      await expect(lstat(expiredPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      await approve(owner, trip, pending.link, pending.code, 'read', 'File agent');
+      const result = await exec(process.execPath, [cli, 'connect', '--state', statePath, '--wait', '--timeout', '5', '--json']);
+      expect(result.stderr).toBe('');
+      expect(JSON.parse(result.stdout)).toMatchObject({ link: pending.link, code: pending.code, requestId: pending.requestId, status: 'approved' });
+      expect((await lstat(statePath)).mode & 0o777).toBe(0o600);
+      const list = await exec(process.execPath, [cli, 'list', '--state', statePath]);
+      expect(JSON.parse(list.stdout)).toEqual([]);
+      expect(JSON.parse((await exec(process.execPath, [cli, 'connect', '--state', statePath, '--wait', '--json'])).stdout).status).toBe('approved');
+    } finally { await rm(statePath, { force: true }); }
+  }, 30_000);
+  it('returns network-unreachable exit code with an actionable proxy error', async () => {
+    const cli = join(root, 'packages/client/dist/cli.js');
+    const statePath = join(scratch, 'proxy-' + newId() + '.json');
+    await expect(exec(process.execPath, [cli, 'connect', newId(), '--state', statePath, '--no-wait', '--server', 'http://127.0.0.1:18798', '--json'], { env: { ...process.env, HTTPS_PROXY: 'http://127.0.0.1:18799' } })).rejects.toMatchObject({ code: 5, stderr: expect.stringContaining('app.wayfinding.support') });
+    await expect(lstat(statePath)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
   it('sends a suggested agent name with the connection request', async () => {
     const owner = await person(), trip = await journey(owner);
     const client = await connected(owner, trip, 'read', 'Planning assistant');

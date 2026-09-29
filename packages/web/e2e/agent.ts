@@ -6,9 +6,9 @@ const ORIGIN = 'http://localhost:18787';
 const b64url = (bytes: Uint8Array): string => btoa(String.fromCharCode(...bytes)).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
 
 /** A separate agent process never has the person's cookies or keys. */
-export async function requestAgent(request: APIRequestContext, journeyId: string, name?: string): Promise<Agent> {
+export async function requestAgent(request: APIRequestContext, journeyId: string, name?: string, keyStorage?: 'file'): Promise<Agent> {
   const age = await createAgeIdentity(), signing = await createSigningIdentity();
-  const response = await request.post('/v1/agent-sessions', { data: { journeyId, agentPublicKey: { recipient: age.recipient, signingKey: signing.publicKey }, requestedScope: 'readwrite', ...(name === undefined ? {} : { name }) }, headers: { 'X-Wayfinding': '1', Origin: ORIGIN } });
+  const response = await request.post('/v1/agent-sessions', { data: { journeyId, agentPublicKey: { recipient: age.recipient, signingKey: signing.publicKey }, requestedScope: 'readwrite', ...(name === undefined ? {} : { name }), ...(keyStorage === undefined ? {} : { keyStorage }) }, headers: { 'X-Wayfinding': '1', Origin: ORIGIN } });
   if (!response.ok()) throw new Error(`Agent session rejected (${response.status()}): ${await response.text()}`);
   const { id, code, approvalUrl } = await response.json() as { id: string; code: string; approvalUrl: string };
   const { principal } = await (await request.get('/v1/agent-sessions/' + id)).json() as { principal: string };

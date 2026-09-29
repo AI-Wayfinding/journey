@@ -3,6 +3,7 @@ import type { CommentBody, Envelope, ItemBody, JourneyKey, LogEntry, LogState, P
 import { readCache, writeCache } from './cache.js';
 import type { CipherCache, CipherRow } from './cache.js';
 import { signedHeaders } from './signing.js';
+import { networkFetch } from './network.js';
 import type { RememberedAgent } from './storage.js';
 
 export interface AddInput { type: string; title: string; body: string; tags: string[]; created?: string; resourceKind?: string; sharedFrom?: string }
@@ -16,7 +17,7 @@ function decode(value: string): Envelope { return JSON.parse(Buffer.from(value, 
 export class JourneyClient {
   private readonly fetcher: typeof fetch;
   private readonly keys = new Map<number, JourneyKey>();
-  constructor(readonly session: RememberedAgent, private readonly options: JourneyOptions = {}) { this.fetcher = options.fetch ?? fetch; }
+  constructor(readonly session: RememberedAgent, private readonly options: JourneyOptions = {}) { this.fetcher = options.fetch ?? networkFetch; }
   private async request<T>(path: string, method = 'GET', data?: object): Promise<T> {
     if (this.session.expiresAt <= Date.now()) throw new Error('Your journey agent access has expired. Connect again.');
     const body = data === undefined ? '' : JSON.stringify(data);

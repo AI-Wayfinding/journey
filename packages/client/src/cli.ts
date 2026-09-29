@@ -2,7 +2,9 @@
 import { homedir } from 'node:os';
 import { stdin, stderr } from 'node:process';
 import { join } from 'node:path';
-import { connectJourney } from './connection.js';
+import { connectJourney, requestConnection, resumeConnection } from './connection.js';
+import { ExpiredStateError, loadState } from './state.js';
+import type { AgentState } from './state.js';
 import { importMarkdown } from './import.js';
 import { JourneyClient } from './journey.js';
 import { runMcp } from './mcp.js';
@@ -11,6 +13,8 @@ import { forgetRemembered, loadRemembered } from './storage.js';
 const help = `wayfinding — read and write an approved journey
 
 wayfinding connect <journey-id> [--name "Agent name"] [--scope read|readwrite] [--remember] [--server https://app.wayfinding.support] [--key-folder PATH]
+wayfinding connect <journey-id> --state FILE --no-wait [--json]
+wayfinding connect --state FILE --wait [--timeout SECONDS] [--json]
 wayfinding disconnect [--key-folder PATH]
 wayfinding add --type TYPE --title TITLE --body TEXT [--tags a,b]
 wayfinding import <file-or-folder>
@@ -22,12 +26,13 @@ wayfinding comments <id>
 wayfinding status
 wayfinding mcp [--connect <journey-id>] [--name "Agent name"]
 
+Use --state FILE with commands or mcp to use an approved file-backed session.
 Use --journey <journey-id> with any one-shot command to ask for approval each time without remembering keys.
 Use --cache to store only encrypted journey records and a verified log head; --no-cache turns it off.
 Keys never go into the local cache. An agent cannot change journey membership or access.`;
 
-const valueFlags = new Set(['--scope', '--name', '--server', '--key-folder', '--journey', '--connect', '--type', '--title', '--body', '--tags']);
-const boolFlags = new Set(['--remember', '--cache', '--no-cache', '--help']);
+const valueFlags = new Set(['--scope', '--name', '--server', '--key-folder', '--journey', '--connect', '--type', '--title', '--body', '--tags', '--state', '--timeout']);
+const boolFlags = new Set(['--remember', '--cache', '--no-cache', '--help', '--no-wait', '--wait', '--json']);
 function parse(args: string[]): { command: string; positional: string[]; flags: Record<string, string | boolean> } {
   const command = args[0] ?? '--help', flags: Record<string, string | boolean> = {}, positional: string[] = [];
   for (let index = 1; index < args.length; index++) {
@@ -42,6 +47,12 @@ function parse(args: string[]): { command: string; positional: string[]; flags: 
   return { command, positional, flags };
 }
 function flag(flags: Record<string, string | boolean>, key: string): string | undefined { return typeof flags[key] === 'string' ? flags[key] : undefined; }
+function reportConnect(state: AgentState, status: 'pending' | 'approved' | 'expired' | 'denied' | 'locked', json: boolean): void {
+  const result = { link: state.link, code: state.code, requestId: state.status === 'pending' ? state.sessionId : state.session.sessionId, expiresAt: new Date(state.expiresAt).toISOString(), status };
+  if (json) console.log(JSON.stringify(result));
+  else if (status === 'pending') console.log('Open this link, check the code matches, and approve access to this journey: ' + result.link + '\nSix-digit code: ' + result.code);
+  else if (status === 'approved') console.log('Journey access was approved. The keys are stored in your state file.');
+}
 async function passphrase(folder?: string): Promise<string | undefined> {
   if (!folder) return undefined;
   if (process.env.WAYFINDING_PASSPHRASE) return process.env.WAYFINDING_PASSPHRASE;
@@ -83,9 +94,36 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   const secret = await passphrase(keyFolder);
   const server = flag(flags, '--server'), scope = flag(flags, '--scope');
   if (scope && scope !== 'read' && scope !== 'readwrite') throw new Error('Use --scope read or --scope readwrite.');
+  const statePath = flag(flags, '--state');
   const connect = async (journeyId: string, mcp = false) => connectJourney(journeyId, { server, scope: scope as 'read' | 'readwrite' | undefined, name: flag(flags, '--name'), remember: !!flags['--remember'], keyFolder, passphrase: secret, onApproval: (url, code) => { (mcp ? console.error : console.log)('Open this link, check the code matches, and approve access to this journey: ' + url + '\nSix-digit code: ' + code); } });
   if (command === 'connect') {
-    const journeyId = positional[0]; if (!journeyId) throw new Error('Give the journey ID to connect.');
+    const journeyId = positional[0], json = !!flags['--json'];
+    if (flags['--no-wait']) {
+      if (!journeyId || !statePath || flags['--wait'] || flags['--remember']) throw new Error('Use connect <journey-id> --state FILE --no-wait without --remember.');
+      reportConnect(await requestConnection(journeyId, { server, scope: scope as 'read' | 'readwrite' | undefined, name: flag(flags, '--name'), state: statePath }), 'pending', json);
+      return;
+    }
+    if (flags['--wait']) {
+      if (journeyId || !statePath || flags['--remember'] || server || scope || flags['--name']) throw new Error('Use connect --state FILE --wait [--timeout SECONDS].');
+      const timeout = flag(flags, '--timeout') ?? '600';
+      if (!/^[0-9]+$/.test(timeout) || !Number.isSafeInteger(Number(timeout)) || Number(timeout) < 1) throw new Error('--timeout must be a positive number of seconds.');
+      let state;
+      try {
+        state = await loadState(statePath);
+        const { client } = await resumeConnection(statePath, { timeoutMs: Number(timeout) * 1000 });
+        client.close();
+        reportConnect(await loadState(statePath), 'approved', json);
+      } catch (error) {
+        if (json && error instanceof Error && 'exitCode' in error) {
+          const status = error.exitCode === 2 ? 'pending' : error.exitCode === 3 ? 'expired' : error.exitCode === 4 ? error.message.includes('wrong approval codes') ? 'locked' : 'denied' : state?.status;
+          const reportState = state ?? (error instanceof ExpiredStateError ? error.state : undefined);
+          if (reportState && status) reportConnect(reportState, status, true);
+        }
+        throw error;
+      }
+      return;
+    }
+    if (!journeyId || flags['--timeout'] || statePath || json) throw new Error('Give the journey ID to connect, or use --state FILE --no-wait / --wait.');
     const { client } = await connect(journeyId);
     client.close();
     console.log(flags['--remember'] ? 'This journey is connected and the keys are remembered.' : 'Journey access was approved. No keys were saved; use wayfinding mcp --connect <journey-id> for an in-memory agent session, or --journey on each command.'); return;
@@ -94,16 +132,20 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   const getClient = async (): Promise<JourneyClient> => {
     if (held) return held;
     const oneShot = command === 'mcp' ? flag(flags, '--connect') : flag(flags, '--journey');
-    if (oneShot) { held = (await connect(oneShot, command === 'mcp')).client; }
+    if (statePath && (oneShot || keyFolder)) throw new Error('Use --state instead of --connect, --journey or --key-folder.');
+    if (statePath) {
+      const state = await loadState(statePath);
+      if (state.status !== 'approved') throw new Error('This journey is still pending approval. Run connect --state FILE --wait first.');
+      held = new JourneyClient(state.session, flags['--cache'] && !flags['--no-cache'] ? { cacheRoot: cacheFolder() } : {});
+    } else if (oneShot) { held = (await connect(oneShot, command === 'mcp')).client; }
     else {
       const session = await loadRemembered({ folder: keyFolder, passphrase: secret });
-      if (!session) throw new Error('No remembered journey connection. Use wayfinding connect <journey-id> --remember, or --journey <journey-id> to ask for approval for this command. For an in-memory MCP session, use wayfinding mcp --connect <journey-id>.');
+      if (!session) throw new Error('No remembered journey connection. Use wayfinding connect <journey-id> --remember, --state FILE for an approved file, or --journey <journey-id> to ask for approval for this command.');
       held = new JourneyClient(session, flags['--no-cache'] ? {} : { cacheRoot: cacheFolder() });
     }
-    if ((flags['--cache'] || flags['--no-cache']) && held) {
-      // Cache is chosen when the client is constructed; ephemeral sessions default to no cache.
-      if (flags['--cache'] && oneShot) held = new JourneyClient(held.session, { cacheRoot: cacheFolder() });
-      if (flags['--no-cache'] && oneShot) held = new JourneyClient(held.session);
+    if ((flags['--cache'] || flags['--no-cache']) && oneShot && held) {
+      if (flags['--cache']) held = new JourneyClient(held.session, { cacheRoot: cacheFolder() });
+      if (flags['--no-cache']) held = new JourneyClient(held.session);
     }
     return held;
   };
@@ -128,4 +170,4 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     console.log(JSON.stringify(result, null, 2));
   } finally { held?.close(); }
 }
-main().catch(error => { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; });
+main().catch(error => { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = error && typeof error.exitCode === 'number' ? error.exitCode : 1; });

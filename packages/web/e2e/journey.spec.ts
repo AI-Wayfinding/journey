@@ -347,6 +347,11 @@ test('two people share a journey with PRF passkeys and same-origin assets', asyn
     const agent = await requestAgent(request, journeyPath.split('/').at(-1)!, 'Proposed <guide>');
     await alice.page.goto(agent.approvalUrl);
     await expect(alice.page.getByRole('heading', { name: 'Approve an agent' })).toBeVisible();
+    await expect(alice.page.getByText('This agent will keep its keys in a file on its machine.')).toHaveCount(0);
+    const fileAgent = await requestAgent(request, journeyPath.split('/').at(-1)!, 'File-backed guide', 'file');
+    await alice.page.goto(fileAgent.approvalUrl);
+    await expect(alice.page.getByText('This agent will keep its keys in a file on its machine.')).toBeVisible();
+    await alice.page.goto(agent.approvalUrl);
     expect((await calls(alice.page)).get).toBe(0);
     console.log('New-tab unlock taps: 0 get');
     await expect(alice.page.getByLabel('Name', { exact: true })).toHaveValue('Proposed <guide>');

@@ -460,6 +460,18 @@ it('validates a proposed agent name before storing and returning it', async () =
   expect(stored).not.toHaveProperty('extra');
 });
 
+it('stores only the permitted key-storage flag for the approval screen', async () => {
+  const body = { journeyId: newId(), agentPublicKey: { recipient: 'public-recipient', signingKey: 'public-signing-key' }, requestedScope: 'read', remembered: false, keyStorage: 'file' };
+  for (const keyStorage of ['vault', true, null]) expect((await request('/v1/agent-sessions', 'POST', { ...body, keyStorage })).status).toBe(400);
+  expect((await request('/v1/agent-sessions', 'POST', { ...body, remembered: true })).status).toBe(400);
+  const started = await request('/v1/agent-sessions', 'POST', { ...body, untrusted: 'do-not-store' });
+  expect(started.status).toBe(201);
+  const { id } = await started.json() as { id: string };
+  const stored = await (await request('/v1/agent-sessions/' + id)).json() as Record<string, unknown>;
+  expect(stored.keyStorage).toBe('file');
+  expect(stored).not.toHaveProperty('untrusted');
+});
+
 it('limits unauthenticated agent-session creation by IP', async () => {
   const keys: string[] = [];
   const rate = { limit: async ({key}: {key:string}) => { keys.push(key); return {success:keys.length <= 10}; } };

@@ -18,8 +18,9 @@ export class Registry {
     this.sql.exec('CREATE TABLE IF NOT EXISTS account_principals (accountHash TEXT NOT NULL, journeyId TEXT NOT NULL, principal TEXT NOT NULL, PRIMARY KEY(accountHash,journeyId,principal))');
     this.sql.exec('CREATE TABLE IF NOT EXISTS invites (hash TEXT PRIMARY KEY, journeyId TEXT NOT NULL, expires INTEGER NOT NULL, used INTEGER NOT NULL DEFAULT 0, accountHash TEXT, support INTEGER NOT NULL DEFAULT 0)');
     this.sql.exec('CREATE TABLE IF NOT EXISTS pending_principals (journeyId TEXT NOT NULL, principal TEXT PRIMARY KEY, recipient TEXT NOT NULL, signingKey TEXT NOT NULL, accountHash TEXT NOT NULL, support INTEGER NOT NULL DEFAULT 0, expires INTEGER)');
-    this.sql.exec('CREATE TABLE IF NOT EXISTS agent_sessions (id TEXT PRIMARY KEY, journeyId TEXT NOT NULL, principal TEXT NOT NULL, recipient TEXT NOT NULL, signingKey TEXT NOT NULL, requestedScope TEXT NOT NULL, scope TEXT, expires INTEGER, status TEXT NOT NULL, code TEXT NOT NULL, remembered INTEGER NOT NULL, createdAt INTEGER NOT NULL DEFAULT 0, failedAttempts INTEGER NOT NULL DEFAULT 0, name TEXT)');
+    this.sql.exec("CREATE TABLE IF NOT EXISTS agent_sessions (id TEXT PRIMARY KEY, journeyId TEXT NOT NULL, principal TEXT NOT NULL, recipient TEXT NOT NULL, signingKey TEXT NOT NULL, requestedScope TEXT NOT NULL, scope TEXT, expires INTEGER, status TEXT NOT NULL, code TEXT NOT NULL, remembered INTEGER NOT NULL, createdAt INTEGER NOT NULL DEFAULT 0, failedAttempts INTEGER NOT NULL DEFAULT 0, name TEXT, keyStorage TEXT NOT NULL DEFAULT 'memory')");
     if (!this.sql.exec('PRAGMA table_info(agent_sessions)').toArray().some(column => column.name === 'name')) this.sql.exec('ALTER TABLE agent_sessions ADD COLUMN name TEXT');
+    if (!this.sql.exec('PRAGMA table_info(agent_sessions)').toArray().some(column => column.name === 'keyStorage')) this.sql.exec("ALTER TABLE agent_sessions ADD COLUMN keyStorage TEXT NOT NULL DEFAULT 'memory'");
     this.sql.exec('CREATE TABLE IF NOT EXISTS nonces (sessionId TEXT NOT NULL, nonce TEXT NOT NULL, expires INTEGER NOT NULL, PRIMARY KEY(sessionId,nonce))');
     this.sql.exec('CREATE TABLE IF NOT EXISTS rates (key TEXT PRIMARY KEY, start INTEGER NOT NULL, count INTEGER NOT NULL)');
   }
@@ -158,10 +159,10 @@ export class Registry {
           case 'pendingGet': return this.one('SELECT accountHash,support,expires FROM pending_principals WHERE journeyId=? AND principal=?', input.journeyId, input.principal);
           case 'pendingDelete': this.sql.exec('DELETE FROM pending_principals WHERE journeyId=? AND principal=?', input.journeyId, input.principal); return { ok: true };
           case 'agentCreate': {
-            this.sql.exec('INSERT INTO agent_sessions(id,journeyId,principal,recipient,signingKey,requestedScope,status,code,remembered,createdAt,name) VALUES(?,?,?,?,?,?,?,?,?,?,?)', input.id, input.journeyId, input.principal, input.recipient, input.signingKey, input.requestedScope, 'pending', input.code, input.remembered ? 1 : 0, now, input.name);
+            this.sql.exec('INSERT INTO agent_sessions(id,journeyId,principal,recipient,signingKey,requestedScope,status,code,remembered,createdAt,name,keyStorage) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)', input.id, input.journeyId, input.principal, input.recipient, input.signingKey, input.requestedScope, 'pending', input.code, input.remembered ? 1 : 0, now, input.name, input.keyStorage);
             return { ok: true };
           }
-          case 'agentGet': return this.one('SELECT id,journeyId,principal,recipient,signingKey,requestedScope,scope,expires,status,remembered,createdAt,name FROM agent_sessions WHERE id=?', input.id);
+          case 'agentGet': return this.one('SELECT id,journeyId,principal,recipient,signingKey,requestedScope,scope,expires,status,remembered,createdAt,name,keyStorage FROM agent_sessions WHERE id=?', input.id);
           case 'agentAttempt': {
             const row = this.one('SELECT code,status,createdAt,failedAttempts FROM agent_sessions WHERE id=?', input.id);
             if (!row || row.status !== 'pending' || Number(row.createdAt) + 600_000 <= now) return { matched: false, available: false };
