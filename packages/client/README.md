@@ -118,3 +118,14 @@ For Claude Desktop, after completing the two-step file-backed connection above, 
 The earlier `--connect` example instead asks for approval when MCP starts. For Claude Code, use `claude mcp add wayfinding -- wayfinding mcp --connect YOUR_JOURNEY_ID`. For Codex, use `codex mcp add wayfinding -- wayfinding mcp --connect YOUR_JOURNEY_ID`. Use the absolute path to the built `cli.js` with `node` if `wayfinding` is not on the host's PATH. When the MCP process begins, the person sees the link and code in the host's standard-error log; approve it before the MCP connection finishes. Some hosts hide stderr: run `wayfinding connect <journey-id> --remember` in a terminal first, then configure `wayfinding mcp` without `--connect`.
 
 The person manages other members and any key rotation in the browser. An agent cannot approve itself, change someone's scope, add or remove members, or rotate journey keys. If the person previously rotated the journey key, the current approval API may not provide this agent the old epoch wraps needed to verify *all* earlier history; this client stops with a missing-key message rather than writing without verification.
+
+## Agent link (fallback)
+
+Some agent sandboxes, for example Claude Cowork, cannot reach `app.wayfinding.support`, and many people cannot change the allowlist. If the CLI fails with exit code 5 ("Could not reach the journey server"), the agent can still read a web page with its web fetch tool. Ask the person to open their journey, go to **People & agents → Add agent by link**, choose how long the link should last (1, 7 or 30 days) and confirm with their passkey. They give you a link like `https://app.wayfinding.support/a/<secret>`. Read it with your web fetch tool; it returns JSON with the journey's items and people, in pages of under 12 KB (`page.next` holds the next page's URL).
+
+- The link is **read-only**. To add something, give the person the text and ask them to add it in the journey.
+- It is a deliberate exception to end-to-end encryption: while the link is live, Wayfinding's server decrypts the journey to answer it. Anyone with the link can read the journey until it expires or the person removes the agent.
+- When `access.expiringSoon` is true, or the link answers 410, ask the person to open `access.renewUrl` and extend it with their passkey. The link stays the same.
+- If the link answers 404, it has ended. Ask the person for a new one.
+
+The CLI prints this hint after a network failure, and `--json` errors carry it in a `fallback` field.

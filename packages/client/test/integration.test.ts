@@ -141,6 +141,16 @@ describe('real journey server in workerd', () => {
     await expect(exec(process.execPath, [cli, 'connect', newId(), '--state', statePath, '--no-wait', '--server', 'http://127.0.0.1:18798', '--json'], { env: { ...process.env, HTTPS_PROXY: 'http://127.0.0.1:18799' } })).rejects.toMatchObject({ code: 5, stderr: expect.stringContaining('app.wayfinding.support') });
     await expect(lstat(statePath)).rejects.toMatchObject({ code: 'ENOENT' });
   });
+  it('tells a sandboxed agent about the agent link fallback, in plain text and in --json', async () => {
+    const cli = join(root, 'packages/client/dist/cli.js');
+    const env = { ...process.env, HTTPS_PROXY: 'http://127.0.0.1:18799' };
+    const args = ['connect', newId(), '--state', join(scratch, 'fallback-' + newId() + '.json'), '--no-wait', '--server', 'http://127.0.0.1:18798'];
+    const text = "If this environment can't reach app.wayfinding.support but you can read web pages, ask the person to open their journey, go to People & agents \u2192 Add agent by link, and give you the link. Read it with your web fetch tool; it returns JSON. That access is read-only.";
+    await expect(exec(process.execPath, [cli, ...args], { env })).rejects.toMatchObject({ code: 5, stderr: expect.stringContaining(text) });
+    const failed = await exec(process.execPath, [cli, ...args, '--json'], { env }).catch(cause => cause) as { code: number; stderr: string };
+    expect(failed.code).toBe(5);
+    expect(JSON.parse(failed.stderr)).toMatchObject({ exitCode: 5, fallback: text, error: expect.stringContaining('Could not reach the journey server') });
+  });
   it('sends a suggested agent name with the connection request', async () => {
     const owner = await person(), trip = await journey(owner);
     const client = await connected(owner, trip, 'read', 'Planning assistant');

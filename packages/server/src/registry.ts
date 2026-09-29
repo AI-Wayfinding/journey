@@ -21,6 +21,8 @@ export class Registry {
     this.sql.exec("CREATE TABLE IF NOT EXISTS agent_sessions (id TEXT PRIMARY KEY, journeyId TEXT NOT NULL, principal TEXT NOT NULL, recipient TEXT NOT NULL, signingKey TEXT NOT NULL, requestedScope TEXT NOT NULL, scope TEXT, expires INTEGER, status TEXT NOT NULL, code TEXT NOT NULL, remembered INTEGER NOT NULL, createdAt INTEGER NOT NULL DEFAULT 0, failedAttempts INTEGER NOT NULL DEFAULT 0, name TEXT, keyStorage TEXT NOT NULL DEFAULT 'memory')");
     if (!this.sql.exec('PRAGMA table_info(agent_sessions)').toArray().some(column => column.name === 'name')) this.sql.exec('ALTER TABLE agent_sessions ADD COLUMN name TEXT');
     if (!this.sql.exec('PRAGMA table_info(agent_sessions)').toArray().some(column => column.name === 'keyStorage')) this.sql.exec("ALTER TABLE agent_sessions ADD COLUMN keyStorage TEXT NOT NULL DEFAULT 'memory'");
+    // An agent link keeps only the sealed identity and a hash of the secret; the secret itself lives only in the link.
+    this.sql.exec('CREATE TABLE IF NOT EXISTS agent_links (hash TEXT PRIMARY KEY, journeyId TEXT NOT NULL, memberId TEXT NOT NULL UNIQUE, addedBy TEXT NOT NULL, blob TEXT NOT NULL, expires INTEGER NOT NULL, since INTEGER NOT NULL, created INTEGER NOT NULL, rateStart INTEGER NOT NULL DEFAULT 0, rateCount INTEGER NOT NULL DEFAULT 0)');
     this.sql.exec('CREATE TABLE IF NOT EXISTS nonces (sessionId TEXT NOT NULL, nonce TEXT NOT NULL, expires INTEGER NOT NULL, PRIMARY KEY(sessionId,nonce))');
     this.sql.exec('CREATE TABLE IF NOT EXISTS rates (key TEXT PRIMARY KEY, start INTEGER NOT NULL, count INTEGER NOT NULL)');
   }
@@ -134,7 +136,7 @@ export class Registry {
             this.sql.exec('INSERT INTO journeys(id,name,creatorEmail,creatorHash,created,lastActive,memberCount,storageBytes,visibility,mode,minClientVersion) VALUES(?,?,?,?,?,?,?,?,?,?,?)', data.id, data.name, data.creatorEmail, data.creatorHash, now, now, 1, 0, 'private', 'sealed', data.minClientVersion);
             this.sql.exec('INSERT INTO account_principals(accountHash,journeyId,principal) VALUES(?,?,?)', data.creatorHash, data.id, data.creator.id); return { ok: true };
           }
-          case 'journeyDelete': this.sql.exec('DELETE FROM journeys WHERE id=?', input.id); this.sql.exec('DELETE FROM account_principals WHERE journeyId=?', input.id); return { ok: true };
+          case 'journeyDelete': this.sql.exec('DELETE FROM journeys WHERE id=?', input.id); this.sql.exec('DELETE FROM account_principals WHERE journeyId=?', input.id); this.sql.exec('DELETE FROM agent_links WHERE journeyId=?', input.id); return { ok: true };
           case 'journeys': return this.sql.exec('SELECT j.id,j.name,j.created,j.lastActive,j.memberCount,j.storageBytes,j.visibility,j.mode,j.minClientVersion,p.principal FROM journeys j JOIN account_principals p ON p.journeyId=j.id WHERE p.accountHash=?', input.accountHash).toArray();
           case 'registry': return this.sql.exec('SELECT id,name,creatorEmail,created,lastActive,memberCount,storageBytes,visibility,mode,minClientVersion FROM journeys').toArray();
           case 'link': this.sql.exec('INSERT OR IGNORE INTO account_principals(accountHash,journeyId,principal) VALUES(?,?,?)', input.accountHash, input.journeyId, input.principal); return { ok: true };
@@ -175,6 +177,31 @@ export class Registry {
             const row = this.one('SELECT status,createdAt FROM agent_sessions WHERE id=?', input.id);
             if (!row || row.status !== 'pending' || Number(row.createdAt) + 600_000 <= now) return null;
             this.sql.exec('UPDATE agent_sessions SET scope=?,expires=?,status=? WHERE id=?', input.scope, input.expires, 'approved', input.id); return { ok: true };
+          }
+          case 'linkCreate': {
+            if (this.one('SELECT hash FROM agent_links WHERE memberId=? OR hash=?', input.memberId, input.hash)) return null;
+            this.sql.exec('INSERT INTO agent_links(hash,journeyId,memberId,addedBy,blob,expires,since,created) VALUES(?,?,?,?,?,?,?,?)', input.hash, input.journeyId, input.memberId, input.addedBy, input.blob, input.expires, now, now);
+            return { ok: true };
+          }
+          case 'linkGet': {
+            const row = this.one('SELECT hash,journeyId,memberId,addedBy,blob,expires,since,rateStart,rateCount FROM agent_links WHERE hash=?', input.hash);
+            if (!row) return null;
+            const windowMs = 3_600_000;
+            const start = Number(row.rateStart) + windowMs > now ? Number(row.rateStart) : now;
+            const count = start === Number(row.rateStart) ? Number(row.rateCount) + 1 : 1;
+            this.sql.exec('UPDATE agent_links SET rateStart=?,rateCount=? WHERE hash=?', start, count, input.hash);
+            if (count > input.limit) return { limited: true, retryAfter: Math.max(1, Math.ceil((start + windowMs - now) / 1000)), journeyId: row.journeyId, memberId: row.memberId };
+            return { limited: false, journeyId: row.journeyId, memberId: row.memberId, blob: row.blob, expires: row.expires, since: row.since };
+          }
+          case 'linkList': return this.sql.exec('SELECT memberId,addedBy,expires,created FROM agent_links WHERE journeyId=? ORDER BY created', input.journeyId).toArray();
+          case 'linkRenew': {
+            const changed = this.sql.exec('UPDATE agent_links SET expires=?,since=? WHERE journeyId=? AND memberId=?', input.expires, now, input.journeyId, input.memberId).rowsWritten;
+            this.sql.exec('UPDATE agent_sessions SET expires=? WHERE journeyId=? AND principal=?', input.expires, input.journeyId, input.memberId);
+            return changed ? { ok: true } : null;
+          }
+          case 'linkRevoke': {
+            for (const principal of input.principals) this.sql.exec('DELETE FROM agent_links WHERE journeyId=? AND (memberId=? OR addedBy=?)', input.journeyId, principal, principal);
+            return { ok: true };
           }
           case 'nonce': {
             this.sql.exec('DELETE FROM nonces WHERE expires<=?', now);

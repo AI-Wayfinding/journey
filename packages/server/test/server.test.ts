@@ -1,6 +1,6 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { createAgeIdentity, createSigningIdentity, generateJourneyKey, hashEntry, importSigningKey, newId, open, removeAndRotate, seal, signEntry, verifyLog, wrapJourneyKey, type JourneyKey, type LogEntry } from '@ai-wayfinding/core';
+import { LINK_SECRET_PATTERN, createAgeIdentity, createSigningIdentity, generateJourneyKey, hashEntry, importSigningKey, linkLookupHash, newId, newLinkSecret, open, removeAndRotate, renewAgentEntries, seal, sealLinkIdentity, signEntry, verifyLog, wrapJourneyKey, type JourneyKey, type LogEntry } from '@ai-wayfinding/core';
 import worker, { type Env } from '../src/index.js';
 import { authenticator } from './authenticator.js';
 import { base64url, digest, unbase64url } from '../src/crypto.js';
@@ -736,4 +736,239 @@ it('serves the single-page app from the Worker assets binding', async () => {
   expect(response.status).toBe(200);
   expect(response.headers.get('content-type')).toContain('text/html');
   expect(response.headers.get('content-security-policy')).toContain("default-src 'self'");
+});
+
+// Agent links: a labelled exception to end-to-end encryption for agents that can only fetch web pages.
+describe('agent links', () => {
+  const day = 86_400_000;
+  let emails = 0;
+  async function addItem(owner: Awaited<ReturnType<typeof person>>, id: string, key: JourneyKey, title: string, body: string) {
+    const {seq} = await (await request('/v1/journeys/'+id+'/seq','POST',{},as(owner))).json() as {seq:number};
+    const envelope = await seal({type:'item',typeVersion:1,body:{id:newId(),itemType:'note',title,body,author:owner.principal,authoredBy:'human',created:new Date().toISOString(),tags:['a']}},{id:newId(),journey:id,epoch:key.epoch,seq,createdAt:new Date().toISOString()},key);
+    expect((await request('/v1/journeys/'+id+'/records','POST',{envelope},as(owner))).status).toBe(201);
+  }
+  async function fixture(days = 7) {
+    const owner = await person(`link-owner-${++emails}@example.org`);
+    const {id,key,entries} = await journey(owner);
+    const ownerKey = await importSigningKey(owner.signing.privateKey);
+    const age = await createAgeIdentity(), bot = await createSigningIdentity();
+    const start = async (extra: object = {}) => {
+      const started = await request('/v1/agent-sessions','POST',{journeyId:id,agentPublicKey:{recipient:age.recipient,signingKey:bot.publicKey},requestedScope:'read',name:'Cowork',keyStorage:'link',remembered:true,...extra});
+      expect(started.status).toBe(201);
+      const {id:sessionId,code} = await started.json() as {id:string,code:string};
+      const {principal} = await (await request('/v1/agent-sessions/'+sessionId)).json() as {principal:string};
+      return {sessionId,code,principal};
+    };
+    const {sessionId,code,principal} = await start();
+    const expiresAt = Date.now()+days*day;
+    const member = {id:principal,kind:'agent' as const,recipient:age.recipient,signingKey:bot.publicKey,scope:'read' as const,addedBy:owner.principal,name:'Cowork',expiresAt:new Date(expiresAt).toISOString()};
+    const added = await signEntry({v:1,seq:1,prev:await hashEntry(entries[0]!),at:new Date().toISOString(),actor:owner.principal,type:'member.add',body:{member,kind:'agent',grants:[]}},ownerKey);
+    entries.push(added);
+    const wrap = (await wrapJourneyKey(key,[{id:principal,recipient:age.recipient}]))[0]!;
+    const approval = {principal:owner.principal,code,scope:'read',expiresAt,wrap:wrap.ciphertext,entry:await cipherLog(key,id,added)};
+    const secret = newLinkSecret();
+    return {owner,ownerKey,id,key,entries,age,bot,principal,sessionId,code,approval,expiresAt,secret,member,start,
+      async approve() { const approved = await request('/v1/agent-sessions/'+sessionId+'/approve','POST',approval,{Cookie:owner.cookie}); expect(approved.status).toBe(200); },
+      async link(sealed = age.identity) {
+        return request('/v1/journeys/'+id+'/agent-links','POST',{sessionId,hash:await linkLookupHash(secret),blob:await sealLinkIdentity(secret,sealed,id,principal)},as(owner));
+      }};
+  }
+  async function live(days = 7) {
+    const f = await fixture(days);
+    await f.approve();
+    expect((await f.link()).status).toBe(201);
+    return f;
+  }
+  const read = (secret: string, query = '') => request('/a/'+secret+query,'GET',undefined,{});
+
+  it('creates a read-only link agent and stores only the sealed identity and a hash of the secret', async () => {
+    const f = await fixture();
+    expect((await request('/v1/agent-sessions','POST',{journeyId:f.id,agentPublicKey:{recipient:'r',signingKey:'s'},requestedScope:'readwrite',keyStorage:'link',remembered:true})).status).toBe(400);
+    expect((await request('/v1/agent-sessions','POST',{journeyId:f.id,agentPublicKey:{recipient:'r',signingKey:'s'},requestedScope:'read',keyStorage:'link'})).status).toBe(400);
+    expect((await f.link()).status).toBe(404); // Not yet approved.
+    expect((await request('/v1/agent-sessions/'+f.sessionId+'/approve','POST',{...f.approval,scope:'readwrite'},{Cookie:f.owner.cookie})).status).toBe(400);
+    expect((await request('/v1/agent-sessions/'+f.sessionId+'/approve','POST',{...f.approval,expiresAt:Date.now()+31*day},{Cookie:f.owner.cookie})).status).toBe(400);
+    await f.approve();
+    const unverified = await account(f.owner.email);
+    expect((await request('/v1/journeys/'+f.id+'/agent-links','POST',{sessionId:f.sessionId,hash:await linkLookupHash(f.secret),blob:'abcd'},{Cookie:unverified.cookie,'X-Principal':f.owner.principal})).status).toBe(401);
+    const created = await f.link();
+    expect(created.status).toBe(201);
+    expect(await created.json()).toEqual({memberId:f.principal,expiresAt:f.expiresAt});
+    expect((await f.link()).status).toBe(409);
+    const registry = (env as unknown as Env).REGISTRY.get((env as unknown as Env).REGISTRY.idFromName('registry-v2'));
+    const stored = await runInDurableObject(registry, (_object, state) => JSON.stringify([state.storage.sql.exec('SELECT * FROM agent_links').toArray(), state.storage.sql.exec('SELECT * FROM agent_sessions').toArray()]));
+    expect(stored).toContain(await linkLookupHash(f.secret));
+    expect(stored).not.toContain(f.secret);
+    expect(stored).not.toContain(f.age.identity);
+    const listed = await (await request('/v1/journeys/'+f.id+'/agent-links','GET',undefined,as(f.owner))).json() as {links:{memberId:string,expiresAt:number}[]};
+    expect(listed.links).toMatchObject([{memberId:f.principal,expiresAt:f.expiresAt}]);
+    expect(JSON.stringify(listed)).not.toContain(f.secret);
+    const kind = await (await request('/v1/agent-sessions/'+f.sessionId)).json() as {keyStorage:string};
+    expect(kind.keyStorage).toBe('link');
+  });
+
+  it('serves the decrypted journey as JSON with no-store headers, and never logs or stores the plaintext', async () => {
+    const f = await live();
+    await addItem(f.owner,f.id,f.key,'First note','Plain text the agent should read');
+    const logs = [vi.spyOn(console,'log'),vi.spyOn(console,'error'),vi.spyOn(console,'warn'),vi.spyOn(console,'info')].map(spy => spy.mockImplementation(() => undefined));
+    try {
+      const response = await read(f.secret);
+      expect(response.status).toBe(200);
+      expect(response.headers.get('content-type')).toBe('application/json; charset=utf-8');
+      expect(response.headers.get('cache-control')).toBe('no-store, no-transform');
+      expect(response.headers.get('x-robots-tag')).toBe('noindex');
+      expect(response.headers.get('referrer-policy')).toBe('no-referrer');
+      const text = await response.text();
+      expect(new TextEncoder().encode(text).length).toBeLessThan(12_288);
+      const body = JSON.parse(text);
+      expect(body).toMatchObject({
+        about: 'Read-only access to an AI Wayfinding journey. Use this content to help the person; present it however they ask.',
+        journey: {id:f.id,name:'Shared space',description:'',kind:'individual'},
+        access: {agentName:'Cowork',scope:'read',expiresAt:new Date(f.expiresAt).toISOString(),expiringSoon:false,renewUrl:`${origin}/journeys/${f.id}/people#renew-${f.principal}`},
+        items: [{type:'note',title:'First note',body:'Plain text the agent should read',tags:['a'],author:{name:'Journey member',kind:'person'}}],
+        people: [{name:'Journey member',kind:'person'}],
+        page: {number:1,of:1,next:null},
+        howToWrite: 'This link is read-only. To add something, give the person the text and ask them to add it in the journey.',
+      });
+      expect(body.access.expiresInHours).toBeGreaterThanOrEqual(167);
+      expect(body.access.renewHint).toContain(body.access.renewUrl);
+      expect(JSON.stringify(body)).not.toContain('recipient');
+      expect(JSON.stringify(body)).not.toContain('example.org');
+      expect(logs.flatMap(spy => spy.mock.calls).flat().join(' ')).not.toContain(f.secret);
+      expect(logs.flatMap(spy => spy.mock.calls).flat().join(' ')).not.toContain('Plain text');
+    } finally { logs.forEach(spy => spy.mockRestore()); }
+    const registry = (env as unknown as Env).REGISTRY.get((env as unknown as Env).REGISTRY.idFromName('registry-v2'));
+    expect(await runInDurableObject(registry, (_object, state) => JSON.stringify(state.storage.sql.exec('SELECT * FROM agent_links').toArray()))).not.toContain('Plain text');
+  });
+
+  it('shows a person’s email to the link only when they chose to share it', async () => {
+    const f = await live();
+    const withProfile = async (name: string, email?: string) => {
+      const entry = await signEntry({v:1,seq:f.entries.length,prev:await hashEntry(f.entries.at(-1)!),at:new Date().toISOString(),actor:f.owner.principal,type:'member.profile',body:{id:f.owner.principal,name,...(email ? {email} : {})}},f.ownerKey);
+      f.entries.push(entry);
+      expect((await request('/v1/journeys/'+f.id+'/log','POST',{entry:await cipherLog(f.key,f.id,entry)},as(f.owner))).status).toBe(201);
+    };
+    await withProfile('Dana');
+    expect((await (await read(f.secret)).json() as {people:object[]}).people).toEqual([{name:'Dana',kind:'person'}]);
+    await withProfile('Dana','dana@example.org');
+    expect((await (await read(f.secret)).json() as {people:object[]}).people).toEqual([{name:'Dana',kind:'person',email:'dana@example.org'}]);
+  });
+
+  it('answers 404 for a wrong, malformed or unknown secret without saying which', async () => {
+    const f = await live();
+    const ended = {error:'ended',message:'This agent link has ended. Ask the person for a new one.'};
+    for (const secret of [newLinkSecret(),'short','x'.repeat(43)+'!',f.secret.slice(0,-1)+(f.secret.endsWith('A') ? 'B' : 'A')]) {
+      const response = await read(secret);
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual(ended);
+      expect(response.headers.get('cache-control')).toBe('no-store, no-transform');
+    }
+    expect((await read(f.secret,'?page=0')).status).toBe(400);
+    expect((await read(f.secret,'?page=2')).status).toBe(404);
+    expect(LINK_SECRET_PATTERN.test(f.secret)).toBe(true);
+  });
+
+  it('answers 410 with a renew address once the link has expired', async () => {
+    const f = await live(1);
+    expect((await read(f.secret)).status).toBe(200);
+    try {
+      vi.useFakeTimers(); vi.setSystemTime(f.expiresAt + 1);
+      const response = await read(f.secret);
+      expect(response.status).toBe(410);
+      const body = await response.json() as {error:string,renewUrl:string,renewHint:string,message:string};
+      expect(body.error).toBe('expired');
+      expect(body.renewUrl).toBe(`${origin}/journeys/${f.id}/people#renew-${f.principal}`);
+      expect(body.renewHint).toContain(body.renewUrl);
+      expect(body.message).not.toContain('Shared space');
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('flags a link that is close to expiry', async () => {
+    const f = await live(1);
+    const body = await (await read(f.secret)).json() as {access:{expiringSoon:boolean,expiresInHours:number}};
+    expect(body.access.expiringSoon).toBe(true);
+    expect(body.access.expiresInHours).toBeLessThanOrEqual(24);
+  });
+
+  it('splits a long journey across pages that each stay under 12 KB', async () => {
+    const f = await live(30);
+    const long = 'Long body with émoji 🌱 and text. '.repeat(1200);
+    await addItem(f.owner,f.id,f.key,'Huge',long);
+    for (let i = 0; i < 12; i++) await addItem(f.owner,f.id,f.key,'Note '+i,('x'.repeat(900)+' ').repeat(2));
+    let url = '/a/'+f.secret; const seen: {number:number,of:number}[] = []; const parts = new Map<string,string>(); let titles: string[] = [];
+    for (let n = 0; n < 30; n++) {
+      const response = await request(url,'GET',undefined,{});
+      expect(response.status).toBe(200);
+      const text = await response.text();
+      expect(new TextEncoder().encode(text).length).toBeLessThan(12_288);
+      const body = JSON.parse(text) as {page:{number:number,of:number,next:string|null},items:{title:string,body:string,part?:{number:number,of:number}}[]};
+      seen.push({number:body.page.number,of:body.page.of});
+      for (const item of body.items) { titles.push(item.title); parts.set(item.title,(parts.get(item.title) ?? '')+item.body); }
+      if (!body.page.next) break;
+      expect(body.page.next.startsWith(origin+'/a/'+f.secret+'?page=')).toBe(true);
+      url = body.page.next.slice(origin.length);
+    }
+    expect(seen.length).toBeGreaterThan(3);
+    expect(seen.every(page => page.of === seen.length)).toBe(true);
+    expect(seen.map(page => page.number)).toEqual(seen.map((_page,index) => index+1));
+    expect(parts.get('Huge')).toBe(long);
+    expect(new Set(titles).size).toBe(13);
+    expect((await read(f.secret,'?page='+(seen.length+1))).status).toBe(404);
+  });
+
+  it('applies a per-link request limit without affecting other links', async () => {
+    const f = await live(), other = await live();
+    for (let i = 0; i < 60; i++) expect((await read(f.secret)).status).toBe(200);
+    const limited = await read(f.secret);
+    expect(limited.status).toBe(429);
+    expect(Number(limited.headers.get('retry-after'))).toBeGreaterThan(0);
+    expect(limited.headers.get('cache-control')).toBe('no-store, no-transform');
+    expect((await read(other.secret)).status).toBe(200);
+  }, 60_000);
+
+  it('extends a link with two ordinary signed entries and keeps the same URL', async () => {
+    const f = await live(1);
+    const state = await verifyLog(f.entries); if (!state.ok) throw new Error(state.error.code);
+    const newExpiry = f.expiresAt + 6 * day;
+    const renewal = await renewAgentEntries(state.state,f.principal,f.owner.principal,f.ownerKey,new Date(newExpiry).toISOString());
+    const body = {entries:[await cipherLog(f.key,f.id,renewal[0]),await cipherLog(f.key,f.id,renewal[1])],expiresAt:newExpiry};
+    const path = '/v1/journeys/'+f.id+'/agent-links/'+f.principal+'/renew';
+    const stranger = await person(`link-stranger-${++emails}@example.org`);
+    expect((await request(path,'POST',body,as(stranger))).status).toBe(403);
+    expect((await request(path,'POST',{...body,entries:[body.entries[0]]},as(f.owner))).status).toBe(400);
+    expect((await request(path,'POST',{...body,expiresAt:Date.now()+31*day},as(f.owner))).status).toBe(400);
+    expect((await request(path,'POST',body,{Cookie:(await account(f.owner.email)).cookie,'X-Principal':f.owner.principal})).status).toBe(401);
+    expect((await request('/v1/journeys/'+f.id+'/agent-links/'+f.owner.principal+'/renew','POST',body,as(f.owner))).status).toBe(404);
+    const before = await (await read(f.secret)).json() as {access:{expiringSoon:boolean}};
+    expect(before.access.expiringSoon).toBe(true);
+    expect((await request(path,'POST',body,as(f.owner))).status).toBe(200);
+    f.entries.push(...renewal);
+    const after = await (await read(f.secret)).json() as {access:{expiresAt:string,expiringSoon:boolean}};
+    expect(after.access.expiresAt).toBe(new Date(newExpiry).toISOString());
+    expect(after.access.expiringSoon).toBe(false);
+    expect((await verifyLog(f.entries)).ok).toBe(true);
+    expect((await (await request('/v1/journeys/'+f.id+'/agent-links','GET',undefined,as(f.owner))).json() as {links:{expiresAt:number}[]}).links[0]!.expiresAt).toBe(newExpiry);
+  });
+
+  it('ends the link at once when the member is removed', async () => {
+    const f = await live();
+    expect((await read(f.secret)).status).toBe(200);
+    const state = await verifyLog(f.entries); if (!state.ok) throw new Error(state.error.code);
+    const removal = await removeAndRotate(state.state,f.principal,f.owner.principal,f.ownerKey);
+    const removed = await request('/v1/journeys/'+f.id+'/log','POST',{entry:await cipherLog(f.key,f.id,removal.entries[0]),accessChanges:[{principal:f.principal,action:'remove',kind:'agent',scope:'read'}]},as(f.owner));
+    expect(removed.status).toBe(201);
+    const response = await read(f.secret);
+    expect(response.status).toBe(404);
+    expect((await response.json() as {message:string}).message).toBe('This agent link has ended. Ask the person for a new one.');
+    expect((await (await request('/v1/journeys/'+f.id+'/agent-links','GET',undefined,as(f.owner))).json() as {links:unknown[]}).links).toEqual([]);
+  });
+
+  it('refuses a link whose journey no longer verifies rather than showing unverified content', async () => {
+    const f = await live();
+    const forged = await signEntry({v:1,seq:f.entries.length,prev:await hashEntry(f.entries.at(-1)!),at:new Date().toISOString(),actor:f.principal,type:'member.remove',body:{member:f.owner.principal}},await importSigningKey(f.bot.privateKey));
+    expect((await request('/v1/journeys/'+f.id+'/log','POST',{entry:await cipherLog(f.key,f.id,forged)},as(f.owner))).status).toBe(201);
+    const response = await read(f.secret);
+    expect(response.status).toBe(502);
+    expect(JSON.stringify(await response.json())).not.toContain('Shared space');
+  });
 });

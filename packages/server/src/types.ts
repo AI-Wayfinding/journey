@@ -48,10 +48,15 @@ export type RegistryMessage =
   | { op: 'inviteTake'; hash: string; accountHash: string; principal: string; recipient: string; signingKey: string }
   | { op: 'invitePending'; journeyId: string }
   | { op: 'pendingGet' | 'pendingDelete'; journeyId: string; principal: string }
-  | { op: 'agentCreate'; id: string; journeyId: string; principal: string; recipient: string; signingKey: string; requestedScope: Scope; code: string; remembered: boolean; keyStorage: 'memory' | 'file'; name: string | null }
+  | { op: 'agentCreate'; id: string; journeyId: string; principal: string; recipient: string; signingKey: string; requestedScope: Scope; code: string; remembered: boolean; keyStorage: 'memory' | 'file' | 'link'; name: string | null }
   | { op: 'agentGet'; id: string }
   | { op: 'agentAttempt'; id: string; code: string }
   | { op: 'agentApprove'; id: string; scope: Scope; expires: number }
+  | { op: 'linkCreate'; hash: string; journeyId: string; memberId: string; addedBy: string; blob: string; expires: number }
+  | { op: 'linkGet'; hash: string; limit: number }
+  | { op: 'linkList'; journeyId: string }
+  | { op: 'linkRenew'; journeyId: string; memberId: string; expires: number }
+  | { op: 'linkRevoke'; journeyId: string; principals: string[] }
   | { op: 'nonce'; id: string; nonce: string };
 type JourneyMessage = { journeyId: string; subject: Subject };
 export type EnclaveMessage =
@@ -62,4 +67,5 @@ export type EnclaveMessage =
     | { op: 'records'; after: number; limit: number }
     | { op: 'logWrite'; entry: string; changes: AccessChange[]; memberWraps?: EpochWrap[]; wraps?: EpochWrap[]; epoch?: number }
     | { op: 'log'; after: number }
+    | { op: 'renew'; member: string; expiresAt: number; entries: string[] }
   ));

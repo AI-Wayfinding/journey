@@ -424,3 +424,76 @@ test('two people share a journey with PRF passkeys and same-origin assets', asyn
     expect(support.requests.every(url => new URL(url).hostname === 'localhost')).toBeTruthy();
   } finally { await alice.context.close(); await bob.context.close(); await support.context.close(); }
 });
+
+test('an agent link is created, read as JSON, extended and revoked', async ({ browser, request }) => {
+  const alice = await browserPerson(browser);
+  try {
+    await signUp(alice.page, `link-${Date.now()}@example.org`);
+    await alice.page.getByRole('link', { name: 'Start a journey' }).first().click();
+    await alice.page.getByLabel('Journey name').fill('Link test journey');
+    await alice.page.getByRole('button', { name: 'Create journey' }).click();
+    await alice.page.getByLabel('I have saved my recovery key somewhere safe.').check();
+    await alice.page.getByRole('button', { name: 'Continue to journey' }).click();
+    await expect(alice.page.getByRole('heading', { name: 'Link test journey' })).toBeVisible();
+    const journeyPath = new URL(alice.page.url()).pathname;
+    const journeyId = journeyPath.split('/').pop()!;
+    await alice.page.getByRole('link', { name: 'Add an item' }).click();
+    await alice.page.getByLabel('Title').fill('Packing list');
+    await alice.page.getByLabel('Body (Markdown as plain text)').fill('Passport, charger, **umbrella**');
+    await alice.page.getByRole('button', { name: 'Save item' }).click();
+    await expect(alice.page.getByRole('heading', { name: 'Packing list' })).toBeVisible();
+
+    // Create the link.
+    await alice.page.goto(`${journeyPath}/people`);
+    await expect(alice.page.getByRole('heading', { name: 'Add agent by link' })).toBeVisible();
+    await alice.page.getByLabel('Agent name').fill('Cowork helper');
+    await expect(alice.page.getByLabel('Link lasts')).toHaveValue('7');
+    await expect(alice.page.getByText("Wayfinding's server decrypts the journey while it answers the link.").first()).toBeVisible();
+    const before = (await calls(alice.page)).get;
+    await alice.page.getByRole('button', { name: 'Create link with passkey' }).click();
+    const url = (await alice.page.locator('#agent-link-copy-value').textContent({ timeout: 30_000 }))!;
+    expect((await calls(alice.page)).get).toBeGreaterThan(before);
+    expect(url).toMatch(/\/a\/[A-Za-z0-9_-]{43}$/);
+    await expect(alice.page.getByText('Anyone with this link can read this journey until it expires or you remove it.').first()).toBeVisible();
+    await expect(alice.page.getByRole('button', { name: 'Copy link', exact: true })).toBeVisible();
+    await alice.page.getByRole('button', { name: 'Done' }).click();
+    const memberLi = alice.page.locator('li', { hasText: 'Cowork helper' });
+    await expect(memberLi).toContainText('Agent link');
+    await expect(memberLi).toContainText('read');
+
+    // Read it the way a sandboxed agent does: a plain fetch of the URL.
+    const path = new URL(url).pathname;
+    const fetched = await request.get(path);
+    expect(fetched.status()).toBe(200);
+    expect(fetched.headers()['content-type']).toBe('application/json; charset=utf-8');
+    expect(fetched.headers()['cache-control']).toBe('no-store, no-transform');
+    expect(fetched.headers()['x-robots-tag']).toBe('noindex');
+    expect(fetched.headers()['referrer-policy']).toBe('no-referrer');
+    const data = await fetched.json() as { journey: { id: string; name: string }; access: { agentName: string; scope: string; renewUrl: string; expiresAt: string }; items: { title: string; body: string; author: { kind: string } }[]; page: { number: number; of: number; next: string | null } };
+    expect(data.journey).toMatchObject({ id: journeyId, name: 'Link test journey' });
+    expect(data.access).toMatchObject({ agentName: 'Cowork helper', scope: 'read' });
+    expect(data.access.renewUrl).toContain(`/journeys/${journeyId}/people#renew-`);
+    expect(data.items).toMatchObject([{ title: 'Packing list', body: 'Passport, charger, **umbrella**', author: { kind: 'person' } }]);
+    expect(data.page).toEqual({ number: 1, of: 1, next: null });
+    const firstExpiry = Date.parse(data.access.expiresAt);
+    expect(firstExpiry).toBeGreaterThan(Date.now() + 6 * 86_400_000);
+
+    // Extend it from the renewUrl anchor.
+    await alice.page.goto(new URL(data.access.renewUrl).pathname + new URL(data.access.renewUrl).hash);
+    await expect(alice.page.getByText('Extend access')).toBeVisible();
+    await expect(alice.page.locator('details.renew')).toHaveAttribute('open', '');
+    await alice.page.getByLabel('Keep the link working for').selectOption('30');
+    await alice.page.getByRole('button', { name: 'Extend with passkey' }).click();
+    await expect(alice.page.getByRole('heading', { name: 'People in this journey' })).toBeVisible();
+    await expect.poll(async () => Date.parse(((await (await request.get(path)).json()) as typeof data).access.expiresAt), { timeout: 15_000 }).toBeGreaterThan(firstExpiry + 20 * 86_400_000);
+    expect((await request.get(path)).status()).toBe(200); // The same URL still works.
+
+    // Remove the agent: the link ends at once.
+    alice.page.once('dialog', dialog => void dialog.accept());
+    await alice.page.locator('li', { hasText: 'Cowork helper' }).getByRole('button', { name: 'Remove' }).click();
+    await expect(alice.page.locator('li', { hasText: 'Cowork helper' })).toHaveCount(0, { timeout: 30_000 });
+    const gone = await request.get(path);
+    expect(gone.status()).toBe(404);
+    expect(await gone.json()).toMatchObject({ message: 'This agent link has ended. Ask the person for a new one.' });
+  } finally { await alice.context.close(); }
+});

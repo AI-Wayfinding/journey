@@ -42,7 +42,7 @@ export class EnclaveObject {
       const meta = this.one('SELECT id,currentEpoch,nextSeq,nextLog,pendingRotation FROM meta LIMIT 1');
       if (!meta || meta.id !== input.journeyId) return failure('not-found', 404);
       const subject = input.subject as Subject;
-      const write = ['reserve','recordWrite','logWrite','inviteAccess'].includes(input.op);
+      const write = ['reserve','recordWrite','logWrite','inviteAccess','renew'].includes(input.op);
       if (!subject || !this.access(subject, write)) return failure('forbidden', 403);
       switch (input.op) {
         case 'access': return Response.json({ allowed: true, epoch: meta.currentEpoch });
@@ -113,6 +113,18 @@ export class EnclaveObject {
             }
           });
           return Response.json({ seq: meta.nextLog, memberDelta }, { status: 201 });
+        }
+        case 'renew': {
+          // Only the person who added an agent may extend it. Extension is two ordinary signed entries and no key change.
+          if (subject.agent || input.entries.length !== 2) return failure('forbidden', 403);
+          const target = this.one('SELECT kind,addedBy,removedAt FROM principals WHERE id=?', input.member);
+          if (!target || target.kind !== 'agent' || target.removedAt !== null || target.addedBy !== subject.principal || !Number.isSafeInteger(input.expiresAt) || input.expiresAt <= now) return failure('forbidden', 403);
+          this.state.storage.transactionSync(() => {
+            for (const [index, entry] of input.entries.entries()) this.sql.exec('INSERT INTO log(seq,entry,at) VALUES(?,?,?)', Number(meta.nextLog) + index, entry, now);
+            this.sql.exec('UPDATE meta SET nextLog=nextLog+2');
+            this.sql.exec('UPDATE principals SET expiresAt=? WHERE id=?', input.expiresAt, input.member);
+          });
+          return Response.json({ seq: Number(meta.nextLog) + 1 }, { status: 201 });
         }
         case 'log': return Response.json({ log: this.sql.exec('SELECT seq,entry FROM log WHERE seq>? ORDER BY seq LIMIT 1000', input.after).toArray() });
         case 'wraps': return Response.json({ wraps: this.sql.exec('SELECT epoch,wrap FROM wraps WHERE principal=? ORDER BY epoch', subject.principal).toArray() });

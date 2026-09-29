@@ -163,17 +163,4 @@ export async function exportEncrypted(ctx: JourneyContext, recipients: string[])
   const wraps: KeyWrap[] = (await Promise.all([...ctx.epochs.values()].map(key => wrapJourneyKey(key, recipients.map((recipient, i) => ({ id: `export-${i}`, recipient })))))).flat();
   return exportJourney(ctx.log, raw.envelopes, wraps, recipients);
 }
-export function itemVersions(records: ProtocolRecord[]): { root: string; item: ItemBody; versions: ItemBody[]; comments: ProtocolRecord[]; deleted: boolean }[] {
-  const items = new Map<string, ItemBody[]>(), roots = new Map<string, string>(), comments: ProtocolRecord[] = [], deleted = new Set<string>();
-  for (const record of records) {
-    if (record.type === 'item') {
-      const body = record.body as ItemBody, root = body.replaces ? roots.get(body.replaces) : body.id;
-      if (!root) continue; // An orphan version is not a trustworthy item.
-      roots.set(body.id, root);
-      const versions = items.get(root) ?? []; versions.push(body); items.set(root, versions);
-    }
-    if (record.type === 'comment') comments.push(record);
-    if (record.type === 'delete') deleted.add(String(record.body.target));
-  }
-  return [...items.entries()].map(([root, versions]) => ({ root, item: versions.at(-1)!, versions, comments: comments.filter(c => roots.get(String(c.body.item)) === root), deleted: deleted.has(root) }));
-}
+export { itemVersions } from '@ai-wayfinding/core';

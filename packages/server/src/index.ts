@@ -1,7 +1,9 @@
 import { Hono } from 'hono';
-import { isId, newId, validAgentName, type Envelope } from '@ai-wayfinding/core';
+import { LINK_SECRET_PATTERN, isId, linkLookupHash, newId, validAgentName, type Envelope } from '@ai-wayfinding/core';
 import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse } from '@simplewebauthn/server';
 import { appPrfSalt, base64url, digest, emailHash, equalSecret, randomToken, unbase64url, verifyAgentSignature } from './crypto.js';
+import { ENDED_MESSAGE, LINK_RATE_LIMIT, LinkEnded, LinkExpired, expiredBody, linkResponse, readLink } from './agentLink.js';
+import type { Enclave } from './agentLink.js';
 import { EnclaveObject } from './enclave.js';
 import { invitationEmail, magicLinkEmail } from './email.js';
 import { Registry } from './registry.js';
@@ -394,6 +396,9 @@ app.post('/v1/journeys/:id/log', async c => {
   if (rotated === null || memberWraps === null) return failure('invalid-request', 400);
   const result = await enclave(c.env, id, { op: 'logWrite', journeyId: id, subject: journeySubject(c), entry: b.entry, changes, epoch, wraps: rotated, memberWraps });
   if (result.ok) {
+    // Removing a member ends any agent link it owns immediately, so the link URL stops working.
+    const removed = changes.filter(change => change.action === 'remove').map(change => change.principal);
+    if (removed.length) await registry(c.env, { op: 'linkRevoke', journeyId: id, principals: removed });
     for (const added of linked) { await registry(c.env, { op: 'link', accountHash: added.accountHash, journeyId: id, principal: added.principal }); await registry(c.env, { op: 'pendingDelete', journeyId: id, principal: added.principal }); }
     const { memberDelta } = await result.clone().json() as { memberDelta: number };
     await registry(c.env, { op: 'activity', id, memberDelta, bytes: b.entry.length });
@@ -436,12 +441,12 @@ app.get('/v1/journeys/:id/invites/pending', async c => {
 });
 app.post('/v1/agent-sessions', async c => {
   const b = await payload(c).catch(() => null);
-  if (!b || !isId(b.journeyId) || !object(b.agentPublicKey) || !validString(b.agentPublicKey.recipient, 1024) || !validString(b.agentPublicKey.signingKey, 1024) || !validScope(b.requestedScope) || b.name !== undefined && !validAgentName(b.name) || b.keyStorage !== undefined && b.keyStorage !== 'file' && b.keyStorage !== 'memory' || b.keyStorage === 'file' && b.remembered === true) return failure('invalid-request', 400);
+  if (!b || !isId(b.journeyId) || !object(b.agentPublicKey) || !validString(b.agentPublicKey.recipient, 1024) || !validString(b.agentPublicKey.signingKey, 1024) || !validScope(b.requestedScope) || b.name !== undefined && !validAgentName(b.name) || b.keyStorage !== undefined && b.keyStorage !== 'file' && b.keyStorage !== 'memory' && b.keyStorage !== 'link' || b.keyStorage === 'file' && b.remembered === true || b.keyStorage === 'link' && (b.remembered !== true || b.requestedScope !== 'read')) return failure('invalid-request', 400);
   if (!c.env.AGENT_SESSION_RATE) return failure('internal', 500);
   const ipHash = await digest(c.req.header('cf-connecting-ip') ?? 'unknown');
   if (!(await c.env.AGENT_SESSION_RATE.limit({ key: ipHash })).success) return failure('rate-limited', 429);
   const id = randomToken(), principal = newId(), code = String(crypto.getRandomValues(new Uint32Array(1))[0]! % 1_000_000).padStart(6, '0');
-  await registry(c.env, { op: 'agentCreate', id, journeyId: b.journeyId, principal, recipient: b.agentPublicKey.recipient, signingKey: b.agentPublicKey.signingKey, requestedScope: b.requestedScope, code, remembered: b.remembered === true, keyStorage: b.keyStorage === 'file' ? 'file' : 'memory', name: typeof b.name === 'string' ? b.name : null });
+  await registry(c.env, { op: 'agentCreate', id, journeyId: b.journeyId, principal, recipient: b.agentPublicKey.recipient, signingKey: b.agentPublicKey.signingKey, requestedScope: b.requestedScope, code, remembered: b.remembered === true, keyStorage: b.keyStorage === 'file' ? 'file' : b.keyStorage === 'link' ? 'link' : 'memory', name: typeof b.name === 'string' ? b.name : null });
   return json({ id, code, approvalUrl: c.env.ORIGIN + '/agent-sessions/' + id }, 201);
 });
 app.get('/v1/agent-sessions/:id', async c => {
@@ -455,11 +460,12 @@ app.post('/v1/agent-sessions/:id/approve', async c => {
   const b = await payload(c).catch(() => null), id = c.req.param('id');
   const row = await registry(c.env, { op: 'agentGet', id });
   if (!row || row.status !== 'pending' || Number(row.createdAt) + 600_000 <= Date.now()) return failure('not-found', 404);
-  const maxDuration = row.remembered ? 90 * 86_400_000 : 8 * 3_600_000;
+  const maxDuration = row.keyStorage === 'link' ? LINK_MAX_MS : row.remembered ? 90 * 86_400_000 : 8 * 3_600_000;
   if (!b || !validString(b.code, 6)) return failure('invalid-request', 400);
   const attempt = await registry(c.env, { op: 'agentAttempt', id, code: b.code });
   if (!attempt.available) return failure('not-found', 404);
   if (!attempt.matched) return failure('invalid-request', 400);
+  if (row.keyStorage === 'link' && b.scope !== 'read') return failure('invalid-request', 400);
   if (!validString(b.principal, 128) || !validScope(b.scope) || !validExpiry(b.expiresAt) || b.expiresAt > Date.now() + maxDuration || !encrypted(b.wrap, 100_000) || !encrypted(b.entry)) return failure('invalid-request', 400);
   const s: Subject = { principal: b.principal, accountHash: auth.accountHash };
   const check = await enclave(c.env, row.journeyId, { op: 'access', journeyId: row.journeyId, subject: s });
@@ -470,6 +476,73 @@ app.post('/v1/agent-sessions/:id/approve', async c => {
   await registry(c.env, { op: 'agentApprove', id, scope: b.scope, expires: b.expiresAt });
   await registry(c.env, { op: 'activity', id: row.journeyId, memberDelta: 1, bytes: b.entry.length });
   return json({ status: 'approved' });
+});
+// Agent links: a labelled exception to end-to-end encryption for agents that can only fetch web pages.
+const LINK_MAX_MS = 30 * 86_400_000 + 3_600_000; // A little over 30 days, so a browser clock slightly ahead of the server still works.
+const LINK_HASH = /^[A-Za-z0-9_-]{43}$/;
+async function freshPerson(c: AppContext): Promise<Subject | Response> {
+  const s = journeySubject(c);
+  const auth = await session(c);
+  if (s.agent || !auth || auth.verifiedAt === null || Date.now() - auth.verifiedAt > 300_000) return failure('unauthorized', 401);
+  return s;
+}
+app.post('/v1/journeys/:id/agent-links', async c => {
+  const id = c.req.param('id'), s = await freshPerson(c);
+  if (s instanceof Response) return s;
+  const b = await payload(c).catch(() => null);
+  if (!b || !validString(b.sessionId, 128) || typeof b.hash !== 'string' || !LINK_HASH.test(b.hash) || !validString(b.blob, 4096) || !/^[A-Za-z0-9_-]+$/.test(b.blob)) return failure('invalid-request', 400);
+  const access = await enclave(c.env, id, { op: 'access', journeyId: id, subject: s });
+  if (!access.ok) return access;
+  const row = await registry(c.env, { op: 'agentGet', id: b.sessionId });
+  if (!row || row.journeyId !== id || row.keyStorage !== 'link' || row.status !== 'approved' || row.scope !== 'read' || Number(row.expires) <= Date.now() || Number(row.expires) > Date.now() + LINK_MAX_MS) return failure('not-found', 404);
+  const created = await registry(c.env, { op: 'linkCreate', hash: b.hash, journeyId: id, memberId: row.principal, addedBy: s.principal, blob: b.blob, expires: Number(row.expires) });
+  return created ? json({ memberId: row.principal, expiresAt: Number(row.expires) }, 201) : failure('conflict', 409);
+});
+app.get('/v1/journeys/:id/agent-links', async c => {
+  const id = c.req.param('id'), s = journeySubject(c);
+  if (s.agent) return failure('forbidden', 403);
+  const access = await enclave(c.env, id, { op: 'access', journeyId: id, subject: s });
+  if (!access.ok) return access;
+  const links = await registry(c.env, { op: 'linkList', journeyId: id }) as { memberId: string; addedBy: string; expires: number; created: number }[];
+  return json({ links: links.map(link => ({ memberId: link.memberId, addedBy: link.addedBy, expiresAt: Number(link.expires), createdAt: Number(link.created) })) });
+});
+app.post('/v1/journeys/:id/agent-links/:member/renew', async c => {
+  const id = c.req.param('id'), member = c.req.param('member'), s = await freshPerson(c);
+  if (s instanceof Response) return s;
+  const b = await payload(c).catch(() => null);
+  if (!b || !isId(member) || !Array.isArray(b.entries) || b.entries.length !== 2 || !b.entries.every(entry => encrypted(entry)) || !validExpiry(b.expiresAt) || b.expiresAt > Date.now() + LINK_MAX_MS) return failure('invalid-request', 400);
+  const links = await registry(c.env, { op: 'linkList', journeyId: id }) as { memberId: string }[];
+  if (!links.some(link => link.memberId === member)) return failure('not-found', 404);
+  const result = await enclave(c.env, id, { op: 'renew', journeyId: id, subject: s, member, expiresAt: b.expiresAt, entries: b.entries as string[] });
+  if (!result.ok) return result;
+  await registry(c.env, { op: 'linkRenew', journeyId: id, memberId: member, expires: b.expiresAt });
+  await registry(c.env, { op: 'activity', id, memberDelta: 0, bytes: (b.entries as string[]).reduce((sum, entry) => sum + entry.length, 0) });
+  return json({ expiresAt: b.expiresAt });
+});
+// Serves a journey to an agent that can only read web pages. The secret in the path is the whole credential.
+app.get('/a/:secret', async c => {
+  const secret = c.req.param('secret');
+  const ended = () => linkResponse({ error: 'ended', message: ENDED_MESSAGE }, 404);
+  if (!LINK_SECRET_PATTERN.test(secret)) return ended();
+  const page = c.req.query('page') === undefined ? 1 : Number(c.req.query('page'));
+  if (!Number.isSafeInteger(page) || page < 1) return linkResponse({ error: 'invalid-page', message: 'The page must be a whole number starting at 1.' }, 400);
+  const hash = await linkLookupHash(secret);
+  const row = await registry(c.env, { op: 'linkGet', hash, limit: LINK_RATE_LIMIT }) as { limited: boolean; retryAfter?: number; journeyId: string; memberId: string; blob: string; expires: number; since: number } | null;
+  if (!row) return ended();
+  if (row.limited) return linkResponse({ error: 'rate-limited', message: 'This link has been read too often. Try again later.', retryAfterSeconds: row.retryAfter }, 429, { 'Retry-After': String(row.retryAfter) });
+  if (Number(row.expires) <= Date.now()) return linkResponse(expiredBody(c.env.ORIGIN, row.journeyId, row.memberId, Number(row.expires)), 410);
+  const subject: Subject = { principal: row.memberId, agent: true };
+  const call: Enclave = message => enclave(c.env, row.journeyId, { ...message, journeyId: row.journeyId, subject });
+  try {
+    const pages = await readLink({ journeyId: row.journeyId, memberId: row.memberId, blob: row.blob, expires: Number(row.expires), since: Number(row.since) }, secret, c.env.ORIGIN, call);
+    const found = pages[page - 1];
+    return found ? linkResponse(found.body) : linkResponse({ error: 'no-such-page', message: `This journey has ${pages.length} page${pages.length === 1 ? '' : 's'}.`, page: { number: page, of: pages.length } }, 404);
+  } catch (error) {
+    if (error instanceof LinkExpired) return linkResponse(expiredBody(c.env.ORIGIN, row.journeyId, row.memberId, error.expires), 410);
+    if (error instanceof LinkEnded) return ended();
+    // Never include decrypted content or the cause in the reply or the logs.
+    return linkResponse({ error: 'unavailable', message: error instanceof Error && error.message.startsWith('This journey') ? error.message : 'The journey could not be read right now. Try again later.' }, 502);
+  }
 });
 app.notFound(async c => {
   if (c.req.path === '/v1' || c.req.path.startsWith('/v1/')) return failure('not-found', 404);

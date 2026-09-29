@@ -1,7 +1,7 @@
 import { mkdtemp, mkdir, chmod, lstat, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { NetworkError, networkFetch } from '../src/network.js';
+import { LINK_FALLBACK, NetworkError, networkFetch } from '../src/network.js';
 import { requestConnection, resumeConnection, waitForApproval } from '../src/connection.js';
 import { ExpiredStateError, loadState } from '../src/state.js';
 import type { PendingState } from '../src/state.js';
@@ -79,5 +79,8 @@ describe('network failures', () => {
     expect(error.message).not.toContain('(fetch failed)');
     expect(error.message).toContain('proxy');
     expect(error.message).toContain('app.wayfinding.support');
+    expect(error.message).toContain("If this environment can't reach app.wayfinding.support but you can read web pages, ask the person to open their journey, go to People & agents \u2192 Add agent by link, and give you the link. Read it with your web fetch tool; it returns JSON. That access is read-only.");
+    expect(error.fallback).toBe(LINK_FALLBACK);
+    expect(error.reason).not.toContain('web fetch');
   });
 });

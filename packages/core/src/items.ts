@@ -44,3 +44,19 @@ export function parseRecord(record: ProtocolRecord, definitions: readonly Record
   return { kind: 'known', record: current };
 }
 export function serializeRecord(parsed: ParsedRecord): ProtocolRecord { return parsed.kind === 'known' ? parsed.record : parsed.raw; }
+export interface ItemView { root: string; item: ItemBody; versions: ItemBody[]; comments: ProtocolRecord[]; deleted: boolean }
+/** Groups item versions under their original item and pairs comments and deletions with it. An orphan edit is dropped. */
+export function itemVersions(records: ProtocolRecord[]): ItemView[] {
+  const items = new Map<string, ItemBody[]>(), roots = new Map<string, string>(), comments: ProtocolRecord[] = [], deleted = new Set<string>();
+  for (const record of records) {
+    if (record.type === 'item') {
+      const body = record.body as ItemBody, root = body.replaces ? roots.get(body.replaces) : body.id;
+      if (!root) continue; // An orphan version is not a trustworthy item.
+      roots.set(body.id, root);
+      const versions = items.get(root) ?? []; versions.push(body); items.set(root, versions);
+    }
+    if (record.type === 'comment') comments.push(record);
+    if (record.type === 'delete') deleted.add(String(record.body.target));
+  }
+  return [...items.entries()].map(([root, versions]) => ({ root, item: versions.at(-1)!, versions, comments: comments.filter(c => roots.get(String(c.body.item)) === root), deleted: deleted.has(root) }));
+}

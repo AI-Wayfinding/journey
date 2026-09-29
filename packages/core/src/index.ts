@@ -8,3 +8,4 @@ export * from './log.js';
 export * from './removal.js';
 export * from './transfer.js';
 export * from './versions.js';
+export * from './link.js';

@@ -9,6 +9,7 @@ import { importMarkdown } from './import.js';
 import { JourneyClient } from './journey.js';
 import { runMcp } from './mcp.js';
 import { forgetRemembered, loadRemembered } from './storage.js';
+import { NetworkError } from './network.js';
 
 const help = `wayfinding — read and write an approved journey
 
@@ -170,4 +171,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     console.log(JSON.stringify(result, null, 2));
   } finally { held?.close(); }
 }
-main().catch(error => { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = error && typeof error.exitCode === 'number' ? error.exitCode : 1; });
+main().catch(error => {
+  if (error instanceof NetworkError && process.argv.includes('--json')) console.error(JSON.stringify({ error: error.reason, exitCode: error.exitCode, fallback: error.fallback }));
+  else console.error(error instanceof Error ? error.message : String(error));
+  process.exitCode = error && typeof error.exitCode === 'number' ? error.exitCode : 1; });
