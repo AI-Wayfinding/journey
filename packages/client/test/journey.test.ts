@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createAgeIdentity, createSigningIdentity, generateJourneyKey, hashEntry, importSigningKey, newId, seal, signEntry, wrapJourneyKey } from '@ai-wayfinding/core';
+import { canonical, createAgeIdentity, createSigningIdentity, generateJourneyKey, hashEntry, importSigningKey, newId, seal, signEntry, wrapJourneyKey } from '@ai-wayfinding/core';
 import type { LogEntry } from '@ai-wayfinding/core';
 import { JourneyClient } from '../src/journey.js';
 import type { RememberedAgent } from '../src/storage.js';
@@ -44,6 +44,15 @@ describe('journey client guard', () => {
     f.entries.push(removal);
     await expect(new JourneyClient(f.session, { fetch: f.fetcher }).add({ type: 'note', title: 'No', body: 'No', tags: [] })).rejects.toThrow('Access to this journey has ended');
     expect(f.requests.some(value => value.includes('/seq'))).toBe(false);
+  });
+  it('tells the agent to update the client, with operator help, when the log has an entry type it does not know', async () => {
+    const f = await fixture();
+    const unsigned = { v: 1 as const, seq: 2, prev: await hashEntry(f.entries[1]!), at: new Date().toISOString(), actor: f.ownerId, type: 'member.future-thing', body: { id: f.ownerId } };
+    const signature = new Uint8Array(await crypto.subtle.sign('Ed25519', await importSigningKey(f.ownerSign.privateKey), new TextEncoder().encode(canonical(unsigned))));
+    f.entries.push({ ...unsigned, sig: btoa(Array.from(signature, byte => String.fromCharCode(byte)).join('')) } as LogEntry);
+    const failure = new JourneyClient(f.session, { fetch: f.fetcher }).list();
+    await expect(failure).rejects.toThrow(/npm install -g @ai-wayfinding\/client@latest/);
+    await expect(new JourneyClient(f.session, { fetch: f.fetcher }).list()).rejects.toThrow(/operator/);
   });
   it('refuses read-only writes and a newer minimum client version', async () => {
     const readOnly = await fixture('read');

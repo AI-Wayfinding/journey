@@ -10,6 +10,7 @@ export interface JourneyOptions { fetch?: typeof fetch; cacheRoot?: string }
 export interface ItemView { item: ItemBody; comments: CommentBody[] }
 interface Verified { state: LogState; epochs: Map<number, JourneyKey>; log: CipherRow[] }
 const historyError = 'This journey history could not be verified. Stop and ask a member for help.';
+const updateError = () => `This journey uses a newer format than this Wayfinding client (${CLIENT_VERSION}) understands. Nothing is wrong with the journey or your access. Update the client, then try again:\n  npm install -g @ai-wayfinding/client@latest\n(If you installed it with --prefix "$HOME/.npm-global", add that same --prefix.) Your connection stays valid, so you do not need to connect or be approved again.\nIf you cannot install software here, stop and tell your operator (the person you work for) that the Wayfinding client needs updating, show them the command above, and ask them to run it or allow the update.`;
 function decode(value: string): Envelope { return JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as Envelope; }
 
 export class JourneyClient {
@@ -62,10 +63,11 @@ export class JourneyClient {
       entries.push(entry);
     }
     const checked = await verifyLog(entries);
+    if (!checked.ok && checked.error.code === 'client-too-old') throw new Error(updateError());
     if (!checked.ok || checked.state.journey !== this.session.journeyId) throw new Error(historyError);
     const mine = checked.state.members[this.session.principal]?.member;
     if (!mine || mine.kind !== 'agent' || mine.signingKey !== this.session.signingKey || mine.recipient !== this.session.recipient || mine.expiresAt && Date.parse(mine.expiresAt) <= Date.now()) throw new Error('Access to this journey has ended');
-    if (!meetsMinClientVersion(CLIENT_VERSION, checked.state.minClientVersion)) throw new Error('This journey needs a newer client version. Update wayfinding before writing.');
+    if (!meetsMinClientVersion(CLIENT_VERSION, checked.state.minClientVersion)) throw new Error(updateError());
     if (!epochs.has(checked.state.currentEpoch)) throw new Error('The journey key changed. Ask a member to reconnect this agent.');
     if (this.options.cacheRoot && (!cached || cached.seq !== checked.state.lastSeq || cached.hash !== checked.state.lastHash)) await writeCache(this.options.cacheRoot, this.session.journeyId, { seq: checked.state.lastSeq, hash: checked.state.lastHash!, log, records: cached?.records ?? [] });
     return { state: checked.state, epochs, log };
