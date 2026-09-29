@@ -7,7 +7,8 @@ export interface Member extends JsonObject { id: string; recipient: string; sign
 export const validAgentName = (value: unknown): value is string => typeof value === 'string' && value.length >= 1 && value.length <= 60 && value.trim() === value && !/[\x00-\x1f\x7f-\x9f]/.test(value);
 export interface LogEntry { v: 1; seq: number; prev: string | null; at: string; actor: string; type: string; body: JsonObject; sig: string }
 export interface LogDefinition { name: string; fields: readonly string[]; validate(body: JsonObject): Validation; apply?: (state: LogState, body: JsonObject, actor: string, holder: boolean) => Promise<EffectError | null> }
-export interface DerivedMember { member: Member; grants: Grant[] }
+export interface MemberProfile extends JsonObject { name: string; email?: string }
+export interface DerivedMember { member: Member; grants: Grant[]; profile?: MemberProfile }
 export interface LogState { journey: string; members: Record<string, DerivedMember>; grants: Record<string, Grant[]>; currentEpoch: number; minClientVersion: string; lastSeq: number; lastHash: string | null }
 export interface LogError { code: 'invalid-entry' | 'broken-chain' | 'invalid-signature' | 'unauthorized' | 'last-holder' | 'client-too-old'; seq: number; message: string }
 export type LogResult = { ok: true; state: LogState } | { ok: false; error: LogError };
@@ -31,6 +32,14 @@ function renameMember(state: LogState, body: JsonObject, actor: string, holder: 
   if (!target || target.kind !== 'agent') return Promise.resolve({ code: 'invalid-entry', message: 'Agent not found' });
   if (!holder && target.addedBy !== actor) return Promise.resolve(denied('Cannot rename another member’s agent'));
   target.name = body.name as string;
+  return Promise.resolve(null);
+}
+function setProfile(state: LogState, body: JsonObject, actor: string): Promise<EffectError | null> {
+  // A holder may manage membership, but cannot speak as another person.
+  if (body.id !== actor) return Promise.resolve(denied('Only a person may set their own profile'));
+  const target = state.members[actor];
+  if (!target || target.member.kind !== 'person') return Promise.resolve(denied('Only a person may set their own profile'));
+  target.profile = { name: body.name as string, ...(body.email === undefined ? {} : { email: body.email as string }) };
   return Promise.resolve(null);
 }
 function removeMember(state: LogState, body: JsonObject, actor: string, holder: boolean): Promise<EffectError | null> {
@@ -81,6 +90,7 @@ export const logDefinitions: readonly LogDefinition[] = [
   { name: 'genesis', fields: ['journey', 'name', 'creator', 'grants', 'mode', 'visibility', 'minClientVersion', 'description', 'journeyKind'], validate: b => shape(b, ['journey', 'name', 'creator', 'grants', 'mode', 'visibility', 'minClientVersion'], ['journey', 'name', 'creator', 'grants', 'mode', 'visibility', 'minClientVersion', 'description', 'journeyKind']) && isId(b.journey) && str(b.name) && validMember(b.creator) && b.creator.kind === 'person' && grants(b.grants) && b.grants.includes('members.manage') && b.mode === 'sealed' && b.visibility === 'private' && str(b.minClientVersion) && (b.description === undefined || typeof b.description === 'string' && b.description.length <= 2000) && (b.journeyKind === undefined || b.journeyKind === 'individual' || b.journeyKind === 'team') ? ok : fail('Invalid genesis') },
   { name: 'member.add', fields: ['member', 'grants', 'kind'], validate: memberBody, apply: addMember },
   { name: 'member.rename', fields: ['id', 'name'], validate: b => shape(b, ['id', 'name']) && isId(b.id) && validAgentName(b.name) ? ok : fail('Invalid member.rename'), apply: renameMember },
+  { name: 'member.profile', fields: ['id', 'name', 'email'], validate: b => shape(b, ['id', 'name'], ['id', 'name', 'email']) && isId(b.id) && (b.name === '' || validAgentName(b.name)) && (b.email === undefined || typeof b.email === 'string' && b.email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(b.email)) ? ok : fail('Invalid member.profile'), apply: setProfile },
   { name: 'member.remove', fields: ['member'], validate: b => shape(b, ['member']) && isId(b.member) ? ok : fail('Invalid member.remove'), apply: removeMember },
   { name: 'grant.add', fields: ['member', 'grant'], validate: b => shape(b, ['member', 'grant']) && isId(b.member) && b.grant === 'members.manage' ? ok : fail('Invalid grant.add'), apply: setGrant(true) },
   { name: 'grant.remove', fields: ['member', 'grant'], validate: b => shape(b, ['member', 'grant']) && isId(b.member) && b.grant === 'members.manage' ? ok : fail('Invalid grant.remove'), apply: setGrant(false) },

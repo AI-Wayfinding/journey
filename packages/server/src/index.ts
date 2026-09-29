@@ -259,6 +259,11 @@ app.get('/v1/me/keys', async c => {
   const keys = await registry(c.env, { op: 'keysGet', accountHash: auth.accountHash, credentialId: auth.credentialId ?? '', sessionHash: auth.sessionHash, recovery: auth.recovery });
   return new Response(JSON.stringify(keys), { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
 });
+app.get('/v1/me/email', async c => {
+  const auth = await session(c);
+  if (!auth || auth.recovery || auth.verifiedAt === null || !auth.credentialId || !auth.email) return failure('unauthorized', 401);
+  return new Response(JSON.stringify({ email: auth.email }), { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+});
 app.get('/v1/me/passkeys', async c => {
   const auth = await session(c); if (!auth || auth.recovery || auth.verifiedAt === null) return failure('unauthorized', 401);
   const credentials = await registry(c.env, { op: 'credentials', accountHash: auth.accountHash });

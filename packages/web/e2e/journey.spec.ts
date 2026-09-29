@@ -5,8 +5,10 @@ import { agentWritesItem, requestAgent } from './agent.js';
 
 declare global { interface Window { __passkeyCalls: { create: number; get: number } } }
 const calls = (page: Page) => page.evaluate(() => window.__passkeyCalls);
+let nextTestIp = 1;
 async function browserPerson(browser: Browser, hasPrf = true, omitPrfOnCreate = false): Promise<{ page: Page; context: BrowserContext; requests: string[]; cdp: CDPSession; authenticatorId: string }> {
-  const context = await browser.newContext();
+  // Local e2e traffic otherwise shares one unknown IP and hits the production 10-email/minute limit.
+  const context = await browser.newContext({ extraHTTPHeaders: { 'CF-Connecting-IP': `198.51.100.${nextTestIp++}` } });
   const page = await context.newPage();
   await page.addInitScript(({ omitPrfOnCreate }) => {
     window.__passkeyCalls = { create: 0, get: 0 };
@@ -61,6 +63,67 @@ async function signUp(page: Page, email: string): Promise<string[]> {
   console.log(`Sign-up taps: ${count.create} create, ${count.get} get`);
   return codes;
 }
+
+test('account name and per-journey email visibility are shared only when chosen', async ({ browser }) => {
+  const owner = await browserPerson(browser), guest = await browserPerson(browser);
+  try {
+    const ownerEmail = `profile-owner-${Date.now()}@example.org`;
+    await signUp(owner.page, ownerEmail);
+    await owner.page.getByRole('link', { name: 'Account' }).click();
+    await owner.page.getByLabel('Your name').fill('Avery');
+    await owner.page.getByRole('button', { name: 'Save name' }).click();
+    await expect(owner.page.getByRole('status').filter({ hasText: 'Name saved.' })).toBeVisible();
+    await owner.page.getByRole('link', { name: 'Start a journey' }).first().click();
+    await owner.page.getByLabel('Journey name').fill('Profile sharing');
+    await owner.page.getByRole('button', { name: 'Create journey' }).click();
+    await owner.page.getByLabel('I have saved my recovery key somewhere safe.').check();
+    await owner.page.getByRole('button', { name: 'Continue to journey' }).click();
+    await owner.page.getByRole('link', { name: 'Share this journey' }).click();
+    await expect(owner.page.getByText('Avery (you)')).toBeVisible();
+    await expect(owner.page.getByText(ownerEmail, { exact: true })).toHaveCount(0);
+    await owner.page.getByRole('button', { name: 'Copy link instead' }).click();
+    const invite = (await owner.page.locator('#invite-copy-value').textContent())!;
+    await guest.page.goto(invite);
+    const guestEmail = `profile-guest-${Date.now()}@example.org`;
+    await guest.page.getByLabel('Email address').fill(guestEmail);
+    await guest.page.getByRole('button', { name: 'Send sign-in link' }).click();
+    const delivered = await guest.page.request.get(`/__test/email?address=${encodeURIComponent(guestEmail)}`);
+    const { text } = await delivered.json() as { text: string };
+    await guest.page.goto(/https?:\/\/[^\s]+#token=[A-Za-z0-9_-]+/.exec(text)![0]!);
+    await guest.page.getByRole('button', { name: 'Create passkey' }).click();
+    await expect(guest.page.getByRole('heading', { name: 'Save your backup codes' })).toBeVisible();
+    await guest.page.getByLabel('I saved these codes').check();
+    await guest.page.getByRole('button', { name: 'Continue', exact: true }).click();
+    await expect(guest.page.getByRole('heading', { name: 'Join a journey' })).toBeVisible();
+    await guest.page.getByRole('button', { name: 'Ask to join' }).click();
+    await expect(guest.page.getByRole('heading', { name: 'Waiting for a member to let you in' })).toBeVisible();
+    await owner.page.reload();
+    await owner.page.getByRole('button', { name: 'Let in' }).click();
+    await expect(guest.page.getByRole('heading', { name: 'Profile sharing' })).toBeVisible({ timeout: 20_000 });
+    await guest.page.getByRole('link', { name: 'Share this journey' }).click();
+    await expect(guest.page.getByText('Avery', { exact: true })).toBeVisible();
+    await expect(guest.page.getByText(ownerEmail, { exact: true })).toHaveCount(0);
+    await owner.page.getByLabel('Show my email to people in this journey').check();
+    await expect(owner.page.getByText(ownerEmail, { exact: true })).toBeVisible();
+    await guest.page.reload();
+    await expect(guest.page.getByText(ownerEmail, { exact: true })).toBeVisible();
+    await owner.page.getByRole('link', { name: 'Account' }).click();
+    await expect(owner.page.getByLabel('Your name')).toHaveValue('Avery');
+    await owner.page.getByLabel('Your name').fill('Avery Updated');
+    await owner.page.getByRole('button', { name: 'Save name' }).click();
+    await expect(owner.page.getByRole('status').filter({ hasText: 'Name saved.' })).toBeVisible();
+    await guest.page.reload();
+    await expect(guest.page.getByText('Avery Updated', { exact: true })).toBeVisible();
+    await expect(guest.page.getByText(ownerEmail, { exact: true })).toBeVisible();
+    await owner.page.getByRole('link', { name: 'My journeys' }).click();
+    await owner.page.getByRole('link', { name: 'Profile sharing' }).click();
+    await owner.page.getByRole('link', { name: 'Share this journey' }).click();
+    await owner.page.getByLabel('Show my email to people in this journey').uncheck();
+    await expect(owner.page.getByText(ownerEmail, { exact: true })).toHaveCount(0);
+    await guest.page.reload();
+    await expect(guest.page.getByText(ownerEmail, { exact: true })).toHaveCount(0);
+  } finally { await owner.context.close(); await guest.context.close(); }
+});
 
 test('sign-in survives a reload and a new tab until sign out', async ({ browser }) => {
   const person = await browserPerson(browser);

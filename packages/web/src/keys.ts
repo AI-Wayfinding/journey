@@ -21,7 +21,7 @@ async function withPrfKey<T>(output: Uint8Array, action: (key: CryptoKey) => Pro
     } finally { raw.fill(0); }
   } finally { output.fill(0); }
 }
-async function encrypt(key: CryptoKey, field: 'identity' | 'signing', value: string): Promise<string> {
+async function encrypt(key: CryptoKey, field: 'identity' | 'signing' | 'name', value: string): Promise<string> {
   const nonce = crypto.getRandomValues(new Uint8Array(12));
   const plain = encoder.encode(value);
   try {
@@ -32,7 +32,7 @@ async function encrypt(key: CryptoKey, field: 'identity' | 'signing', value: str
     return encode(combined);
   } finally { plain.fill(0); }
 }
-async function decrypt(key: CryptoKey, field: 'identity' | 'signing', value: string): Promise<string> {
+async function decrypt(key: CryptoKey, field: 'identity' | 'signing' | 'name', value: string): Promise<string> {
   const bytes = decode(value);
   if (bytes.length < 28) throw new Error('Your saved journey keys are damaged.');
   const plain = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: asBuffer(bytes.slice(0, 12)), additionalData: asBuffer(encoder.encode(label + '/' + field)) }, key, asBuffer(bytes.slice(12))));
@@ -80,7 +80,7 @@ export function lockPersonKeys(): void {
 
 const databaseName = 'wayfinding-person-keys';
 const storeName = 'person';
-type SavedKeys = { key: CryptoKey; sealed: SealedPersonKeys };
+type SavedKeys = { key: CryptoKey; sealed: SealedPersonKeys; name?: string };
 function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(databaseName, 1);
@@ -109,6 +109,20 @@ export async function clearPersonKeys(): Promise<void> {
 }
 
 export function getPersonKeys(): PersonKeys | null { return unlocked; }
+
+/** Keep the account name private even from the server and from local storage readers. */
+export async function getAccountName(): Promise<string | null> {
+  if (!unlocked) throw new Error('Unlock your keys with a passkey first.');
+  const saved = await savedKeys('readonly', store => store.get('current')) as SavedKeys | undefined;
+  return saved?.name ? decrypt(saved.key, 'name', saved.name) : null;
+}
+export async function setAccountName(name: string): Promise<void> {
+  if (!unlocked) throw new Error('Unlock your keys with a passkey first.');
+  const saved = await savedKeys('readonly', store => store.get('current')) as SavedKeys | undefined;
+  if (!saved) throw new Error('Your saved journey keys are missing. Sign in again.');
+  const next: SavedKeys = { key: saved.key, sealed: saved.sealed, name: await encrypt(saved.key, 'name', name) };
+  await savedKeys('readwrite', store => store.put(next, 'current'));
+}
 
 /** Restore only the keys protected by the non-extractable key in this browser profile. */
 export async function restorePersonKeys(): Promise<PersonKeys | null> {
@@ -175,7 +189,15 @@ export async function unlockPersonKeys(sealed: SealedPersonKeys, prfOutput: Uint
     const next = new UnlockedPersonKeys(identity, await deriveRecipient(identity), signing.publicKey, await importSigningKey(signing.privateKey), signing.privateKey);
     const wrappingKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
     const local = await next.seal(wrappingKey);
-    await savedKeys('readwrite', store => store.put({ key: wrappingKey, sealed: local }, 'current'));
+    const previous = await savedKeys('readonly', store => store.get('current')) as SavedKeys | undefined;
+    let savedName: string | undefined;
+    if (previous?.name) {
+      try {
+        const oldSigning: unknown = JSON.parse(await decrypt(previous.key, 'signing', previous.sealed.signing));
+        if (oldSigning && typeof oldSigning === 'object' && 'publicKey' in oldSigning && oldSigning.publicKey === signing.publicKey) savedName = await encrypt(wrappingKey, 'name', await decrypt(previous.key, 'name', previous.name));
+      } catch { /* An old or different account must not contribute its name. */ }
+    }
+    await savedKeys('readwrite', store => store.put({ key: wrappingKey, sealed: local, ...(savedName ? { name: savedName } : {}) }, 'current'));
     lockPersonKeys();
     unlocked = next;
     return next;

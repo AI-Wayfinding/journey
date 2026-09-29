@@ -82,6 +82,26 @@ it('signs agent names and lets only a manager or the person who added the agent 
   await expect(append(entries, owner, 'member.add', { member: { ...(await agent(owner.member.id)).member, name: 'Bad\u007fname' }, grants: [], kind: 'agent' })).rejects.toThrow('Invalid member.add');
 });
 
+it('lets a person set a name and reveal then hide email without allowing another member to change their profile', async () => {
+  const creator = await person(), guest = await person();
+  const oldLog = await append(await genesis(creator), creator, 'member.add', { member: guest.member, grants: [], kind: 'person' });
+  const old = await verifyLog(oldLog);
+  expect(old.ok && old.state.members[creator.member.id]?.profile).toBeUndefined();
+  expect(await error(await append(oldLog, creator, 'member.profile', { id: guest.member.id, name: 'Impersonated', email: 'stolen@example.org' }))).toBe('unauthorized');
+  let entries = await append(oldLog, creator, 'member.profile', { id: creator.member.id, name: 'Avery' });
+  let state = await verifyLog(entries);
+  expect(state.ok && state.state.members[creator.member.id]?.profile).toEqual({ name: 'Avery' });
+  entries = await append(entries, creator, 'member.profile', { id: creator.member.id, name: 'Avery', email: 'avery@example.org' });
+  state = await verifyLog(entries);
+  expect(state.ok && state.state.members[creator.member.id]?.profile).toEqual({ name: 'Avery', email: 'avery@example.org' });
+  entries = await append(entries, creator, 'member.profile', { id: creator.member.id, name: 'Avery' });
+  state = await verifyLog(entries);
+  expect(state.ok && state.state.members[creator.member.id]?.profile).toEqual({ name: 'Avery' });
+  expect(await error(await append(entries, guest, 'member.profile', { id: creator.member.id, name: 'Hijacked' }))).toBe('unauthorized');
+  for (const invalid of [' bad', 'Bad\nname', 'A'.repeat(61)]) await expect(append(entries, creator, 'member.profile', { id: creator.member.id, name: invalid })).rejects.toThrow('Invalid member.profile');
+  await expect(append(entries, creator, 'member.profile', { id: creator.member.id, name: 'Avery', email: 'not-an-email' })).rejects.toThrow('Invalid member.profile');
+});
+
 it('keeps old agent logs without names valid', async () => {
   const creator = await person(), bot = await agent(creator.member.id);
   const entries = await append(await genesis(creator), creator, 'member.add', { member: bot.member, grants: [], kind: 'agent' });

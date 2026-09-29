@@ -89,6 +89,17 @@ describe('HTTP boundary', () => {
     expect((await request('/v1/me/keys', 'GET', undefined, { Cookie: unverified.cookie })).status).toBe(401);
     expect((await request('/v1/me/keys', 'PUT', testSealed(), { Cookie: p.cookie })).status).toBe(404);
   });
+  it('returns the signed-in person’s email only to their verified account', async () => {
+    const owner = await person('private-profile@example.org');
+    const other = await person('another-profile@example.org');
+    const response = await request('/v1/me/email', 'GET', undefined, { Cookie: owner.cookie });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ email: owner.email });
+    expect(await (await request('/v1/me/email', 'GET', undefined, { Cookie: other.cookie })).json()).toEqual({ email: other.email });
+    expect((await request('/v1/me/email')).status).toBe(401);
+    const unverified = await account('unverified-profile@example.org');
+    expect((await request('/v1/me/email', 'GET', undefined, { Cookie: unverified.cookie })).status).toBe(401);
+  });
   it('uses one app-wide PRF salt, including discoverable options', async () => {
     const first = await account('salt-first@example.org');
     const second = await account('salt-second@example.org');

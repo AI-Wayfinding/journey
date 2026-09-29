@@ -3,7 +3,7 @@ import { prfOutput } from './prf.js';
 import { startAuthentication, startRegistration } from '@simplewebauthn/browser';
 import { newId, signEntry, validAgentName, verifyLog, wrapJourneyKey } from '@ai-wayfinding/core';
 import type { CommentBody, ItemBody, ProtocolRecord } from '@ai-wayfinding/core';
-import { backupKey, clearPersonKeys, getPersonKeys, lockPersonKeys, newBackupCode, onPersonKeysCleared, parseBackupCode, restorePersonKeys, sealPersonKeys, sealUnlockedKeys, unlockPersonKeys } from './keys.js';
+import { backupKey, clearPersonKeys, getAccountName, getPersonKeys, lockPersonKeys, newBackupCode, onPersonKeysCleared, parseBackupCode, restorePersonKeys, sealPersonKeys, sealUnlockedKeys, setAccountName, unlockPersonKeys } from './keys.js';
 import { passkeyError } from './passkey-errors.js';
 import type { PersonKeys, SealedPersonKeys } from './keys.js';
 import { ApiError, allRecords, api, appendEntry, createJourney, currentKey, encryptedEntry, exportEncrypted, itemVersions, letIn, listings, removeMember, rotatePending, saveRecord, verifiedJourney } from './journey.js';
@@ -235,10 +235,34 @@ async function verifyEmail(): Promise<void> {
     }));
   }
 }
+async function accountName(keys: PersonKeys, rows: JourneyListing[]): Promise<string> {
+  const saved = await getAccountName();
+  if (saved !== null) return saved;
+  for (const row of rows) {
+    const profile = (await verifiedJourney(row.id, row.principal, keys)).state.members[row.principal]?.profile;
+    if (profile) return profile.name;
+  }
+  return '';
+}
 async function accountScreen(): Promise<void> {
-  if (!await requireKeys()) return;
+  const keys = await requireKeys(); if (!keys) return;
+  const journeys = await listings();
+  const currentName = await accountName(keys, journeys);
   const { passkeys, codesRemaining } = await api<{ passkeys: { id: string; name: string; created: number; lastUsed: number | null }[]; codesRemaining: number }>('/me/passkeys');
-  render(`<section class="panel"><h1>Account</h1><p>To replace a passkey, add a new one first, then remove the old one. Keep at least one passkey active.</p><ul class="list">${passkeys.map(key => `<li>${escape(key.name)} — added ${escape(new Date(key.created).toLocaleDateString())}; last used ${key.lastUsed ? escape(new Date(key.lastUsed).toLocaleDateString()) : 'never'} <button class="secondary remove-passkey" data-id="${escape(key.id)}" ${passkeys.length === 1 ? 'disabled' : ''}>Remove</button></li>`).join('')}</ul><button id="add-passkey">Add a passkey</button><p>${codesRemaining} backup codes remain.</p><button id="new-backup-codes">Make new backup codes</button><p id="passkey-status" role="status"></p></section>`);
+  render(`<section class="panel"><h1>Account</h1><form id="profile-form"><label for="your-name">Your name</label><input id="your-name" name="your-name" maxlength="60" value="${escape(currentName)}" /><p class="meta">Your name is shared with people in your journeys, not stored on the server in plain text.</p><button type="submit">Save name</button><p id="profile-status" role="status"></p></form><p>To replace a passkey, add a new one first, then remove the old one. Keep at least one passkey active.</p><ul class="list">${passkeys.map(key => `<li>${escape(key.name)} — added ${escape(new Date(key.created).toLocaleDateString())}; last used ${key.lastUsed ? escape(new Date(key.lastUsed).toLocaleDateString()) : 'never'} <button class="secondary remove-passkey" data-id="${escape(key.id)}" ${passkeys.length === 1 ? 'disabled' : ''}>Remove</button></li>`).join('')}</ul><button id="add-passkey">Add a passkey</button><p>${codesRemaining} backup codes remain.</p><button id="new-backup-codes">Make new backup codes</button><p id="passkey-status" role="status"></p></section>`);
+  form('profile-form', async f => {
+    const name = input(f, 'your-name');
+    if (name && !validAgentName(name)) throw new Error('Your name must be trimmed, 1–60 characters and contain no control characters.');
+    // Preserve each journey's independent email choice when updating the account name.
+    for (const row of journeys) {
+      const ctx = await verifiedJourney(row.id, row.principal, keys);
+      if (ctx.state.members[row.principal]?.member.scope === 'read') continue;
+      const visibleEmail = ctx.state.members[row.principal]?.profile?.email;
+      await appendEntry(ctx, 'member.profile', { id: row.principal, name, ...(visibleEmail ? { email: visibleEmail } : {}) });
+    }
+    await setAccountName(name);
+    root.querySelector<HTMLElement>('#profile-status')!.textContent = 'Name saved.';
+  });
   root.querySelector('#add-passkey')?.addEventListener('click', () => perform(async () => { await passkeyConfirmation(); await createPasskey(false); await accountScreen(); }));
   root.querySelectorAll<HTMLButtonElement>('.remove-passkey').forEach(button => button.addEventListener('click', () => perform(async () => { await passkeyConfirmation(); await api(`/me/passkeys/${encodeURIComponent(button.dataset.id!)}`, 'DELETE'); await accountScreen(); })));
   root.querySelector('#new-backup-codes')?.addEventListener('click', () => perform(async () => { await passkeyConfirmation(); showBackupCodes(await makeBackupCodes(), '/account'); }));
@@ -286,6 +310,8 @@ function recoveryScreen(): void {
   root.querySelector('#continue')?.addEventListener('click', () => perform(async () => {
     const saved = recovery!;
     const ctx = await context(saved.listing.id); if (!ctx) return;
+    const name = await accountName(ctx.keys, (await listings()).filter(row => row.id !== ctx.id));
+    if (name) await appendEntry(ctx, 'member.profile', { id: ctx.principal, name });
     await saveRecord(ctx, { type: 'item', typeVersion: 1, body: { id: newId(), itemType: 'recovery', title: 'Recovery recipient', body: saved.recipient, author: ctx.principal, authoredBy: 'human', created: new Date().toISOString(), tags: [] } });
     recovery = null; navigate('/journeys/' + saved.listing.id);
   }));
@@ -341,8 +367,20 @@ async function membersScreen(id: string): Promise<void> {
   const pendingRotation = ctx.log.at(-1)?.type === 'member.remove';
   const holder = ctx.state.grants[ctx.principal]?.includes('members.manage') ?? false;
   const pending = holder ? (await api<{ pending: { principal: string; recipient: string; signingKey: string; support: number; expires: number | null }[] }>(`/journeys/${id}/invites/pending`, 'GET', undefined, ctx.principal)).pending : [];
-  render(`<section class="panel"><p><a href="/journeys/${id}">← Back to journey</a></p><h1>People in this journey</h1><p>Only journey members can see who is here. People who manage members are marked below.</p>${pendingRotation ? '<p class="notice">Key update pending. A person who manages members can finish it on their next visit.</p>' : ''}<ul class="list">${Object.entries(ctx.state.members).map(([memberId, { member, grants }]) => `<li><strong>${member.kind === 'agent' ? escape(memberName(member)) : member.support ? 'Wayfinding support (Hypha)' : 'Person'} ${memberId === ctx.principal ? '(you)' : escape(memberId)}</strong><p class="meta">${grants.includes('members.manage') ? 'Manages people' : 'Member'}${member.kind === 'agent' || member.support ? ` · ${escape(member.scope ?? 'readwrite')} · ${escape(member.expiresAt ?? 'session')}` : ''}</p>${member.kind === 'agent' && (holder || member.addedBy === ctx.principal) || holder && memberId !== ctx.principal ? '<div class="actions">' : ''}${member.kind === 'agent' && (holder || member.addedBy === ctx.principal) ? `<button class="secondary" data-rename="${escape(memberId)}">Rename</button>` : ''}${holder && memberId !== ctx.principal ? `<button class="secondary" data-remove="${escape(memberId)}">Remove</button>${member.kind === 'person' && !member.support ? `<button class="secondary" data-grant="${escape(memberId)}">${grants.includes('members.manage') ? 'Stop managing people' : 'Let manage people'}</button>` : ''}` : ''}${member.kind === 'agent' && (holder || member.addedBy === ctx.principal) || holder && memberId !== ctx.principal ? '</div>' : ''}</li>`).join('')}</ul><div class="actions"><button id="leave" class="secondary">Leave journey</button></div></section>${holder ? `<section class="panel"><h2>Share this journey with other wayfinders</h2><form id="invite-form"><label for="invite-email">Email addresses (separate with commas)</label><input id="invite-email" name="invite-email" type="text" placeholder="friend@example.org" /><label for="invite-scope">Invitation</label><select id="invite-scope" name="invite-scope"><option value="person">Invite a person</option><option value="support">Invite Wayfinding support</option></select><p class="meta">Support joins like any other person. Their access ends after seven days.</p><div class="actions"><button type="submit" id="invite-send">Send invitation</button><button type="button" id="invite-link-only" class="secondary">Copy link instead</button></div></form><div id="invitation"></div></section><section class="panel"><h2>Waiting to join</h2><ul class="list">${pending.length ? pending.map(row => `<li><code>${escape(row.principal)}</code>${row.support ? ' · Wayfinding support (Hypha), read only' : ''} <button data-let-in="${escape(row.principal)}">Let in</button></li>`).join('') : '<li>No one is waiting.</li>'}</ul></section>` : ''}`);
+  render(`<section class="panel"><p><a href="/journeys/${id}">← Back to journey</a></p><h1>People in this journey</h1><p>Only journey members can see who is here. People who manage members are marked below.</p><label class="checkbox" for="show-my-email"><input type="checkbox" id="show-my-email" ${ctx.state.members[ctx.principal]?.profile?.email ? 'checked' : ''} ${ctx.state.members[ctx.principal]?.member.scope === 'read' ? 'disabled' : ''} /> Show my email to people in this journey</label>${pendingRotation ? '<p class="notice">Key update pending. A person who manages members can finish it on their next visit.</p>' : ''}<ul class="list">${Object.entries(ctx.state.members).map(([memberId, { member, grants, profile }]) => `<li><strong>${member.kind === 'agent' ? escape(memberName(member)) : escape(profile?.name || (member.support ? 'Wayfinding support (Hypha)' : 'Person'))}${memberId === ctx.principal ? ' (you)' : ''}</strong>${member.kind === 'person' && profile?.email ? `<p>${escape(profile.email)}</p>` : ''}<p class="meta">${escape(memberId)} · ${grants.includes('members.manage') ? 'Manages people' : 'Member'}${member.kind === 'agent' || member.support ? ` · ${escape(member.scope ?? 'readwrite')} · ${escape(member.expiresAt ?? 'session')}` : ''}</p>${member.kind === 'agent' && (holder || member.addedBy === ctx.principal) || holder && memberId !== ctx.principal ? '<div class="actions">' : ''}${member.kind === 'agent' && (holder || member.addedBy === ctx.principal) ? `<button class="secondary" data-rename="${escape(memberId)}">Rename</button>` : ''}${holder && memberId !== ctx.principal ? `<button class="secondary" data-remove="${escape(memberId)}">Remove</button>${member.kind === 'person' && !member.support ? `<button class="secondary" data-grant="${escape(memberId)}">${grants.includes('members.manage') ? 'Stop managing people' : 'Let manage people'}</button>` : ''}` : ''}${member.kind === 'agent' && (holder || member.addedBy === ctx.principal) || holder && memberId !== ctx.principal ? '</div>' : ''}</li>`).join('')}</ul><div class="actions"><button id="leave" class="secondary">Leave journey</button></div></section>${holder ? `<section class="panel"><h2>Share this journey with other wayfinders</h2><form id="invite-form"><label for="invite-email">Email addresses (separate with commas)</label><input id="invite-email" name="invite-email" type="text" placeholder="friend@example.org" /><label for="invite-scope">Invitation</label><select id="invite-scope" name="invite-scope"><option value="person">Invite a person</option><option value="support">Invite Wayfinding support</option></select><p class="meta">Support joins like any other person. Their access ends after seven days.</p><div class="actions"><button type="submit" id="invite-send">Send invitation</button><button type="button" id="invite-link-only" class="secondary">Copy link instead</button></div></form><div id="invitation"></div></section><section class="panel"><h2>Waiting to join</h2><ul class="list">${pending.length ? pending.map(row => `<li><code>${escape(row.principal)}</code>${row.support ? ' · Wayfinding support (Hypha), read only' : ''} <button data-let-in="${escape(row.principal)}">Let in</button></li>`).join('') : '<li>No one is waiting.</li>'}</ul></section>` : ''}`);
   const fresh = async () => { const latest = await context(id); if (!latest) throw new Error('Sign in again.'); return latest; };
+  root.querySelector<HTMLInputElement>('#show-my-email')?.addEventListener('change', event => perform(async () => {
+    const toggle = event.target as HTMLInputElement;
+    const show = toggle.checked;
+    toggle.disabled = true;
+    try {
+      const latest = await fresh();
+      const name = latest.state.members[latest.principal]?.profile?.name ?? await getAccountName() ?? '';
+      const { email: address } = show ? await api<{ email: string }>('/me/email') : { email: undefined };
+      await appendEntry(latest, 'member.profile', { id: latest.principal, name, ...(address ? { email: address } : {}) });
+      await membersScreen(id);
+    } catch (cause) { toggle.checked = !show; toggle.disabled = false; throw cause; }
+  }));
   const invite = async (addresses: string[]) => {
     await fresh();
     if (addresses.length > 5 || addresses.some(address => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address))) throw new Error('Enter up to five valid email addresses.');
@@ -402,7 +440,12 @@ async function acceptInvite(): Promise<void> {
     history.replaceState(null, '', '/invite');
     render(`<section class="panel"><h1>Waiting for a member to let you in</h1><p>This page checks for access automatically. Keep it open.</p><p id="wait-status" role="status"></p></section>`);
     const refresh = async () => {
-      try { const row = (await listings()).find(j => j.id === result.journeyId && j.principal === principal); if (row) { await verifiedJourney(row.id, principal, keys); navigate('/journeys/' + row.id); return; } }
+      try { const row = (await listings()).find(j => j.id === result.journeyId && j.principal === principal); if (row) {
+        const ctx = await verifiedJourney(row.id, principal, keys);
+        const name = await accountName(keys, (await listings()).filter(existing => existing.id !== row.id));
+        if (name && ctx.state.members[principal]?.member.scope !== 'read') await appendEntry(ctx, 'member.profile', { id: principal, name });
+        navigate('/journeys/' + row.id); return;
+      } }
       catch { /* The member has not yet posted the complete signed log and wrap. */ }
       if (document.querySelector('#wait-status')) setTimeout(() => void refresh(), 4000);
     };

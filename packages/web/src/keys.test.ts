@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { clearPersonKeys, getPersonKeys, lockPersonKeys, onPersonKeysCleared, rememberJourneyKey, restorePersonKeys, sealPersonKeys, unlockPersonKeys } from './keys.js';
+import { clearPersonKeys, getAccountName, getPersonKeys, lockPersonKeys, onPersonKeysCleared, rememberJourneyKey, restorePersonKeys, sealPersonKeys, setAccountName, unlockPersonKeys } from './keys.js';
 
 const prf = () => Uint8Array.from({ length: 32 }, (_, i) => i + 1);
 afterEach(async () => { await clearPersonKeys(); onPersonKeysCleared(null); vi.unstubAllGlobals(); });
@@ -58,6 +58,29 @@ describe('passkey-sealed person keys', () => {
     await clearPersonKeys();
     expect(epoch.key).toEqual(new Uint8Array(32));
     expect(await restorePersonKeys()).toBeNull();
+  });
+
+  it('keeps the account name encrypted through reload and a new passkey unlock', async () => {
+    const generated = await sealPersonKeys(prf());
+    await unlockPersonKeys(generated.sealed, prf());
+    await setAccountName('Avery');
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open('wayfinding-person-keys');
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const saved = await new Promise<unknown>((resolve, reject) => {
+      const request = db.transaction('person').objectStore('person').get('current');
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    db.close();
+    expect(JSON.stringify(saved)).not.toContain('Avery');
+    lockPersonKeys();
+    await restorePersonKeys();
+    expect(await getAccountName()).toBe('Avery');
+    await unlockPersonKeys(generated.sealed, prf());
+    expect(await getAccountName()).toBe('Avery');
   });
 
   it('replaces saved keys on a new unlock without wiping the replacement', async () => {
