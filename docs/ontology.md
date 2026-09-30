@@ -157,7 +157,7 @@ This is the single detailed reference for **agreed** permissions and visibility.
 | Project artifact, including in an archived project | The containing journey's audience, subject to the private-artifact rule. Project artifacts stay out of the main list unless filtered for. | D18–D19, D36 |
 | Listed private journey | Signed-in people see its name, short description and joining policy. These listing fields are server-readable; creation and settings warn about this. | D2 |
 | Listed public journey | The chosen listing audience sees its directory entry. Listing does not change public read access. | D2 |
-| Publicly shared artifact's origin | **Open:** see the sole decision for Dan in section 8. Recording origin does not authorize disclosure of a private source journey. | D14, D36 |
+| Author shown on artifacts in a public journey | Set by each member's visibility: **public** shows display name and profile picture; **journeys only** shows "a member". Journey members still see the author. A private source journey is never named publicly. | D14, D36, D43 |
 
 Sharing is between journeys the author belongs to. There is no member-to-member sharing and no named-recipient grant. An interview label is not a sharing mechanism. A facilitator who creates a private interview is its author; the subject does not automatically get access (D36, D38).
 
@@ -200,9 +200,7 @@ A hostile or careless caller must not defeat these rules. **Agreed** boundaries 
 
 ## 8. Decisions for Dan
 
-One decision remains: **what does the public see about an artifact's origin when it is shared into a public journey?** Author name, source journey name, or something else?
-
-**Default proposal:** show the author display name only. Never name a private source journey. The copy still records its origin under D14; its public presentation needs this decision.
+None. Public attribution was settled by D43 (member visibility: public or journeys only).
 
 ## 9. For the build
 
