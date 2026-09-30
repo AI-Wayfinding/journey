@@ -16,7 +16,7 @@ This draft names the app's concepts, relationships, states and access rules. It 
 
 **Agreed:** a person creates a journey. They choose private or public visibility, a joining policy and a default member role. Guides later change its settings. Members add artifacts and group work into projects. An author may share an artifact into another journey they belong to.
 
-A read-write member starts a sensemaking round for the journey or a project and assigns a facilitator. The round includes all journey members unless its creator selects a subset. The facilitator starts with planning. Members use interview guidance to gather material. Interviews stay private by default. The member who creates an interview artifact is its author; its subject may be someone else.
+A read-write member starts a sensemaking round for the journey or a project and assigns a facilitator. The round includes all journey members unless its creator selects a subset. The facilitator starts with planning. Members use interview guidance to gather material. Interviews stay private by default. The member who creates an interview artifact is its author; its subject may be someone else, and the subject can read it.
 
 The round moves from gathering to making sense. Members confirm findings before those findings enter the shared sensemaking document. Sharing findings does not share the private interview. The facilitator moves the round to complete. They may skip, go back or reopen it. Complete ends this round, not sensemaking. Members can start another round. (D1–D7, D14–D26, D32–D38, D40–D41.)
 
@@ -51,7 +51,7 @@ These are the **agreed** app terms. Technical sign-in and encryption terms are d
 - **Private artifact:** an artifact visible only to its author, with the author's agents acting within that access under D34. Everyone else must be unable to see even that it exists. See the single access reference in section 6 (D15 as amended by D36).
 - **Sensemaking round (round):** a container for recurring [framework sensemaking](../../wayfinding-framework/framework/source/The%20AI%20Wayfinding%20Framework.md#getting-started). It has a purpose, interview guidance, a sensemaking document, contribution instructions, related artifacts, participants, facilitators and a status. It belongs to the journey or to one project. “Initial position and heading” is the round used so far (D21–D24, D37).
 - **Interview guidance:** the round's script, crib notes and guidance (D22).
-- **Interview:** an artifact marked as a given member's interview document for one round. It is private by default. A member's agent or a facilitator may conduct it. The facilitator may mark the relationship, but the label grants no access and does not transfer authorship (D25, D36, D38). The app relationship does not redefine interviewing practice.
+- **Interview:** an artifact marked as a given member's interview document for one round. It is private by default. A member's agent or a facilitator may conduct it. The facilitator may mark the relationship. The label does not transfer authorship; it gives the subject read access and nobody else (D25, D36, D38, D44). The app relationship does not redefine interviewing practice.
 - **Sensemaking document:** the collaborative artifact that receives a round's shared findings, not its private transcripts (D9, D22, D26).
 - **Contribution:** an addition to that document, marked with its contributor and round. The member's agent follows the contribution instructions. The member confirms each addition before it is saved. This is an action, not a separate artifact type (D26).
 - **File/blob:** the uploaded file's bytes, separate from the artifact's title and other details. Private files are encrypted in the browser before upload. The limit is 25 MB per file (D11).
@@ -137,7 +137,7 @@ This table is the **agreed** lifecycle, not a claim that all routes exist. Recor
 | Drop → expired | Clock | A delivery URL does not remain usable indefinitely (D29). |
 | Join/leave project; change purpose/state; archive/reopen | Any journey member joins/leaves; project member edits | Agents follow participation. Archives remain readable (D17–D20, D35). |
 | Round: planning → gathering → making sense → complete | Assigned facilitator | May skip, go back or reopen. Complete ends this round only (D23, D37). |
-| Mark artifact as member's interview for a round | Facilitator | Changes its relationship, not author or audience (D38). |
+| Mark artifact as member's interview for a round | Facilitator | Changes its relationship, not its author. The subject gains read access (D38, D44). |
 | Share artifact into another journey | Author who belongs to destination | Private stays private; non-private takes destination visibility. See section 6 (D36). |
 | Add confirmed findings to sensemaking document | Member confirms; authorized writer saves | The interview itself is not shared (D26). |
 
@@ -159,7 +159,7 @@ This is the single detailed reference for **agreed** permissions and visibility.
 | Listed public journey | The chosen listing audience sees its directory entry. Listing does not change public read access. | D2 |
 | Author shown on artifacts in a public journey | Set by each member's visibility: **public** shows display name and profile picture; **journeys only** shows "a member". Journey members still see the author. A private source journey is never named publicly. | D14, D36, D43 |
 
-Sharing is between journeys the author belongs to. There is no member-to-member sharing and no named-recipient grant. An interview label is not a sharing mechanism. A facilitator who creates a private interview is its author; the subject does not automatically get access (D36, D38).
+Sharing is between journeys the author belongs to. There is no member-to-member sharing and no named-recipient grant. An interview label is not a sharing mechanism. A facilitator who creates a private interview is its author; the member it is about can read it, and nobody else can (D36, D38, D44).
 
 ### Actions by content role
 
@@ -193,7 +193,7 @@ A hostile or careless caller must not defeat these rules. **Agreed** boundaries 
 2. A private artifact must not leak content or existence to another member, the server, the public or an agent link. Sharing it into a public journey must not publish it (D36).
 3. An agent must not exceed its adding member's current access or its original read-only/read-write limit. Removing a person removes their agents (D34).
 4. A guide must not impersonate another person's profile, remove the last person guide or gain content-write permission merely through guide authority (D5, D33).
-5. A private interview must not become shared through its label or through findings contributed to a sensemaking document. Every contribution needs the member's confirmation (D26, D36, D38).
+5. A private interview must not become readable beyond its author and its subject (D44), including through its label or through findings contributed to a sensemaking document. Every contribution needs the member's confirmation (D26, D36, D38).
 6. A drop's delivery URL must not let its holder bypass the creator's approval, write directly to the journey or become a member (D42).
 7. A link artifact must not make the server fetch its URL. HTML/applets must not use the network or execute server code. Applet data reads must not exceed the viewer's access or expose private data through a journey-shared store (D9, D12–D13, D39).
 8. **Built:** pending key rotation blocks content writes and new reservations, not control-log writes. This distinction lets the remaining guide complete rotation; it is not a blanket write freeze. See section 10.3.
@@ -233,7 +233,7 @@ The ontology comes before implementation. Workspecs stay drafts until it is appr
 
 ### Stage 4 — Sensemaking rounds
 
-- Record home, participants, facilitator assignments, state changes and interview labels. Implement skip, reverse and reopen; marking a subject must not change author or access.
+- Record home, participants, facilitator assignments, state changes and interview labels. Implement skip, reverse and reopen; marking a subject must not change author and must give only that subject read access (D44).
 - Version guidance, contribution instructions and related-artifact links. Choose a safe approach to concurrent sensemaking-document edits.
 - Record contributor/round attribution and durable evidence of each member confirmation. Separate author, interview subject and version writer. Enforce the content role when saving.
 - Resolve the framework interview-practice citation. The linked framework has facilitator and sensemaking practice but no explicit interview reference identified by the reviews. Any framework addition is separate scope.
