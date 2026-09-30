@@ -29,7 +29,7 @@ We want a journey to hold any kind of artifact, group work into projects, keep s
 
 5. **Every member is read-only or read-write.** Only guides can change a member's role.
 6. **An agent has the same access as the member who added it** and follows that member's access when it changes. It can hold no more than that member.
-7. **Guide** is the name for a member who can manage members (today's `members.manage` grant). Naming of members is otherwise open; see Open questions.
+7. **Guide** is the name for a member who can manage members (today's `members.manage` grant). **Member** is the one word for anyone in a journey; its two kinds are **person** and **agent**. "Wayfinder" stays a website word and is not used in the app. A **facilitator** runs a sensemaking round and is not necessarily a guide.
 
 ### Artifacts
 
@@ -103,7 +103,6 @@ The journey ontology comes before all of them. Workspecs stay drafts until it is
 - Hardening: key-bound sessions, log rollback, signed records, expiry.
 - Second independent security review.
 
-## Open questions
+## Naming (settled 2026-09-30)
 
-- **Names for members.** "Member" for people and agents, or "wayfinder" for a person member (with "agent" for agents and "member" for either)? To be settled in the ontology.
-- **Author vs owner.** The member who can read a private artifact is its author. "Owner" is not used, to avoid confusion with guides.
+- **Member** (kinds: person, agent); **guide**; **facilitator**; **author** for the member who can read a private artifact. "Owner" and "wayfinder" are not used in the app.
