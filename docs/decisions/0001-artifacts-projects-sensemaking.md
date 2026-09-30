@@ -6,7 +6,7 @@
 
 ## Context
 
-A journey currently holds text items (title, body, tags, type, versions, comments). Every member holds the one journey key, so every member can read everything, and nothing is private to one member. The server stores encrypted records only and has no file storage. Search and filtering run in the browser.
+A journey currently holds text items (title, body, tags, type, versions, comments). Every member holds the one journey key, so every member can read everything, and nothing is private to one member. The server stores encrypted records and has no file storage. Agent links let it decrypt journey content while answering a live link (the explicit exception recorded in D31). Search and filtering run in the browser.
 
 We want a journey to hold any kind of artifact, group work into projects, keep some material private to one member, and run sensemaking repeatedly. We also want journeys that anyone can read, so a member can publish an artifact from a private journey.
 
@@ -100,9 +100,26 @@ The journey ontology comes before all of them. Workspecs stay drafts until it is
 ## Separate backlog
 
 - Account deletion.
-- Hardening: key-bound sessions, log rollback, signed records, expiry.
+- Hardening: key-bound sessions, log rollback/checkpoints, signed records, expiry, and historical key wraps for newly added agents.
 - Second independent security review.
 
 ## Naming (settled 2026-09-30)
 
-- **Member** (kinds: person, agent); **guide**; **facilitator**; **author** for the member who can read a private artifact. "Owner" and "wayfinder" are not used in the app.
+- **Member** (kinds: person, agent); **guide**; **facilitator**; **author** for the member who creates an artifact (amended by D38). "Owner" and "wayfinder" are not used in the app.
+
+## Amendments 2026-09-30
+
+These decisions replace the earlier rules where they differ. Unchanged rules still apply. They record the agreed model, not shipped behavior.
+
+31. **Agent links are an explicit encryption exception.** Amends D1 and clarifies D28. When a member deliberately creates a live agent link, the server may decrypt the content available through it while answering. Private artifacts never appear through agent links, including their existence.
+32. **Guides change journey settings.** Amends D2–D4 and D7 by assigning settings authority to guides.
+33. **Personal controls are separate from content roles.** Amends D5 and D7. Read-only members can manage their own profile, manage their own agents and leave. Person guides may be read-only or read-write. Agents cannot be guides. Leaving or removing a member must preserve at least one person guide.
+34. **An agent follows its adding member's access, with one limit.** Amends D6. Its access is always that member's access, limited by the read-only or read-write setting chosen when the agent was added. There are no other agent-specific access rules. A read-only agent never gains writes when its member gains them; a read-write agent cannot write while its member is read-only. D28's read-only agent links remain read-only.
+35. **Agents follow their adding member into projects.** Amends D17 and D20 to settle participation as well as access.
+36. **Artifacts are shared between journeys, not directly between members.** Amends D14–D16, D18 and D25. The author may share an artifact into another journey they belong to. A private artifact stays private in the destination. A non-private artifact takes the destination journey's visibility; in a public journey it is public. The author remains its author. Private artifacts are invisible to everyone else, including their existence. The author's agents act within that author's access under D34; no separate recipient grants exist. This replaces named-person sharing and D25's default read grant to a facilitator who is not the author. Projects remain groupings, not sharing destinations or new access boundaries. Shared copies still record their origin under D14; public disclosure of that origin is the one remaining decision for Dan.
+37. **Read-write members create rounds and assign facilitators.** Amends D7 and D21–D24. A round includes all journey members by default. Its creator may choose a subset at creation. The facilitator moves it forward and may skip a stage, go back or reopen it. Complete ends that round, not sensemaking.
+38. **The creator of an artifact is its author.** Amends D15, D25 and Naming. The author is separate from the member an interview is about. A facilitator may mark an artifact as a given member's interview document for the round. This label does not change its author or grant access. A private interview created by a facilitator is that facilitator's private artifact, not automatically the interview subject's.
+39. **Data is an artifact type, and applets can use it.** Amends D9 and D12–D13. Data includes JSON, CSV, SQLite, TOML, YAML and similar formats, with a data view. Public and private applets may read any data available to the user viewing them. This explicitly replaces D12's "no journey access" rule for applet data reads. No network access remains the rule. Applets still run only in the browser; D13's small encrypted, journey-shared store remains separate from access to data artifacts.
+40. **Journey visibility type is fixed in this release.** Amends D1. The model and storage must allow conversion to be added later. This release offers no private-to-public or public-to-private conversion.
+41. **Each journey chooses one of three joining policies.** Amends D2–D3 and D7, for both private and public journeys: anyone may request and a guide approves; anyone joins immediately; or invitation only. Guides issue and cancel invites, and may refuse join requests. This replaces D3's automatic approval on the next guide visit. Immediate private joining must not depend on a guide opening their browser; how to deliver keys safely is for the build.
+42. **Drops are general-purpose delivery links.** Amends D28–D29. The member who creates a drop gets a URL that anyone with a web browser, or an agent, can use to deliver content. The drop's creator always approves inclusion into the journey. Delivering content is not a journey write and gives no membership. Agent links can still propose drops, but drops are not limited to agent-link proposals. Single use, 24-hour expiry, a status URL, plain-text review of proposed details, browser encryption of private content and deletion of proposal metadata after use or expiry remain from D29. Approval does not itself grant content-write authority under D5. The build must enforce both the creator's approval and authorized inclusion, including when the creator is read-only. Suggested-by attribution is retained when there is a suggestion.
