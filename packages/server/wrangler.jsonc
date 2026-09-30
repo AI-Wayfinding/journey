@@ -82,6 +82,6 @@
       "custom_domain": true
     }
   ],
-  "observability": { "enabled": true, "head_sampling_rate": 1 },
+  "observability": { "enabled": false },
   "workers_dev": false
 }
