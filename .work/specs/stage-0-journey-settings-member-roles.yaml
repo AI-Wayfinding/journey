@@ -89,12 +89,11 @@ work:
           kind: command
           run: !bash |
             set -eu
-            export PATH="$HOME/.bend/bin:$PATH"
             cd packages/rules
-            proof=$(bend PROOF.bend)
+            proof=$(node ../../scripts/bend.mjs PROOF.bend)
             printf '%s\n' "$proof"
             case "$proof" in *'ALL PROOFS CHECK'*) ;; *) exit 1 ;; esac
-            verdict=$(bend PROOF.bend --verdict)
+            verdict=$(node ../../scripts/bend.mjs PROOF.bend --verdict)
             printf '%s\n' "$verdict"
             case "$verdict" in *'ALL PROOFS CHECK'*) ;; *) exit 1 ;; esac
             printf 'Bend proof and verdict both printed ALL PROOFS CHECK\n'
@@ -317,7 +316,7 @@ work:
           run: !bash |
             set -eu
             npm run build:rules
-            (export PATH="$HOME/.bend/bin:$PATH"; cd packages/rules && bend PROOF.bend --verdict)
+            (cd packages/rules && node ../../scripts/bend.mjs PROOF.bend --verdict)
             node scripts/check-bend-boundary.mjs --rules
             npm run typecheck -w @ai-wayfinding/core
             npm run build:rules && npm run build -w @ai-wayfinding/core

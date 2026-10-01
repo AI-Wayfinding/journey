@@ -4,5 +4,5 @@
   "private": true,
   "type": "module",
   "exports": { ".": { "types": "./rules.d.mts", "default": "./rules.mjs" } },
-  "scripts": { "build": "PATH=\"$HOME/.bend/bin:$PATH\" bend rules.bend -o rules.mjs" }
+  "scripts": { "build": "node ../../scripts/bend.mjs rules.bend -o rules.mjs" }
 }
