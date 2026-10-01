@@ -8,3 +8,5 @@ packages/*/dist/
 .scratch/
 .worktrees/
 *.tgz
+.work/.cache/
+*.tsbuildinfo
