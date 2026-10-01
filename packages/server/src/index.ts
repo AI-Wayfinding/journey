@@ -106,10 +106,10 @@ function control(value: unknown, journey: string): ControlInput | null {
   const proof: ControlProof = { v: 1, journey, seq: p.seq, prev: p.prev, at: p.at, actor: p.actor, type: p.type, body, envelopeHash: p.envelopeHash, sig: p.sig };
   return { proof, envelope: { outside: { v: 1, id: o.id, journey, seq: p.seq, epoch: o.epoch, size: o.size, createdAt: o.createdAt }, nonce: e.nonce, ciphertext: e.ciphertext } };
 }
-function wraps(value: unknown, epoch: number): EpochWrap[] | null {
-  if (!Array.isArray(value) || value.length > 100 || !value.every(w => object(w) && validString(w.principal, 128) && validString(w.wrap, 100_000) && w.epoch === epoch)) return null;
-  if (new Set(value.map(w => w.principal)).size !== value.length) return null;
-  return value.map(w => ({ principal: w.principal as string, epoch, wrap: w.wrap as string }));
+function wraps(value: unknown, epoch: number, historical = false): EpochWrap[] | null {
+  if (!Array.isArray(value) || value.length > (historical ? Math.max(100, epoch) : 100) || !value.every(w => object(w) && validString(w.principal, 128) && validString(w.wrap, 100_000) && validEpoch(w.epoch) && (historical ? w.epoch <= epoch : w.epoch === epoch))) return null;
+  if (new Set(value.map(w => JSON.stringify([w.principal, w.epoch]))).size !== value.length) return null;
+  return value.map(w => ({ principal: w.principal as string, epoch: w.epoch as number, wrap: w.wrap as string }));
 }
 function transportList(jsonText: string): string[] { try { const value: unknown = JSON.parse(jsonText); return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : []; } catch { return []; } }
 function encrypted(value: unknown, max = 1_048_576): value is string { return validString(value, max) && /^[A-Za-z0-9+/_=-]+$/.test(value); }
@@ -413,7 +413,7 @@ app.post('/v1/journeys/:id/log', async c => {
     if (s.agent || !auth || auth.verifiedAt === null || Date.now() - auth.verifiedAt > 300_000) return failure('unauthorized', 401);
     if (!validExpiry(expiresAt) || expiresAt > Date.now() + LINK_MAX_MS) return failure('invalid-request', 400);
   }
-  const supplied = b.wraps === undefined ? undefined : wraps(b.wraps, signed.envelope.outside.epoch);
+  const supplied = b.wraps === undefined ? undefined : wraps(b.wraps, signed.envelope.outside.epoch, admission?.kind === 'person');
   if (supplied === null) return failure('invalid-request', 400);
   const result = await enclave(c.env, id, { op: 'controlWrite', journeyId: id, subject: s, control: signed, wraps: supplied, admission });
   if (result.ok) {

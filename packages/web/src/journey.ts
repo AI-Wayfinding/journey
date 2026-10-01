@@ -118,7 +118,7 @@ export async function allRecords(ctx: JourneyContext): Promise<ProtocolRecord[]>
 export async function letIn(ctx: JourneyContext, pending: { principal: string; recipient: string; signingKey: string; support: number; expires: number | null }): Promise<void> {
   if (pending.support === 1 && (!pending.expires || pending.expires <= Date.now())) throw new Error('This support invitation has expired. Send a new one.');
   const member: Member = { id: pending.principal, kind: 'person', recipient: pending.recipient, signingKey: pending.signingKey, ...(pending.support === 1 ? { support: true as const, scope: 'read' as const, expiresAt: new Date(pending.expires!).toISOString() } : {}) };
-  const wraps = await wrapJourneyKey(currentKey(ctx), [member]);
+  const wraps = (await Promise.all([...ctx.epochs.values()].map(key => wrapJourneyKey(key, [member])))).flat();
   await appendEntry(ctx, 'member.add', { member, grants: [], kind: 'person' }, wraps.map(w => ({ principal: w.recipient, epoch: w.epoch, wrap: w.ciphertext })));
 }
 export async function rotatePending(ctx: JourneyContext): Promise<boolean> {

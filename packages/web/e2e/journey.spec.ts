@@ -359,11 +359,19 @@ test('two people share a journey with PRF passkeys and same-origin assets', asyn
     await alice.page.getByRole('button', { name: 'Let in' }).click();
     await expect(support.page.getByRole('heading', { name: 'Our shared path' })).toBeVisible({ timeout: 20_000 });
     await expect(support.page.getByRole('link', { name: 'Add an item' })).toHaveCount(0);
+    await expect(support.page.getByRole('link', { name: 'Only after Bob left' })).toBeVisible();
+    await support.page.getByRole('link', { name: 'First observation' }).click();
+    await expect(support.page.getByText('A note shared with Bob')).toBeVisible();
+    await expect(support.page.getByText('I can see this now.')).toBeVisible();
+    await support.page.reload();
+    await expect(support.page.getByText('A note shared with Bob')).toBeVisible();
     await alice.page.getByRole('link', { name: 'Back to journey' }).click();
     await alice.page.getByRole('link', { name: 'Share this journey' }).click();
     await expect(alice.page.getByText('Wayfinding support (Hypha)')).toBeVisible({ timeout: 10_000 });
     const supportLists = await support.page.request.get('/v1/journeys', { headers: journeyHeaders });
     const supportPrincipal = ((await supportLists.json()) as { journeys: { id: string; principal: string }[] }).journeys.find(j => journeyPath.endsWith(j.id))!.principal;
+    const supportWraps = await (await support.page.request.get(`/v1${journeyPath}/wraps/me`, { headers: { ...journeyHeaders, 'X-Principal': supportPrincipal } })).json() as { wraps: { epoch: number }[] };
+    expect(supportWraps.wraps.map(w => w.epoch)).toEqual([1, newest.outside.epoch]);
     expect((await support.page.request.post(`/v1${journeyPath}/seq`, { data: {}, headers: { 'X-Client-Version': '0.1.4', 'X-Control-Format': 'control-proof-v1', 'X-Wayfinding': '1', Origin: 'http://localhost:18787', 'X-Principal': supportPrincipal } })).status()).toBe(403);
     expect(support.requests.every(url => new URL(url).hostname === 'localhost')).toBeTruthy();
   } finally { await alice.context.close(); await bob.context.close(); await support.context.close(); }
