@@ -220,15 +220,22 @@ work:
             output_includes: "Test Files"
           timeout_ms: 180000
       - id: server-content-access
-        statement: "When a caller reads records, history, wraps or export, reserves a sequence or submits any ordinary content write including comments or deletes, server access reflects the current verified person role and exact D34 agent rule; read-only callers including guides cannot write, role downgrade also stops an earlier reservation from completing, missing/removed/expired people and their agents cannot fetch new data, and promotion of a person never promotes an agent beyond its original limit."
+        statement: "When a caller reads records, history, wraps or export, reserves a sequence or submits any ordinary content write including comments or deletes, server access reflects the current verified person role and exact D34 agent rule; read-only callers including guides cannot write, role downgrade also stops an earlier reservation from completing, missing/removed/expired people and their agents cannot fetch new data, and promotion of a person never promotes an agent beyond its original limit. The server's allow/deny decisions for reads, sequence reservations, content writes, pending rotation and client version are compiled Bend functions in packages/rules, not TypeScript; LAWS.bend states and PROOF.bend proves that no caller reads without current access, no content write commits while rotation is pending, and clients 0.1.3 or older are refused."
         evidence:
           kind: command
           run: !bash |
-            npm run build:rules && npm run build -w @ai-wayfinding/core && npm run test -w @ai-wayfinding/server -- test/stage0-access.test.ts
+            npm run build:rules && npm run build -w @ai-wayfinding/core && npm run test -w @ai-wayfinding/server -- test/stage0-access.test.ts && (cd packages/rules && node ../../scripts/bend.mjs PROOF.bend | grep -q 'ALL PROOFS CHECK')
           expect:
             exit: 0
             output_includes: "Test Files"
           timeout_ms: 180000
+        amendments:
+          - criterion_id: "server-content-access"
+            before: "When a caller reads records, history, wraps or export, reserves a sequence or submits any ordinary content write including comments or deletes, server access reflects the current verified person role and exact D34 agent rule; read-only callers including guides cannot write, role downgrade also stops an earlier reservation from completing, missing/removed/expired people and their agents cannot fetch new data, and promotion of a person never promotes an agent beyond its original limit."
+            after: "When a caller reads records, history, wraps or export, reserves a sequence or submits any ordinary content write including comments or deletes, server access reflects the current verified person role and exact D34 agent rule; read-only callers including guides cannot write, role downgrade also stops an earlier reservation from completing, missing/removed/expired people and their agents cannot fetch new data, and promotion of a person never promotes an agent beyond its original limit. The server's allow/deny decisions for reads, sequence reservations, content writes, pending rotation and client version are compiled Bend functions in packages/rules, not TypeScript; LAWS.bend states and PROOF.bend proves that no caller reads without current access, no content write commits while rotation is pending, and clients 0.1.3 or older are refused."
+            reason: "Server allow/deny decisions move into the proved Bend rules core."
+            authority: "Dan, 2026-10-01 (m01360): yes to server allow/deny decisions in Bend"
+            at: "2026-10-01T03:00:58.589Z"
       - id: server-personal-controls
         statement: "When a read-only person uses profile updates, own-agent approval/naming/link creation/renewal/removal or leaving, the server allows the authorized personal control with existing fresh-confirmation requirements, while denying other people's controls; either-role person guides can use settings, role, guide and existing invitation/admission controls, while non-guides and agents cannot use those management routes and no control permits an ordinary content write."
         evidence:
