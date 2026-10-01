@@ -1,4 +1,4 @@
-import { createAgeIdentity, exportJourney, generateJourneyKey, hashEntry, newId, open, parseRecord, recipientsHash, removeAndRotate, seal, signEntry, unwrapJourneyKey, verifyLog, wrapJourneyKey } from '@ai-wayfinding/core';
+import { canWriteContent, isPersonGuide, createAgeIdentity, exportJourney, generateJourneyKey, hashEntry, newId, open, parseRecord, recipientsHash, removeAndRotate, seal, signEntry, unwrapJourneyKey, verifyLog, wrapJourneyKey } from '@ai-wayfinding/core';
 import { plainError } from './messages.js';
 import type { Envelope, ItemBody, JourneyKey, KeyWrap, LogEntry, LogState, Member, ProtocolRecord } from '@ai-wayfinding/core';
 import { getPersonKeys, rememberJourneyKey } from './keys.js';
@@ -99,7 +99,7 @@ export async function createJourney(name: string, description: string, keys: Per
 }
 export async function saveRecord(ctx: JourneyContext, record: ProtocolRecord): Promise<void> {
   currentKey(ctx);
-  if (ctx.state.members[ctx.principal]?.member.scope === 'read') throw new Error('This journey is read-only for you.');
+  if (!canWriteContent(ctx.state, ctx.principal)) throw new Error('This journey is read-only for you.');
   if (parseRecord(record).kind !== 'known') throw new Error('Unsupported record type');
   const { seq, epoch } = await api<{ seq: number; epoch: number }>(`/journeys/${ctx.id}/seq`, 'POST', {}, ctx.principal);
   if (epoch !== ctx.state.currentEpoch) throw new Error('Journey key changed. Reload before writing.');
@@ -123,7 +123,7 @@ export async function allRecords(ctx: JourneyContext): Promise<ProtocolRecord[]>
   }
 }
 export async function letIn(ctx: JourneyContext, pending: { principal: string; recipient: string; signingKey: string; support: number; expires: number | null }): Promise<void> {
-  if (!ctx.state.grants[ctx.principal]?.includes('members.manage')) throw new Error('Only a member who manages people can let someone in.');
+  if (!isPersonGuide(ctx.state, ctx.principal)) throw new Error('Only a member who manages people can let someone in.');
   if (pending.support === 1 && (!pending.expires || pending.expires <= Date.now())) throw new Error('This support invitation has expired. Send a new one.');
   const member: Member = { id: pending.principal, kind: 'person', recipient: pending.recipient, signingKey: pending.signingKey, ...(pending.support === 1 ? { support: true as const, scope: 'read' as const, expiresAt: new Date(pending.expires!).toISOString() } : {}) };
   const wraps = (await Promise.all([...ctx.epochs.values()].map(key => wrapJourneyKey(key, [{ id: member.id, recipient: member.recipient }])))).flat();
@@ -131,7 +131,7 @@ export async function letIn(ctx: JourneyContext, pending: { principal: string; r
 }
 export async function rotatePending(ctx: JourneyContext): Promise<boolean> {
   const current = currentKey(ctx);
-  if (!ctx.state.grants[ctx.principal]?.includes('members.manage')) return false;
+  if (!isPersonGuide(ctx.state, ctx.principal)) return false;
   // A removed principal must lose access immediately. The next holder visit finishes an interrupted rotation.
   const last = ctx.log.at(-1);
   if (last?.type !== 'member.remove') return false;

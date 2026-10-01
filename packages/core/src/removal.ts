@@ -1,14 +1,16 @@
+import { canControl, projectMembers, replayControl } from './rules.js';
 import { hashEntry, recipientsHash, signEntry } from './log.js';
 import type { LogEntry, LogState } from './log.js';
 import { generateJourneyKey, wrapJourneyKey } from './teamKey.js';
 import type { JourneyKey, KeyWrap } from './teamKey.js';
 export async function removeAndRotate(state: LogState, target: string, actor: string, signingKey: CryptoKey): Promise<{ entries: [LogEntry, LogEntry]; key: JourneyKey; wraps: KeyWrap[] }> {
-  if (state.members[actor]?.member.kind !== 'person' || !state.grants[actor]?.includes('members.manage')) throw new Error('A person with members.manage must act');
+  if (!canControl(state, actor, 'Rotate')) throw new Error('A person with members.manage must act');
   if (target === actor) throw new Error('A remaining acting holder must complete rotation after self-removal');
-  const removed = state.members[target];
-  if (!removed) throw new Error('Member not found');
-  const remaining = Object.fromEntries(Object.entries(state.members).filter(([id, value]) => id !== target && (removed.member.kind !== 'person' || value.member.addedBy !== target)));
-  if (!Object.entries(remaining).some(([id, value]) => value.member.kind === 'person' && state.grants[id]?.includes('members.manage'))) throw new Error('Cannot remove last holder');
+  const { transition, model } = replayControl(state, actor, 'Remove', target);
+  if (transition.$ !== 'Accepted') throw new Error(transition.$ === 'LastGuide' ? 'Cannot remove last holder' : 'Member not found or removal not authorized');
+  const projected: LogState = { ...state };
+  projectMembers(projected, transition, model);
+  const remaining = projected.members;
   const at = new Date().toISOString();
   const first = await signEntry({ v: 1, seq: state.lastSeq + 1, prev: state.lastHash, at, actor, type: 'member.remove', body: { member: target } }, signingKey);
   const key = generateJourneyKey(state.currentEpoch + 1);

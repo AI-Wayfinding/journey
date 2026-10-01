@@ -1,3 +1,4 @@
+import rules from '@ai-wayfinding/rules';
 import { failure } from './types.js';
 import type { EnclaveMessage, Subject } from './types.js';
 
@@ -19,8 +20,10 @@ export class EnclaveObject {
   private one(sql: string, ...args: (string | number)[]): Row | null { return (this.sql.exec(sql, ...args).toArray()[0] as Row | undefined) ?? null; }
   private access(subject: Subject, write = false): Row | null {
     const row = this.one('SELECT id,kind,scope,expiresAt,accountHash,removedAt FROM principals WHERE id=?', subject.principal);
-    if (!row || row.removedAt !== null || row.expiresAt !== null && Number(row.expiresAt) <= Date.now() || write && row.scope !== 'readwrite') return null;
-    if (subject.agent ? row.kind !== 'agent' : row.kind !== 'person' || row.accountHash !== subject.accountHash) return null;
+    if (!row) return null;
+    const live = row.removedAt === null && (row.expiresAt === null || Number(row.expiresAt) > Date.now());
+    const identity = subject.agent ? row.kind === 'agent' : row.kind === 'person' && row.accountHash === subject.accountHash;
+    if (!rules.transport_access(live, identity, write, { $: row.scope === 'readwrite' ? 'ReadWrite' : 'ReadOnly' })) return null;
     return row;
   }
   async fetch(request: Request): Promise<Response> {
@@ -82,7 +85,7 @@ export class EnclaveObject {
           for (const change of changes) {
             if (change.action !== 'remove') continue;
             const target = this.one('SELECT kind,addedBy FROM principals WHERE id=? AND removedAt IS NULL', change.principal);
-            if (target?.kind === 'agent' && target.addedBy !== subject.principal) return failure('forbidden', 403);
+            if (target && !rules.transport_remove(target.addedBy === subject.principal, { $: target.kind === 'agent' ? 'Agent' : 'Person' })) return failure('forbidden', 403);
           }
           let memberDelta = 0;
           this.state.storage.transactionSync(() => {
@@ -93,7 +96,13 @@ export class EnclaveObject {
                 const target = this.one('SELECT kind FROM principals WHERE id=? AND removedAt IS NULL', change.principal);
                 const removed = this.sql.exec('UPDATE principals SET removedAt=? WHERE id=? AND removedAt IS NULL', now, change.principal);
                 memberDelta -= removed.rowsWritten;
-                if (target?.kind === 'person') memberDelta -= this.sql.exec('UPDATE principals SET removedAt=? WHERE kind=? AND addedBy=? AND removedAt IS NULL', now, 'agent', change.principal).rowsWritten;
+                // Selection is an effect of the shared removal predicate, not a second cascade rule.
+                const candidates = this.sql.exec('SELECT id,kind,addedBy FROM principals WHERE removedAt IS NULL').toArray();
+                const ids = [change.principal, ...candidates.map(row => String(row.id))];
+                for (const candidate of candidates) {
+                  const survives = rules.survives(1n, target?.kind === 'person', { $: 'Member', id: BigInt(ids.indexOf(String(candidate.id)) + 1), kind: { $: candidate.kind === 'agent' ? 'Agent' : 'Person' }, owner: BigInt(ids.indexOf(String(candidate.addedBy)) + 1), role: { $: 'ReadOnly' }, guide: false, support: false, live: true });
+                  if (!survives) memberDelta -= this.sql.exec('UPDATE principals SET removedAt=? WHERE id=? AND removedAt IS NULL', now, String(candidate.id)).rowsWritten;
+                }
                 this.sql.exec('UPDATE meta SET pendingRotation=1');
               } else {
                 if (!this.one('SELECT id FROM principals WHERE id=? AND removedAt IS NULL', change.principal)) memberDelta++;
@@ -118,7 +127,7 @@ export class EnclaveObject {
           // Only the person who added an agent may extend it. Extension is two ordinary signed entries and no key change.
           if (subject.agent || input.entries.length !== 2) return failure('forbidden', 403);
           const target = this.one('SELECT kind,addedBy,removedAt FROM principals WHERE id=?', input.member);
-          if (!target || target.kind !== 'agent' || target.removedAt !== null || target.addedBy !== subject.principal || !Number.isSafeInteger(input.expiresAt) || input.expiresAt <= now) return failure('forbidden', 403);
+          if (!target || !rules.transport_renew(!subject.agent, target.kind === 'agent', target.addedBy === subject.principal, target.removedAt === null) || !Number.isSafeInteger(input.expiresAt) || input.expiresAt <= now) return failure('forbidden', 403);
           this.state.storage.transactionSync(() => {
             for (const [index, entry] of input.entries.entries()) this.sql.exec('INSERT INTO log(seq,entry,at) VALUES(?,?,?)', Number(meta.nextLog) + index, entry, now);
             this.sql.exec('UPDATE meta SET nextLog=nextLog+2');

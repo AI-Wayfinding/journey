@@ -1,0 +1,8 @@
+{
+  "name": "@ai-wayfinding/rules",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": { "types": "./rules.d.mts", "default": "./rules.mjs" } },
+  "scripts": { "build": "PATH=\"$HOME/.bend/bin:$PATH\" bend rules.bend -o rules.mjs" }
+}

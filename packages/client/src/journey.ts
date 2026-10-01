@@ -1,3 +1,4 @@
+import { canWriteContent, effectiveScope } from '@ai-wayfinding/core';
 import { CLIENT_VERSION, meetsMinClientVersion, newId, open, parseRecord, seal, unwrapJourneyKey, verifyLog } from '@ai-wayfinding/core';
 import type { CommentBody, Envelope, ItemBody, JourneyKey, LogEntry, LogState, ProtocolRecord } from '@ai-wayfinding/core';
 import { readCache, writeCache } from './cache.js';
@@ -101,7 +102,7 @@ export class JourneyClient {
   }
   private async writable(): Promise<Verified> {
     const verified = await this.verified();
-    if (verified.state.members[this.session.principal]?.member.scope !== 'readwrite') throw new Error('This journey is read-only for this agent. Ask a person to approve write access.');
+    if (!canWriteContent(verified.state, this.session.principal)) throw new Error('This journey is read-only for this agent. Ask a person to approve write access.');
     return verified;
   }
   private async write(record: ProtocolRecord, verified: Verified): Promise<void> {
@@ -155,7 +156,9 @@ export class JourneyClient {
   }
   async status(): Promise<{ journeyId: string; principal: string; scope: 'read' | 'readwrite'; expiresAt: number; seq: number }> {
     const { state } = await this.verified();
-    return { journeyId: this.session.journeyId, principal: this.session.principal, scope: state.members[this.session.principal]!.member.scope as 'read' | 'readwrite', expiresAt: this.session.expiresAt, seq: state.lastSeq };
+    const scope = effectiveScope(state, this.session.principal);
+    if (!scope) throw new Error('This agent is no longer a member of the journey.');
+    return { journeyId: this.session.journeyId, principal: this.session.principal, scope, expiresAt: this.session.expiresAt, seq: state.lastSeq };
   }
   close(): void { for (const value of this.keys.values()) value.key.fill(0); this.keys.clear(); }
 }

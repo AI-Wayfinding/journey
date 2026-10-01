@@ -17,13 +17,14 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "tsc",
+    "build": "npm run build -w @ai-wayfinding/rules && tsc",
     "test": "vitest run",
     "test:workers": "vitest run --config vitest.workers.config.ts",
     "test:browser": "vitest run --config vitest.browser.config.ts"
   },
   "dependencies": {
-    "age-encryption": "^0.3.1"
+    "age-encryption": "^0.3.1",
+    "@ai-wayfinding/rules": "0.1.0"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.22.0",

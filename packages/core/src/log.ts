@@ -1,3 +1,4 @@
+import { projectMembers, replayControl } from './rules.js';
 import { isId } from './ids.js';
 import { asBuffer, decode, encode, utf8 } from './codec.js';
 import { meetsMinClientVersion } from './versions.js';
@@ -6,70 +7,52 @@ export type Grant = 'members.manage';
 export interface Member extends JsonObject { id: string; recipient: string; signingKey: string; kind: 'person' | 'agent'; name?: string; scope?: 'read' | 'readwrite'; addedBy?: string; expiresAt?: string; support?: true }
 export const validAgentName = (value: unknown): value is string => typeof value === 'string' && value.length >= 1 && value.length <= 60 && value.trim() === value && !/[\x00-\x1f\x7f-\x9f]/.test(value);
 export interface LogEntry { v: 1; seq: number; prev: string | null; at: string; actor: string; type: string; body: JsonObject; sig: string }
-export interface LogDefinition { name: string; fields: readonly string[]; validate(body: JsonObject): Validation; apply?: (state: LogState, body: JsonObject, actor: string, holder: boolean) => Promise<EffectError | null> }
+export interface LogDefinition { name: string; fields: readonly string[]; validate(body: JsonObject): Validation; apply?: (state: LogState, body: JsonObject, actor: string) => Promise<EffectError | null> }
 export interface MemberProfile extends JsonObject { name: string; email?: string }
 export interface DerivedMember { member: Member; grants: Grant[]; profile?: MemberProfile }
 export interface LogState { journey: string; members: Record<string, DerivedMember>; grants: Record<string, Grant[]>; currentEpoch: number; minClientVersion: string; lastSeq: number; lastHash: string | null }
 export interface LogError { code: 'invalid-entry' | 'broken-chain' | 'invalid-signature' | 'unauthorized' | 'last-holder' | 'client-too-old'; seq: number; message: string }
 export type LogResult = { ok: true; state: LogState } | { ok: false; error: LogError };
 type EffectError = { code: LogError['code']; message: string };
-const denied = (message: string): EffectError => ({ code: 'unauthorized', message });
-function addMember(state: LogState, body: JsonObject, actor: string, holder: boolean): Promise<EffectError | null> {
-  const member = body.member as Member;
-  if (state.members[member.id]) return Promise.resolve({ code: 'invalid-entry', message: 'Duplicate member' });
-  if (member.kind === 'agent') {
-    if (member.addedBy !== actor || !state.members[member.addedBy] || (body.grants as Grant[]).length) return Promise.resolve(denied('An agent must belong to its acting person and hold no grants'));
-  } else {
-    if (!holder) return Promise.resolve(denied('Only a holder may add people'));
-    if (member.support && (body.grants as Grant[]).length) return Promise.resolve(denied('Support members cannot hold grants'));
-  }
-  state.members[member.id] = { member: { ...member }, grants: [...body.grants as Grant[]] };
-  state.grants[member.id] = [...body.grants as Grant[]];
-  return Promise.resolve(null);
+function control(state: LogState, body: JsonObject, actor: string, operation: Parameters<typeof replayControl>[2], target?: string, member?: Member, guide = false): EffectError | null {
+  const { transition, model } = replayControl(state, actor, operation, target, member, guide);
+  if (transition.$ === 'Denied') return { code: 'unauthorized', message: 'Control is not authorized for this person' };
+  if (transition.$ === 'Invalid') return { code: 'invalid-entry', message: 'Duplicate member' };
+  if (transition.$ === 'LastGuide') return { code: 'last-holder', message: 'At least one person must retain members.manage' };
+  projectMembers(state, transition, model, member);
+  return null;
 }
-function renameMember(state: LogState, body: JsonObject, actor: string, holder: boolean): Promise<EffectError | null> {
-  const target = state.members[body.id as string]?.member;
-  if (!target || target.kind !== 'agent') return Promise.resolve({ code: 'invalid-entry', message: 'Agent not found' });
-  if (!holder && target.addedBy !== actor) return Promise.resolve(denied('Cannot rename another member’s agent'));
-  target.name = body.name as string;
-  return Promise.resolve(null);
+async function addMember(state: LogState, body: JsonObject, actor: string): Promise<EffectError | null> {
+  return control(state, body, actor, 'Add', undefined, body.member as Member, (body.grants as Grant[]).includes('members.manage'));
 }
-function setProfile(state: LogState, body: JsonObject, actor: string): Promise<EffectError | null> {
-  // A holder may manage membership, but cannot speak as another person.
-  if (body.id !== actor) return Promise.resolve(denied('Only a person may set their own profile'));
-  const target = state.members[actor];
-  if (!target || target.member.kind !== 'person') return Promise.resolve(denied('Only a person may set their own profile'));
-  target.profile = { name: body.name as string, ...(body.email === undefined ? {} : { email: body.email as string }) };
-  return Promise.resolve(null);
+async function renameMember(state: LogState, body: JsonObject, actor: string): Promise<EffectError | null> {
+  const denied = control(state, body, actor, 'Rename', body.id as string);
+  if (denied) return denied;
+  state.members[body.id as string]!.member.name = body.name as string;
+  return null;
 }
-function removeMember(state: LogState, body: JsonObject, actor: string, holder: boolean): Promise<EffectError | null> {
-  const target = body.member as string;
-  const removed = state.members[target];
-  if (!removed) return Promise.resolve({ code: 'invalid-entry', message: 'Member not found' });
-  if (!holder && target !== actor && removed.member.addedBy !== actor) return Promise.resolve(denied('Cannot remove another member'));
-  delete state.members[target]; delete state.grants[target];
-  if (removed.member.kind === 'person') for (const [id, value] of Object.entries(state.members)) if (value.member.addedBy === target) { delete state.members[id]; delete state.grants[id]; }
-  return Promise.resolve(null);
+async function setProfile(state: LogState, body: JsonObject, actor: string): Promise<EffectError | null> {
+  const denied = control(state, body, actor, 'Profile', body.id as string);
+  if (denied) return denied;
+  state.members[actor]!.profile = { name: body.name as string, ...(body.email === undefined ? {} : { email: body.email as string }) };
+  return null;
+}
+async function removeMember(state: LogState, body: JsonObject, actor: string): Promise<EffectError | null> {
+  return control(state, body, actor, 'Remove', body.member as string);
 }
 function setGrant(add: boolean): LogDefinition['apply'] {
-  return async (state, body, _actor, holder) => {
-    if (!holder) return denied('Only a holder may change grants');
-    const target = body.member as string;
-    if (state.members[target]?.member.kind !== 'person') return denied('Only people may hold grants');
-    if (state.members[target]?.member.support) return denied('Support members cannot hold grants');
-    state.grants[target] = add ? ['members.manage'] : [];
-    state.members[target]!.grants = state.grants[target]!;
-    return null;
-  };
+  return async (state, body, actor) => control(state, body, actor, 'Guide', body.member as string, undefined, add);
 }
-async function rotate(state: LogState, body: JsonObject, _actor: string, holder: boolean): Promise<EffectError | null> {
-  if (!holder) return denied('Only a holder may rotate keys');
+async function rotate(state: LogState, body: JsonObject, actor: string): Promise<EffectError | null> {
+  const denied = control(state, body, actor, 'Rotate');
+  if (denied) return denied;
   if (body.epoch !== state.currentEpoch + 1 || body.recipientsHash !== await recipientsHash(state.members)) return { code: 'invalid-entry', message: 'Invalid key rotation recipients or epoch' };
   state.currentEpoch++;
   return null;
 }
-async function setMinimum(state: LogState, body: JsonObject, _actor: string, holder: boolean): Promise<EffectError | null> {
-  if (!holder) return denied('Only a holder may update minimum client version');
+async function setMinimum(state: LogState, body: JsonObject, actor: string): Promise<EffectError | null> {
+  const denied = control(state, body, actor, 'Settings');
+  if (denied) return denied;
   if (!meetsMinClientVersion(body.version as string, state.minClientVersion)) return { code: 'invalid-entry', message: 'Minimum client version cannot decrease' };
   state.minClientVersion = body.version as string;
   return null;
@@ -162,11 +145,8 @@ export async function verifyLog(entries: readonly LogEntry[]): Promise<LogResult
       continue;
     }
     const current = state!;
-    const holder = signer.kind === 'person' && current.grants[entry.actor]?.includes('members.manage');
-    if (signer.kind !== 'person') return error('unauthorized', index, 'Agents cannot sign membership changes');
-    const failure = await definition.apply?.(current, entry.body, entry.actor, Boolean(holder));
+    const failure = await definition.apply?.(current, entry.body, entry.actor);
     if (failure) return error(failure.code, index, failure.message);
-    if (!Object.entries(current.members).some(([id, value]) => value.member.kind === 'person' && current.grants[id]?.includes('members.manage'))) return error('last-holder', index, 'At least one person must retain members.manage');
     current.lastSeq = index;
     current.lastHash = await hashEntry(entry);
   }
