@@ -79,7 +79,8 @@ test('signed settings, separate role and guide authority, and read-only personal
     await guide.page.reload(); await expect(guide.page.getByRole('heading', { name: 'Journey settings' })).toHaveCount(0);
     guest.page.on('dialog', dialog => void dialog.accept());
     await guest.page.locator(`[data-remove="${ownId}"]`).click(); await expect(guest.page.locator(`[data-remove="${ownId}"]`)).toHaveCount(0);
-    expect((await request.get(link)).status()).toBe(410);
+    const ended = await request.get(link);
+    expect(ended.status()).toBe(404); expect(await ended.json()).toMatchObject({ error: 'ended' });
     await guest.page.locator(`[data-grant="${guideId}"]`).click(); await expect(guest.page.locator('#leave')).toBeEnabled();
     await guest.page.locator('#leave').click(); await expect(guest.page.getByRole('heading', { name: 'A place to find your way' })).toBeVisible();
     await guide.page.goto(path); await expect(guide.page.getByRole('heading', { name: 'Read-only guide settings', exact: true })).toBeVisible();
