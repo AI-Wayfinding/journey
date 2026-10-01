@@ -134,7 +134,7 @@ work:
   - id: protocol
     task: "Define signed Stage 0 settings, roles, access and upgrade contracts"
     depends_on: ["bend-core"]
-    touches: ["packages/core/src", "packages/core/test", "packages/core/package.json", "docs/journey-protocol.md"]
+    touches: ["packages/rules", "packages/core/src", "packages/core/test", "packages/core/package.json", "docs/journey-protocol.md"]
     refs:
       - path: "docs/decisions/0001-artifacts-projects-sensemaking.md"
         why: "Accepted scope and amendment precedence"
@@ -198,7 +198,7 @@ work:
   - id: server-authority
     task: "Enforce verified Stage 0 authority and current access at the server boundary"
     depends_on: ["protocol"]
-    touches: ["packages/server/src/enclave.ts", "packages/server/src/index.ts", "packages/server/src/types.ts", "packages/server/src/registry.ts", "packages/server/test", "packages/server/README.md"]
+    touches: ["packages/rules", "packages/server/src/enclave.ts", "packages/server/src/index.ts", "packages/server/src/types.ts", "packages/server/src/registry.ts", "packages/server/test", "packages/server/README.md"]
     refs:
       - path: "docs/decisions/0001-artifacts-projects-sensemaking.md"
         why: "Accepted scope and amendment precedence"
