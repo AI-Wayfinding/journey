@@ -1,7 +1,8 @@
-import { ownsAgent } from './rules.js';
+import { ownsAgent, stage0Rules } from './rules.js';
 import { asBuffer, utf8, text } from './codec.js';
 import { hashEntry, signEntry } from './log.js';
 import type { LogEntry, LogState, Member } from './log.js';
+import { ruleVersion } from './versions.js';
 
 /**
  * Agent link crypto. An agent link is a deliberate exception to end-to-end encryption: the server keeps the
@@ -56,9 +57,18 @@ export async function renewAgentEntries(state: LogState, target: string, actor: 
   if (!ownsAgent(state, actor, target)) throw new Error('Only the person who added an agent can extend it');
   if (!Number.isFinite(Date.parse(expiresAt))) throw new Error('Invalid expiry');
   const at = new Date().toISOString();
+  if (stage0Rules.stage_ready(ruleVersion(state.minClientVersion))) throw new Error('Use renewAgentEntry for upgraded journeys');
   const first = await signEntry({ v: 1, seq: state.lastSeq + 1, prev: state.lastHash, at, actor, type: 'member.remove', body: { member: target } }, signingKey);
   const member: Member = { id: current.id, kind: current.kind, recipient: current.recipient, signingKey: current.signingKey, addedBy: current.addedBy, scope: current.scope, expiresAt };
   if (current.name !== undefined) member.name = current.name;
   const second = await signEntry({ v: 1, seq: first.seq + 1, prev: await hashEntry(first), at, actor, type: 'member.add', body: { member, grants: [], kind: 'agent' } }, signingKey);
   return [first, second];
+}
+
+/** Stage 0 renewal changes only expiry, retaining the original agent limit. */
+export async function renewAgentEntry(state: LogState, target: string, actor: string, signingKey: CryptoKey, expiresAt: string): Promise<LogEntry> {
+  if (!ownsAgent(state, actor, target)) throw new Error('Only the person who added an agent can extend it');
+  if (!stage0Rules.stage_ready(ruleVersion(state.minClientVersion))) throw new Error('Upgrade barrier required');
+  if (!Number.isFinite(Date.parse(expiresAt))) throw new Error('Invalid expiry');
+  return signEntry({ v: 1, seq: state.lastSeq + 1, prev: state.lastHash, at: new Date().toISOString(), actor, type: 'member.renew', body: { id: target, expiresAt } }, signingKey);
 }

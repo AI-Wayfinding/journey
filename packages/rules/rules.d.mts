@@ -3,10 +3,22 @@ export type Kind = { $: 'Person' | 'Agent' };
 export type List<T> = { $: 'Nil' } | { $: 'Con'; head: T; tail: List<T> };
 export type Maybe<T> = { $: 'None' } | { $: 'Some'; value: T };
 export interface Member { $: 'Member'; id: bigint; kind: Kind; role: Role; guide: boolean; owner: bigint; support: boolean; live: boolean }
-export type Control = { $: 'Add'; actor: bigint; member: Member } | { $: 'Remove'; actor: bigint; target: bigint } | { $: 'Guide'; actor: bigint; target: bigint; guide: boolean } | { $: 'RoleChange'; actor: bigint; target: bigint; role: Role } | { $: 'Settings' | 'Rotate'; actor: bigint } | { $: 'Profile' | 'Rename'; actor: bigint; target: bigint };
+export type Control = { $: 'Add'; actor: bigint; member: Member } | { $: 'Remove'; actor: bigint; target: bigint } | { $: 'Guide'; actor: bigint; target: bigint; guide: boolean } | { $: 'RoleChange'; actor: bigint; target: bigint; role: Role } | { $: 'Settings' | 'Rotate'; actor: bigint } | { $: 'Profile' | 'Rename' | 'Renew'; actor: bigint; target: bigint };
 export interface Holding { $: 'Holding'; principal: bigint; epoch: bigint }
 export type Transition = { $: 'Accepted'; members: List<Member> } | { $: 'Denied' } | { $: 'Invalid' } | { $: 'LastGuide' };
+export interface JourneySettings { $: 'JourneySettings'; name: string; description: string; defaultRole: Role; visibility: { $: 'Private' | 'Public' }; joining: { $: 'InvitationOnly' | 'GuideApproved' | 'Immediate' } }
+export interface Version { $: 'Version'; major: bigint; minor: bigint; patch: bigint }
+export interface JourneyState { $: 'JourneyState'; members: List<Member>; settings: JourneySettings; minimum: Version; pending: boolean }
+export type JourneyControl = { $: 'LegacyControl' | 'NewControl'; control: Control } | { $: 'Configure'; actor: bigint; settings: JourneySettings } | { $: 'Minimum'; actor: bigint; version: Version };
+export type JourneyTransition = { $: 'JourneyAccepted'; state: JourneyState } | { $: 'JourneyDenied' | 'JourneyInvalid' | 'JourneyLastGuide' | 'UpgradeRequired' };
 declare const rules: {
+  legacy_settings(name: string, description: string): JourneySettings;
+  active_settings(settings: JourneySettings): boolean;
+  version_ge(a: Version, b: Version): boolean;
+  stage_ready(version: Version): boolean;
+  content_write(access: Maybe<Role>, pending: boolean): boolean;
+  journey_apply(state: JourneyState, control: JourneyControl): JourneyTransition;
+  journey_replay(controls: List<JourneyControl>, result: JourneyTransition): JourneyTransition;
   agent_access(member: Role, setting: Role): Role;
   can_write(role: Role): boolean;
   person_guide(kind: Kind, guide: boolean): boolean;

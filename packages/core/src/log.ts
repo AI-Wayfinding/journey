@@ -1,67 +1,88 @@
-import { projectMembers, replayControl } from './rules.js';
+import { projectMembers, replayControl, normalizedMembers, replayJourneyControl, ruleSettings, stage0Rules } from './rules.js';
 import { isId } from './ids.js';
 import { asBuffer, decode, encode, utf8 } from './codec.js';
-import { meetsMinClientVersion } from './versions.js';
+import { ruleVersion } from './versions.js';
 import type { JsonObject, Validation } from './types.js';
 export type Grant = 'members.manage';
 export interface Member extends JsonObject { id: string; recipient: string; signingKey: string; kind: 'person' | 'agent'; name?: string; scope?: 'read' | 'readwrite'; addedBy?: string; expiresAt?: string; support?: true }
 export const validAgentName = (value: unknown): value is string => typeof value === 'string' && value.length >= 1 && value.length <= 60 && value.trim() === value && !/[\x00-\x1f\x7f-\x9f]/.test(value);
 export interface LogEntry { v: 1; seq: number; prev: string | null; at: string; actor: string; type: string; body: JsonObject; sig: string }
-export interface LogDefinition { name: string; fields: readonly string[]; validate(body: JsonObject): Validation; apply?: (state: LogState, body: JsonObject, actor: string) => Promise<EffectError | null> }
+export interface LogDefinition { name: string; fields: readonly string[]; validate(body: JsonObject): Validation; apply?: (state: LogState, body: JsonObject, actor: string, at?: string) => Promise<EffectError | null> }
 export interface MemberProfile extends JsonObject { name: string; email?: string }
 export interface DerivedMember { member: Member; grants: Grant[]; profile?: MemberProfile }
-export interface LogState { journey: string; members: Record<string, DerivedMember>; grants: Record<string, Grant[]>; currentEpoch: number; minClientVersion: string; lastSeq: number; lastHash: string | null }
+export type ContentRole = 'read-only' | 'read-write';
+export type JoiningPolicy = 'invitation-only' | 'guide-approved' | 'immediate';
+export const validJoiningPolicy = (value: unknown): value is JoiningPolicy => ['invitation-only', 'guide-approved', 'immediate'].includes(value as string);
+export interface JourneySettings { name: string; description: string; defaultRole: ContentRole; visibility: 'private' | 'public'; joiningPolicy: JoiningPolicy }
+export interface LogState { settings?: JourneySettings; pendingRotation?: boolean; journey: string; members: Record<string, DerivedMember>; grants: Record<string, Grant[]>; currentEpoch: number; minClientVersion: string; lastSeq: number; lastHash: string | null }
 export interface LogError { code: 'invalid-entry' | 'broken-chain' | 'invalid-signature' | 'unauthorized' | 'last-holder' | 'client-too-old'; seq: number; message: string }
 export type LogResult = { ok: true; state: LogState } | { ok: false; error: LogError };
 type EffectError = { code: LogError['code']; message: string };
-function control(state: LogState, body: JsonObject, actor: string, operation: Parameters<typeof replayControl>[2], target?: string, member?: Member, guide = false): EffectError | null {
-  const { transition, model } = replayControl(state, actor, operation, target, member, guide);
+function control(state: LogState, body: JsonObject, actor: string, operation: Parameters<typeof replayControl>[2], target?: string, member?: Member, guide = false, role = { $: 'ReadWrite' as 'ReadOnly' | 'ReadWrite' }, at?: string): EffectError | null {
+  const { transition, model, journey } = replayControl(state, actor, operation, target, member, guide, role, at === undefined ? undefined : Date.parse(at));
   if (transition.$ === 'Denied') return { code: 'unauthorized', message: 'Control is not authorized for this person' };
-  if (transition.$ === 'Invalid') return { code: 'invalid-entry', message: 'Duplicate member' };
+  if (transition.$ === 'Invalid') return { code: 'invalid-entry', message: 'Duplicate member or required upgrade barrier missing' };
   if (transition.$ === 'LastGuide') return { code: 'last-holder', message: 'At least one person must retain members.manage' };
   projectMembers(state, transition, model, member);
+  if (journey.$ === 'JourneyAccepted') state.pendingRotation = journey.state.pending;
   return null;
 }
-async function addMember(state: LogState, body: JsonObject, actor: string): Promise<EffectError | null> {
-  return control(state, body, actor, 'Add', undefined, body.member as Member, (body.grants as Grant[]).includes('members.manage'));
+async function addMember(state: LogState, body: JsonObject, actor: string, at?: string): Promise<EffectError | null> {
+  return control(state, body, actor, 'Add', undefined, body.member as Member, (body.grants as Grant[]).includes('members.manage'), undefined, at);
 }
-async function renameMember(state: LogState, body: JsonObject, actor: string): Promise<EffectError | null> {
-  const denied = control(state, body, actor, 'Rename', body.id as string);
+async function renameMember(state: LogState, body: JsonObject, actor: string, at?: string): Promise<EffectError | null> {
+  const denied = control(state, body, actor, 'Rename', body.id as string, undefined, false, undefined, at);
   if (denied) return denied;
   state.members[body.id as string]!.member.name = body.name as string;
   return null;
 }
-async function setProfile(state: LogState, body: JsonObject, actor: string): Promise<EffectError | null> {
-  const denied = control(state, body, actor, 'Profile', body.id as string);
+async function setProfile(state: LogState, body: JsonObject, actor: string, at?: string): Promise<EffectError | null> {
+  const denied = control(state, body, actor, 'Profile', body.id as string, undefined, false, undefined, at);
   if (denied) return denied;
   state.members[actor]!.profile = { name: body.name as string, ...(body.email === undefined ? {} : { email: body.email as string }) };
   return null;
 }
-async function removeMember(state: LogState, body: JsonObject, actor: string): Promise<EffectError | null> {
-  return control(state, body, actor, 'Remove', body.member as string);
+async function removeMember(state: LogState, body: JsonObject, actor: string, at?: string): Promise<EffectError | null> {
+  return control(state, body, actor, 'Remove', body.member as string, undefined, false, undefined, at);
 }
 function setGrant(add: boolean): LogDefinition['apply'] {
-  return async (state, body, actor) => control(state, body, actor, 'Guide', body.member as string, undefined, add);
+  return async (state, body, actor, at) => control(state, body, actor, 'Guide', body.member as string, undefined, add, undefined, at);
 }
-async function rotate(state: LogState, body: JsonObject, actor: string): Promise<EffectError | null> {
-  const denied = control(state, body, actor, 'Rotate');
+async function rotate(state: LogState, body: JsonObject, actor: string, at?: string): Promise<EffectError | null> {
+  const denied = control(state, body, actor, 'Rotate', undefined, undefined, false, undefined, at);
   if (denied) return denied;
   if (body.epoch !== state.currentEpoch + 1 || body.recipientsHash !== await recipientsHash(state.members)) return { code: 'invalid-entry', message: 'Invalid key rotation recipients or epoch' };
   state.currentEpoch++;
   return null;
 }
-async function setMinimum(state: LogState, body: JsonObject, actor: string): Promise<EffectError | null> {
-  const denied = control(state, body, actor, 'Settings');
-  if (denied) return denied;
-  if (!meetsMinClientVersion(body.version as string, state.minClientVersion)) return { code: 'invalid-entry', message: 'Minimum client version cannot decrease' };
+async function setMinimum(state: LogState, body: JsonObject, actor: string, at?: string): Promise<EffectError | null> {
+  const model = normalizedMembers(state, [actor], at === undefined ? undefined : Date.parse(at));
+  const result = replayJourneyControl(state, model, { $: 'Minimum', actor: model.id(actor), version: ruleVersion(body.version as string) });
+  if (result.$ !== 'JourneyAccepted') return { code: 'unauthorized', message: 'Minimum requires a guide and cannot decrease' };
   state.minClientVersion = body.version as string;
   return null;
+}
+async function configure(state: LogState, body: JsonObject, actor: string, at?: string): Promise<EffectError | null> {
+  const model = normalizedMembers(state, [actor], at === undefined ? undefined : Date.parse(at));
+  const settings = ruleSettings({ ...state, settings: { name: body.name as string, description: body.description as string, defaultRole: body.defaultRole as ContentRole, visibility: body.visibility as JourneySettings['visibility'], joiningPolicy: body.joiningPolicy as JoiningPolicy } });
+  const result = replayJourneyControl(state, model, { $: 'Configure', actor: model.id(actor), settings });
+  if (result.$ !== 'JourneyAccepted') return { code: 'unauthorized', message: 'Settings require upgraded person-guide authority and active private/invitation-only settings' };
+  const next = result.state.settings;
+  state.settings = { name: next.name, description: next.description, defaultRole: next.defaultRole.$ === 'ReadOnly' ? 'read-only' : 'read-write', visibility: next.visibility.$ === 'Private' ? 'private' : 'public', joiningPolicy: next.joining.$ === 'InvitationOnly' ? 'invitation-only' : next.joining.$ === 'GuideApproved' ? 'guide-approved' : 'immediate' };
+  return null;
+}
+async function changeRole(state: LogState, body: JsonObject, actor: string, at?: string): Promise<EffectError | null> {
+  return control(state, body, actor, 'RoleChange', body.member as string, undefined, false, { $: body.role === 'read-only' ? 'ReadOnly' : 'ReadWrite' }, at);
+}
+function validVersion(value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  try { ruleVersion(value); return true; } catch { return false; }
 }
 const ok: Validation = { ok: true };
 const fail = (reason: string): Validation => ({ ok: false, reason });
 const object = (value: unknown): value is JsonObject => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 const str = (value: unknown): value is string => typeof value === 'string' && value.length > 0;
-const shape = (body: object, required: string[], allowed: string[] = required): boolean => required.every(k => Object.hasOwn(body, k)) && Object.keys(body).every(k => allowed.includes(k));
+const shape = (body: Record<string, unknown>, required: string[], allowed: string[] = required): boolean => required.every(k => Object.hasOwn(body, k)) && Object.keys(body).every(k => allowed.includes(k));
 function validMember(value: unknown): value is Member {
   if (!object(value) || !shape(value, ['id', 'recipient', 'signingKey', 'kind'], ['id', 'recipient', 'signingKey', 'kind', 'name', 'scope', 'addedBy', 'expiresAt', 'support'])) return false;
   if (!isId(value.id) || !str(value.recipient) || !str(value.signingKey)) return false;
@@ -70,7 +91,15 @@ function validMember(value: unknown): value is Member {
 const grants = (value: unknown): value is Grant[] => Array.isArray(value) && value.every(v => v === 'members.manage') && new Set(value).size === value.length;
 const memberBody = (body: JsonObject): Validation => shape(body, ['member', 'grants', 'kind']) && validMember(body.member) && body.kind === body.member.kind && grants(body.grants) ? ok : fail('Invalid member.add');
 export const logDefinitions: readonly LogDefinition[] = [
-  { name: 'genesis', fields: ['journey', 'name', 'creator', 'grants', 'mode', 'visibility', 'minClientVersion', 'description', 'journeyKind'], validate: b => shape(b, ['journey', 'name', 'creator', 'grants', 'mode', 'visibility', 'minClientVersion'], ['journey', 'name', 'creator', 'grants', 'mode', 'visibility', 'minClientVersion', 'description', 'journeyKind']) && isId(b.journey) && str(b.name) && validMember(b.creator) && b.creator.kind === 'person' && grants(b.grants) && b.grants.includes('members.manage') && b.mode === 'sealed' && b.visibility === 'private' && str(b.minClientVersion) && (b.description === undefined || typeof b.description === 'string' && b.description.length <= 2000) && (b.journeyKind === undefined || b.journeyKind === 'individual' || b.journeyKind === 'team') ? ok : fail('Invalid genesis') },
+  { name: 'genesis', fields: ['journey', 'name', 'creator', 'grants', 'mode', 'visibility', 'minClientVersion', 'description', 'journeyKind'], validate: b => shape(b, ['journey', 'name', 'creator', 'grants', 'mode', 'visibility', 'minClientVersion'], ['journey', 'name', 'creator', 'grants', 'mode', 'visibility', 'minClientVersion', 'description', 'journeyKind']) && isId(b.journey) && str(b.name) && validMember(b.creator) && b.creator.kind === 'person' && grants(b.grants) && b.grants.includes('members.manage') && b.mode === 'sealed' && b.visibility === 'private' && validVersion(b.minClientVersion) && (b.description === undefined || typeof b.description === 'string' && b.description.length <= 2000) && (b.journeyKind === undefined || b.journeyKind === 'individual' || b.journeyKind === 'team') ? ok : fail('Invalid genesis') },
+  { name: 'journey.settings', fields: ['name', 'description', 'defaultRole', 'visibility', 'joiningPolicy'], validate: b => shape(b, ['name', 'description', 'defaultRole', 'visibility', 'joiningPolicy']) && str(b.name) && typeof b.description === 'string' && b.description.length <= 2000 && (b.defaultRole === 'read-only' || b.defaultRole === 'read-write') && (b.visibility === 'private' || b.visibility === 'public') && validJoiningPolicy(b.joiningPolicy) ? ok : fail('Invalid journey.settings'), apply: configure },
+  { name: 'member.renew', fields: ['id', 'expiresAt'], validate: b => shape(b, ['id', 'expiresAt']) && isId(b.id) && typeof b.expiresAt === 'string' && Number.isFinite(Date.parse(b.expiresAt)) ? ok : fail('Invalid member.renew'), apply: async (state, body, actor, at) => {
+    const denied = control(state, body, actor, 'Renew', body.id as string, undefined, false, undefined, at);
+    if (denied) return denied;
+    state.members[body.id as string]!.member.expiresAt = body.expiresAt as string;
+    return null;
+  } },
+  { name: 'member.role', fields: ['member', 'role'], validate: b => shape(b, ['member', 'role']) && isId(b.member) && (b.role === 'read-only' || b.role === 'read-write') ? ok : fail('Invalid member.role'), apply: changeRole },
   { name: 'member.add', fields: ['member', 'grants', 'kind'], validate: memberBody, apply: addMember },
   { name: 'member.rename', fields: ['id', 'name'], validate: b => shape(b, ['id', 'name']) && isId(b.id) && validAgentName(b.name) ? ok : fail('Invalid member.rename'), apply: renameMember },
   { name: 'member.profile', fields: ['id', 'name', 'email'], validate: b => shape(b, ['id', 'name'], ['id', 'name', 'email']) && isId(b.id) && (b.name === '' || validAgentName(b.name)) && (b.email === undefined || typeof b.email === 'string' && b.email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(b.email)) ? ok : fail('Invalid member.profile'), apply: setProfile },
@@ -78,7 +107,7 @@ export const logDefinitions: readonly LogDefinition[] = [
   { name: 'grant.add', fields: ['member', 'grant'], validate: b => shape(b, ['member', 'grant']) && isId(b.member) && b.grant === 'members.manage' ? ok : fail('Invalid grant.add'), apply: setGrant(true) },
   { name: 'grant.remove', fields: ['member', 'grant'], validate: b => shape(b, ['member', 'grant']) && isId(b.member) && b.grant === 'members.manage' ? ok : fail('Invalid grant.remove'), apply: setGrant(false) },
   { name: 'key.rotate', fields: ['epoch', 'recipientsHash'], validate: b => shape(b, ['epoch', 'recipientsHash']) && Number.isSafeInteger(b.epoch) && str(b.recipientsHash) ? ok : fail('Invalid key.rotate'), apply: rotate },
-  { name: 'client.minVersion', fields: ['version'], validate: b => shape(b, ['version']) && str(b.version) ? ok : fail('Invalid client.minVersion'), apply: setMinimum },
+  { name: 'client.minVersion', fields: ['version'], validate: b => shape(b, ['version']) && validVersion(b.version) ? ok : fail('Invalid client.minVersion'), apply: setMinimum },
 ];
 /** Canonical JSON: lexicographically sorted object keys, array order retained, UTF-8 for signing. */
 export function canonical(value: unknown): string {
@@ -114,6 +143,11 @@ export async function signEntry(unsigned: Omit<LogEntry, 'sig'>, privateKey: Cry
   return { ...message, sig };
 }
 function error(code: LogError['code'], seq: number, message: string): LogResult { return { ok: false, error: { code, seq, message } }; }
+export function initialLogState(entry: LogEntry): LogState {
+  const member = entry.body.creator as Member;
+  const settings = stage0Rules.legacy_settings(entry.body.name as string, entry.body.description as string ?? '');
+  return { settings: { name: settings.name, description: settings.description, defaultRole: 'read-write', visibility: 'private', joiningPolicy: 'invitation-only' }, pendingRotation: false, journey: entry.body.journey as string, members: { [member.id]: { member, grants: ['members.manage'] } }, grants: { [member.id]: ['members.manage'] }, currentEpoch: 1, minClientVersion: entry.body.minClientVersion as string, lastSeq: 0, lastHash: null };
+}
 export async function verifyLog(entries: readonly LogEntry[]): Promise<LogResult> {
   if (!entries.length) return error('invalid-entry', 0, 'Missing genesis');
   let state: LogState | undefined;
@@ -140,12 +174,12 @@ export async function verifyLog(entries: readonly LogEntry[]): Promise<LogResult
       if (!validation.ok) return error('invalid-entry', index, validation.reason);
     }
     if (index === 0) {
-      const member = entry.body.creator as Member;
-      state = { journey: entry.body.journey as string, members: { [member.id]: { member, grants: ['members.manage'] } }, grants: { [member.id]: ['members.manage'] }, currentEpoch: 1, minClientVersion: entry.body.minClientVersion as string, lastSeq: 0, lastHash: await hashEntry(entry) };
+      state = initialLogState(entry);
+      state.lastHash = await hashEntry(entry);
       continue;
     }
     const current = state!;
-    const failure = await definition.apply?.(current, entry.body, entry.actor);
+    const failure = await definition.apply?.(current, entry.body, entry.actor, entry.at);
     if (failure) return error(failure.code, index, failure.message);
     current.lastSeq = index;
     current.lastHash = await hashEntry(entry);

@@ -13,7 +13,7 @@ function state(): LogState {
     person: { member: hostMember('person', 'person', 'read'), grants: [], profile: { name: 'Person' } },
     agent: { member: hostMember('agent', 'agent', 'readwrite', 'person'), grants: [] },
     reader: { member: hostMember('reader', 'agent', 'read', 'person'), grants: [] },
-  }, grants: { guide: ['members.manage'], person: [], agent: [], reader: [] }, currentEpoch: 1, minClientVersion: '0.1.0', lastSeq: 0, lastHash: null };
+  }, grants: { guide: ['members.manage'], person: [], agent: [], reader: [] }, currentEpoch: 1, minClientVersion: '0.1.4', lastSeq: 0, lastHash: null };
 }
 
 describe('production Bend transitions and adapters', () => {

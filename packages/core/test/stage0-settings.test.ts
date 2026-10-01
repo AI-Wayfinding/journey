@@ -1,0 +1,21 @@
+import { expect, it } from 'vitest';
+import { validJoiningPolicy } from '../src/index.js';
+import { person, genesis, append, state, rejected, settings } from './stage0-fixture.js';
+it('replays guide settings and defaults normal admission without widening temporary support', async () => {
+  const guide = await person(), normal = await person(), support = await person();
+  let log = await append(await genesis(guide), guide, 'journey.settings', { ...settings, secret: 'do-not-store' });
+  expect(JSON.stringify(log)).not.toContain('do-not-store');
+  log = await append(log, guide, 'member.add', { member: normal.member, grants: [], kind: 'person' });
+  log = await append(log, guide, 'member.add', { member: { ...support.member, scope: 'read', support: true, expiresAt: '2027-01-01T00:00:00.000Z' }, grants: [], kind: 'person' });
+  const current = await state(log); expect(current.settings).toEqual(settings);
+  expect(current.members[normal.member.id]!.member.scope).toBe('read');
+  log = await append(log, guide, 'journey.settings', { ...settings, defaultRole: 'read-write' });
+  const next = await person(); log = await append(log, guide, 'member.add', { member: next.member, grants: [], kind: 'person' });
+  const after = await state(log); expect(after.members[next.member.id]!.member.scope ?? 'readwrite').toBe('readwrite');
+  expect(after.members[normal.member.id]!.member.scope).toBe('read');
+  expect(after.members[support.member.id]!.member).toMatchObject({ scope: 'read', support: true, expiresAt: '2027-01-01T00:00:00.000Z' });
+  for (const joiningPolicy of ['guide-approved', 'immediate']) await rejected(await append(log, guide, 'journey.settings', { ...settings, joiningPolicy }));
+  for (const policy of ['invitation-only', 'guide-approved', 'immediate']) expect(validJoiningPolicy(policy)).toBe(true);
+  expect(validJoiningPolicy('open')).toBe(false);
+  await rejected(await append(log, guide, 'journey.settings', { ...settings, visibility: 'public' }));
+});

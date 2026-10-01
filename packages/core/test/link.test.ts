@@ -46,7 +46,7 @@ describe('renewing an agent link', () => {
     const renewed = await renewAgentEntries(before.state, agent.id, owner.member.id, owner.key, '2026-02-01T00:00:00.000Z');
     expect(renewed.map(entry => entry.type)).toEqual(['member.remove', 'member.add']);
     const names = logDefinitions.map(definition => definition.name);
-    expect(names).toEqual(['genesis', 'member.add', 'member.rename', 'member.profile', 'member.remove', 'grant.add', 'grant.remove', 'key.rotate', 'client.minVersion']);
+    expect(names).toEqual(['genesis', 'journey.settings', 'member.renew', 'member.role', 'member.add', 'member.rename', 'member.profile', 'member.remove', 'grant.add', 'grant.remove', 'key.rotate', 'client.minVersion']);
     const after = await verifyLog([...entries, ...renewed]);
     expect(after.ok && after.state.members[agent.id]!.member).toMatchObject({ id: agent.id, recipient: agent.recipient, expiresAt: '2026-02-01T00:00:00.000Z', scope: 'read', name: 'Cowork', addedBy: owner.member.id });
     expect(after.ok && after.state.currentEpoch).toBe(1);

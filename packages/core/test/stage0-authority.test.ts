@@ -1,0 +1,25 @@
+import { expect, it } from 'vitest';
+import { canWriteContent } from '../src/index.js';
+import { person, agent, genesis, append, state, rejected, settings } from './stage0-fixture.js';
+it('keeps either-role guide authority separate from personal controls and content writes', async () => {
+  const guide = await person(), other = await person(), bot = await agent(other.member.id);
+  let log = await append(await genesis(guide), guide, 'member.add', { member: other.member, grants: [], kind: 'person' });
+  log = await append(log, guide, 'member.role', { member: guide.member.id, role: 'read-only' });
+  log = await append(log, guide, 'member.role', { member: other.member.id, role: 'read-only' });
+  expect(canWriteContent(await state(log), guide.member.id)).toBe(false);
+  log = await append(log, guide, 'journey.settings', settings);
+  await rejected(await append(log, other, 'journey.settings', settings), 'unauthorized');
+  await rejected(await append(log, other, 'member.role', { member: other.member.id, role: 'read-write' }), 'unauthorized');
+  await rejected(await append(log, guide, 'member.profile', { id: other.member.id, name: 'Forged' }), 'unauthorized');
+  log = await append(log, other, 'member.profile', { id: other.member.id, name: 'Self', email: 'self@example.org', secret: 'do-not-store' });
+  expect(JSON.stringify(log)).not.toContain('do-not-store');
+  log = await append(log, other, 'member.add', { member: { ...bot.member, secret: 'do-not-store' }, grants: [], kind: 'agent' });
+  log = await append(log, other, 'member.rename', { id: bot.member.id, name: 'Helper' });
+  await rejected(await append(log, bot, 'journey.settings', settings));
+  await rejected(await append(log, guide, 'grant.add', { member: bot.member.id, grant: 'members.manage' }));
+  await rejected(await append(log, guide, 'grant.remove', { member: guide.member.id, grant: 'members.manage' }), 'last-holder');
+  log = await append(log, guide, 'grant.add', { member: other.member.id, grant: 'members.manage' });
+  log = await append(log, other, 'journey.settings', settings);
+  expect(canWriteContent(await state(log), other.member.id)).toBe(false);
+  expect((await state(log)).members[other.member.id]!.profile).toEqual({ name: 'Self', email: 'self@example.org' });
+});

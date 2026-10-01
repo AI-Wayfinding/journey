@@ -1,0 +1,27 @@
+import { expect, it } from 'vitest';
+import { canWriteContent, canReadContent, removeMemberEntry, completeRotation, verifyLog } from '../src/index.js';
+import { person, agent, genesis, append, state, rejected } from './stage0-fixture.js';
+it('hands personal removal to a remaining read-only guide for rotation, excluding removed recipients', async () => {
+  const guide = await person(), owner = await person(), bot = await agent(owner.member.id), outsider = await person();
+  let log = await append(await genesis(guide), guide, 'member.add', { member: owner.member, grants: [], kind: 'person' });
+  log = await append(log, guide, 'member.add', { member: outsider.member, grants: [], kind: 'person' });
+  log = await append(log, owner, 'member.add', { member: bot.member, grants: [], kind: 'agent' });
+  await rejected(await append(log, outsider, 'member.remove', { member: bot.member.id }));
+  await rejected(await append(log, bot, 'member.remove', { member: bot.member.id }));
+  await rejected(await append(log, guide, 'member.remove', { member: guide.member.id }), 'last-holder');
+  log = await append(log, guide, 'member.role', { member: guide.member.id, role: 'read-only' });
+  log.push(await removeMemberEntry(await state(log), bot.member.id, owner.member.id, owner.key));
+  let current = await state(log); expect(current.pendingRotation).toBe(true);
+  expect(canWriteContent(current, owner.member.id)).toBe(false); expect(canReadContent(current, owner.member.id)).toBe(true);
+  await expect(completeRotation(current, owner.member.id, owner.key)).rejects.toThrow('members.manage');
+  log = await append(log, owner, 'member.profile', { id: owner.member.id, name: 'Still active' });
+  const rotated = await completeRotation(await state(log), guide.member.id, guide.key); log.push(rotated.entry);
+  current = await state(log); expect(current.pendingRotation).toBe(false); expect(canWriteContent(current, owner.member.id)).toBe(true);
+  expect(rotated.wraps.map(w => w.recipient)).not.toContain(bot.member.id);
+  const replacement = await agent(owner.member.id); log = await append(log, owner, 'member.add', { member: replacement.member, grants: [], kind: 'agent' });
+  log.push(await removeMemberEntry(await state(log), owner.member.id, owner.member.id, owner.key));
+  current = await state(log); expect(current.members[replacement.member.id]).toBeUndefined();
+  const completed = await completeRotation(current, guide.member.id, guide.key);
+  expect(completed.wraps.map(w => w.recipient)).not.toContain(owner.member.id);
+  expect((await verifyLog([...log, completed.entry])).ok).toBe(true);
+});

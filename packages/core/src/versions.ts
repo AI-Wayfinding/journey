@@ -1,3 +1,5 @@
+import rules from '@ai-wayfinding/rules';
+import type { Version } from '@ai-wayfinding/rules';
 export const PROTOCOL_VERSION = 1 as const;
 export const CLIENT_VERSION = '0.1.3' as const;
 function parts(value: string): number[] {
@@ -6,8 +8,10 @@ function parts(value: string): number[] {
   if (numbers.some(n => !Number.isSafeInteger(n))) throw new Error('Invalid client version');
   return numbers;
 }
+export function ruleVersion(value: string): Version {
+  const [major, minor, patch] = parts(value);
+  return { $: 'Version', major: BigInt(major!), minor: BigInt(minor!), patch: BigInt(patch!) };
+}
 export function meetsMinClientVersion(client: string, minimum: string): boolean {
-  const a = parts(client), b = parts(minimum);
-  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i]! > b[i]!;
-  return true;
+  return rules.version_ge(ruleVersion(client), ruleVersion(minimum));
 }

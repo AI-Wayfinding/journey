@@ -87,3 +87,43 @@ def Laws.removed_population_contains_only_survivors(xs, target, person):
       {==}
     case Con{+h, +t}:
       kept_population(target, person, h, R.remove(t, target, person), R.survives(target, person, h), {==}, Laws.removed_population_contains_only_survivors(t, target, person))
+
+def Laws.support_admission_stays_readonly(role):
+  {==}
+
+def Laws.normal_admission_uses_default(role):
+  {==}
+
+def Laws.legacy_settings_are_private_invitation_only(name, description):
+  {==}
+
+def Laws.public_settings_are_inactive(name, description, role, joining):
+  {==}
+
+def Laws.guide_approved_is_not_activated(name, description, role):
+  {==}
+
+def Laws.immediate_is_not_activated(name, description, role):
+  {==}
+
+def Laws.incompatible_controls_need_barrier(xs, settings, minimum, pending, control, e):
+  Equal.cong(Bool, R.JourneyTransition, b => R.upgrade_control(b, xs, settings, minimum, pending, control), R.stage_ready(minimum), False{}, e)
+
+def and_false(b: Bool) -> {b && False{} == False{} : Bool}:
+  match b:
+    case False{}:
+      {==}
+    case True{}:
+      {==}
+
+def Laws.minimum_cannot_decrease(xs, actor, settings, old, next, pending, e):
+  Equal.cong(Bool, R.JourneyTransition, b => R.journey_guard(b, R.JourneyState{xs, settings, next, pending}), R.is_guide(R.find(xs, actor)) && R.version_ge(next, old), False{}, Equal.trans(Bool, R.is_guide(R.find(xs, actor)) && R.version_ge(next, old), R.is_guide(R.find(xs, actor)) && False{}, False{}, Equal.cong(Bool, Bool, b => R.is_guide(R.find(xs, actor)) && b, R.version_ge(next, old), False{}, e), and_false(R.is_guide(R.find(xs, actor)))))
+
+def Laws.pending_rotation_blocks_content(access):
+  and_false(R.access_write(access))
+
+def Laws.journey_replay_is_production_transition(state, control):
+  {==}
+
+def Laws.settings_require_guide(xs, actor, settings, minimum, pending, e):
+  Equal.trans(R.JourneyTransition, R.configure(xs, actor, settings, minimum, pending), R.journey_guard((R.stage_ready(minimum) && False{}) && R.active_settings(settings), R.JourneyState{xs, settings, minimum, pending}), R.JourneyDenied{}, Equal.cong(Bool, R.JourneyTransition, b => R.journey_guard((R.stage_ready(minimum) && b) && R.active_settings(settings), R.JourneyState{xs, settings, minimum, pending}), R.is_guide(R.find(xs, actor)), False{}, e), Equal.cong(Bool, R.JourneyTransition, b => R.journey_guard(b && R.active_settings(settings), R.JourneyState{xs, settings, minimum, pending}), R.stage_ready(minimum) && False{}, False{}, and_false(R.stage_ready(minimum))))

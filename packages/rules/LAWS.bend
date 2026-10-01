@@ -110,3 +110,72 @@ law removed_population_contains_only_survivors:
   for +target: Nat
   for +person: Bool
   {R.all_survive(target, person, R.remove(xs, target, person)) == True{} : Bool}
+
+law support_admission_stays_readonly:
+  for role: R.Role
+  {R.admission_role(True{}, role) == R.ReadOnly{} : R.Role}
+
+law normal_admission_uses_default:
+  for role: R.Role
+  {R.admission_role(False{}, role) == role : R.Role}
+
+law legacy_settings_are_private_invitation_only:
+  for name: String
+  for description: String
+  {R.active_settings(R.legacy_settings(name, description)) == True{} : Bool}
+
+law public_settings_are_inactive:
+  for name: String
+  for description: String
+  for role: R.Role
+  for joining: R.Joining
+  {R.active_settings(R.JourneySettings{name, description, role, R.Public{}, joining}) == False{} : Bool}
+
+law guide_approved_is_not_activated:
+  for name: String
+  for description: String
+  for role: R.Role
+  {R.active_settings(R.JourneySettings{name, description, role, R.Private{}, R.GuideApproved{}}) == False{} : Bool}
+
+law immediate_is_not_activated:
+  for name: String
+  for description: String
+  for role: R.Role
+  {R.active_settings(R.JourneySettings{name, description, role, R.Private{}, R.Immediate{}}) == False{} : Bool}
+
+law incompatible_controls_need_barrier:
+  for +xs: +List<R.Member>
+  for +settings: R.JourneySettings
+  for +minimum: R.Version
+  for +pending: Bool
+  for control: R.Control
+  for e: {R.stage_ready(minimum) == False{} : Bool}
+  {R.journey_apply(R.JourneyState{xs, settings, minimum, pending}, R.NewControl{control}) == R.UpgradeRequired{} : R.JourneyTransition}
+
+law minimum_cannot_decrease:
+  for +xs: +List<R.Member>
+  for +actor: Nat
+  for +settings: R.JourneySettings
+  for +old: R.Version
+  for +next: R.Version
+  for +pending: Bool
+  for e: {R.version_ge(next, old) == False{} : Bool}
+  {R.minimum_change(xs, actor, settings, old, next, pending) == R.JourneyDenied{} : R.JourneyTransition}
+
+law pending_rotation_blocks_content:
+  for access: Maybe<&2, R.Role>
+  {R.content_write(access, True{}) == False{} : Bool}
+
+law journey_replay_is_production_transition:
+  for state: R.JourneyState
+  for control: R.JourneyControl
+  {R.journey_replay(control <> Nil{}, R.JourneyAccepted{state}) == R.journey_apply(state, control) : R.JourneyTransition}
+
+law settings_require_guide:
+  for +xs: +List<R.Member>
+  for +actor: Nat
+  for +settings: R.JourneySettings
+  for +minimum: R.Version
+  for +pending: Bool
+  for e: {R.is_guide(R.find(xs, actor)) == False{} : Bool}
+  {R.configure(xs, actor, settings, minimum, pending) == R.JourneyDenied{} : R.JourneyTransition}

@@ -1,5 +1,6 @@
 import rules from '@ai-wayfinding/rules';
-import type { Control, List, Member as RuleMember, Role, Transition } from '@ai-wayfinding/rules';
+import type { Control, List, Member as RuleMember, Role, Transition, JourneySettings, JourneyControl } from '@ai-wayfinding/rules';
+import { ruleVersion } from './versions.js';
 import type { LogState, Member } from './log.js';
 
 export const contentRole = (scope: Member['scope']): Role => ({ $: scope === 'read' ? 'ReadOnly' : 'ReadWrite' });
@@ -34,7 +35,7 @@ export function isPersonGuide(state: LogState, principal: string): boolean {
 }
 export function canWriteContent(state: LogState, principal: string, now = Date.now()): boolean {
   const model = normalizedMembers(state, [principal], now);
-  return rules.access_write(rules.member_access(rules.find(model.members, model.id(principal)), model.members));
+  return rules.content_write(rules.member_access(rules.find(model.members, model.id(principal)), model.members), state.pendingRotation === true);
 }
 export function canReadContent(state: LogState, principal: string, now = Date.now()): boolean {
   const model = normalizedMembers(state, [principal], now);
@@ -45,8 +46,8 @@ export function effectiveScope(state: LogState, principal: string, now = Date.no
   const access = rules.member_access(rules.find(model.members, model.id(principal)), model.members);
   return access.$ === 'None' ? null : access.value.$ === 'ReadOnly' ? 'read' : 'readwrite';
 }
-export function replayControl(state: LogState, actor: string, operation: Control['$'], target?: string, addition?: Member, guide = false, role: Role = { $: 'ReadWrite' }): { transition: Transition; model: ReturnType<typeof normalizedMembers> } {
-  const model = normalizedMembers(state, [actor, ...(target ? [target] : []), ...(addition ? [addition.id, ...(addition.addedBy ? [addition.addedBy] : [])] : [])]);
+export function replayControl(state: LogState, actor: string, operation: Control['$'], target?: string, addition?: Member, guide = false, role: Role = { $: 'ReadWrite' }, now?: number): { transition: Transition; model: ReturnType<typeof normalizedMembers>; journey: ReturnType<typeof replayJourneyControl> } {
+  const model = normalizedMembers(state, [actor, ...(target ? [target] : []), ...(addition ? [addition.id, ...(addition.addedBy ? [addition.addedBy] : [])] : [])], now);
   let control: Control;
   switch (operation) {
     case 'Add': control = { $: 'Add', actor: model.id(actor), member: model.member(addition!, guide) }; break;
@@ -55,7 +56,10 @@ export function replayControl(state: LogState, actor: string, operation: Control
     case 'Settings': case 'Rotate': control = { $: operation, actor: model.id(actor) }; break;
     default: control = { $: operation, actor: model.id(actor), target: model.id(target) }; break;
   }
-  return { transition: rules.replay(ruleList([control]), { $: 'Accepted', members: model.members }), model };
+  const result = replayJourneyControl(state, model, { $: operation === 'RoleChange' || operation === 'Renew' ? 'NewControl' : 'LegacyControl', control });
+  const transition: Transition = result.$ === 'JourneyAccepted' ? { $: 'Accepted', members: result.state.members }
+    : { $: result.$ === 'JourneyLastGuide' ? 'LastGuide' : result.$ === 'JourneyInvalid' || result.$ === 'UpgradeRequired' ? 'Invalid' : 'Denied' };
+  return { transition, model, journey: result };
 }
 /** Project the Bend result into host-owned names, keys and profiles. */
 export function projectMembers(state: LogState, transition: Extract<Transition, { $: 'Accepted' }>, model: ReturnType<typeof normalizedMembers>, addition?: Member): void {
@@ -90,4 +94,18 @@ export function canRenameAgent(state: LogState, actor: string, target: string): 
 export function ownsAgent(state: LogState, actor: string, target: string): boolean {
   const model = normalizedMembers(state, [actor, target]);
   return rules.own_agent(model.members, model.id(actor), rules.find(model.members, model.id(target)));
+}
+
+export function ruleSettings(state: LogState): JourneySettings {
+  const settings = state.settings;
+  return settings ? { $: 'JourneySettings', name: settings.name, description: settings.description,
+    defaultRole: { $: settings.defaultRole === 'read-only' ? 'ReadOnly' : 'ReadWrite' },
+    visibility: { $: settings.visibility === 'private' ? 'Private' : 'Public' },
+    joining: { $: settings.joiningPolicy === 'invitation-only' ? 'InvitationOnly' : settings.joiningPolicy === 'guide-approved' ? 'GuideApproved' : 'Immediate' } }
+    : rules.legacy_settings('', '');
+}
+export function replayJourneyControl(state: LogState, model: ReturnType<typeof normalizedMembers>, control: JourneyControl) {
+  return rules.journey_replay(ruleList([control]), { $: 'JourneyAccepted', state: {
+    $: 'JourneyState', members: model.members, settings: ruleSettings(state), minimum: ruleVersion(state.minClientVersion), pending: state.pendingRotation === true,
+  } });
 }

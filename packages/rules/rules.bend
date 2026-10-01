@@ -45,10 +45,10 @@ def is_person(m: Maybe<&2, Member>) -> Bool:
   match m:
     case None{}:
       False{}
-    case Some{Member{_, kind, _, _, _, _, _}}:
+    case Some{Member{_, kind, _, _, _, _, live}}:
       match kind:
         case Person{}:
-          True{}
+          live
         case Agent{}:
           False{}
 
@@ -160,6 +160,7 @@ type Control is Data:
   Profile{actor: Nat, target: Nat}
   Rename{actor: Nat, target: Nat}
   Rotate{actor: Nat}
+  Renew{actor: Nat, target: Nat}
 
 type Transition is Data:
   Accepted{members: +List<Member>}
@@ -233,6 +234,13 @@ def rename_checked(person: Bool, allowed: Bool, xs: +List<Member>) -> Transition
     case False{}:
       guard(allowed, xs)
 
+def own_agent(+xs: +List<Member>, +actor: Nat, target: Maybe<&2, Member>) -> Bool:
+  match target:
+    case None{}:
+      False{}
+    case Some{Member{_, kind, _, _, owner, _, _}}:
+      is_person(find(xs, actor)) && owned_agent(kind, owner, actor)
+
 # Replay accepts only normalized, already signature/chain-verified controls.
 def apply(+xs: +List<Member>, control: Control) -> Transition:
   match control:
@@ -253,6 +261,8 @@ def apply(+xs: +List<Member>, control: Control) -> Transition:
       rename_checked(is_person(find(xs, target)), rename_authority(xs, actor, find(xs, target)), xs)
     case Rotate{actor}:
       guard(is_guide(find(xs, actor)), xs)
+    case Renew{+actor, target}:
+      guard(own_agent(xs, actor, find(xs, target)), xs)
 
 
 def replay_step(state: Transition, control: Control) -> Transition:
@@ -319,15 +329,155 @@ def rotation_holdings(xs: +List<Member>, +epoch: Nat) -> +List<Holding>:
 def remove_and_rotate(xs: +List<Member>, target: Nat, person: Bool, epoch: Nat) -> +List<Holding>:
   rotation_holdings(remove(xs, target, person), epoch)
 
-def own_agent(+xs: +List<Member>, +actor: Nat, target: Maybe<&2, Member>) -> Bool:
-  match target:
-    case None{}:
-      False{}
-    case Some{Member{_, kind, _, _, owner, _, _}}:
-      is_person(find(xs, actor)) && owned_agent(kind, owner, actor)
-
 # Query a candidate's symbolic delivery in the next epoch. Old holdings are
 # deliberately unchanged; a removal cannot revoke an earlier downloaded key.
 def next_holding(+target: Nat, person: Bool, +member: Member, epoch: Nat) -> Maybe<&2, Holding>:
   Member{+id, _, _, _, _, _, _} = member
   Bool.pick(Maybe<&2, Holding>, new_epoch_key(target, person, member), Some{Holding{id, epoch}}, None{})
+
+# Durable journey settings are independent of encrypted transport. All D41
+# policies are representable; only invitation-only is active in Stage 0.
+type Visibility is Data:
+  Private{}
+  Public{}
+
+type Joining is Data:
+  InvitationOnly{}
+  GuideApproved{}
+  Immediate{}
+
+type JourneySettings is Data:
+  JourneySettings{name: String, description: String, defaultRole: Role, visibility: Visibility, joining: Joining}
+
+def active_settings(s: JourneySettings) -> Bool:
+  match s:
+    case JourneySettings{_, _, _, Private{}, InvitationOnly{}}:
+      True{}
+    case JourneySettings{_, _, _, _, _}:
+      False{}
+
+def legacy_settings(name: String, description: String) -> JourneySettings:
+  JourneySettings{name, description, ReadWrite{}, Private{}, InvitationOnly{}}
+
+def admission_role(support: Bool, defaultRole: Role) -> Role:
+  match support:
+    case True{}:
+      ReadOnly{}
+    case False{}:
+      defaultRole
+
+def admitted_member(member: Member, defaultRole: Role) -> Member:
+  match member:
+    case Member{id, Person{}, _, guide, owner, +support, live}:
+      Member{id, Person{}, admission_role(support, defaultRole), guide, owner, support, live}
+    case Member{id, Agent{}, role, guide, owner, support, live}:
+      Member{id, Agent{}, role, guide, owner, support, live}
+
+type Version is Data:
+  Version{major: Nat, minor: Nat, patch: Nat}
+
+def version_ge(a: Version, b: Version) -> Bool:
+  Version{+am, +an, ap} = a
+  Version{+bm, +bn, bp} = b
+  Nat.is_gt(am, bm) || (Nat.is_eq(am, bm) && (Nat.is_gt(an, bn) || (Nat.is_eq(an, bn) && Nat.is_ge(ap, bp))))
+
+def stage_ready(v: Version) -> Bool:
+  version_ge(v, Version{0n, 1n, 4n})
+
+# The old minimum entry is the migration barrier. Unknown or incompatible
+# controls may never be replayed first, even when signed by a guide.
+type JourneyState is Data:
+  JourneyState{members: +List<Member>, settings: JourneySettings, minimum: Version, pending: Bool}
+
+type JourneyControl is Data:
+  LegacyControl{control: Control}
+  NewControl{control: Control}
+  Configure{actor: Nat, settings: JourneySettings}
+  Minimum{actor: Nat, version: Version}
+
+type JourneyTransition is Data:
+  JourneyAccepted{state: JourneyState}
+  JourneyDenied{}
+  JourneyInvalid{}
+  JourneyLastGuide{}
+  UpgradeRequired{}
+
+def journey_guard(allowed: Bool, state: JourneyState) -> JourneyTransition:
+  match allowed:
+    case False{}:
+      JourneyDenied{}
+    case True{}:
+      JourneyAccepted{state}
+
+def configure(+xs: +List<Member>, actor: Nat, +settings: JourneySettings, +minimum: Version, pending: Bool) -> JourneyTransition:
+  journey_guard(stage_ready(minimum) && is_guide(find(xs, actor)) && active_settings(settings), JourneyState{xs, settings, minimum, pending})
+
+def minimum_change(+xs: +List<Member>, actor: Nat, settings: JourneySettings, +old: Version, +next: Version, pending: Bool) -> JourneyTransition:
+  journey_guard(is_guide(find(xs, actor)) && version_ge(next, old), JourneyState{xs, settings, next, pending})
+
+def content_write(access: Maybe<&2, Role>, pending: Bool) -> Bool:
+  access_write(access) && Bool.not(pending)
+
+def control_pending(control: Control, pending: Bool) -> Bool:
+  match control:
+    case Remove{_, _}:
+      True{}
+    case Rotate{_}:
+      False{}
+    case _:
+      pending
+
+def admission_control(control: Control, settings: JourneySettings, upgraded: Bool) -> Control:
+  match control:
+    case Add{actor, +member}:
+      JourneySettings{_, _, defaultRole, _, _} = settings
+      Add{actor, Bool.pick(Member, upgraded, admitted_member(member, defaultRole), member)}
+    case other:
+      other
+
+def journey_result(result: Transition, settings: JourneySettings, minimum: Version, pending: Bool) -> JourneyTransition:
+  match result:
+    case Accepted{members}:
+      JourneyAccepted{JourneyState{members, settings, minimum, pending}}
+    case Denied{}:
+      JourneyDenied{}
+    case Invalid{}:
+      JourneyInvalid{}
+    case LastGuide{}:
+      JourneyLastGuide{}
+
+def journey_control(xs: +List<Member>, +settings: JourneySettings, +minimum: Version, +pending: Bool, +control: Control) -> JourneyTransition:
+  journey_result(apply(xs, admission_control(control, settings, stage_ready(minimum))), settings, minimum, Bool.pick(Bool, stage_ready(minimum), control_pending(control, pending), pending))
+
+def upgrade_control(ready: Bool, xs: +List<Member>, settings: JourneySettings, minimum: Version, pending: Bool, control: Control) -> JourneyTransition:
+  match ready:
+    case False{}:
+      UpgradeRequired{}
+    case True{}:
+      journey_control(xs, settings, minimum, pending, control)
+
+def journey_apply(state: JourneyState, control: JourneyControl) -> JourneyTransition:
+  JourneyState{xs, settings, +minimum, pending} = state
+  match control:
+    case LegacyControl{control}:
+      journey_control(xs, settings, minimum, pending, control)
+    case NewControl{control}:
+      upgrade_control(stage_ready(minimum), xs, settings, minimum, pending, control)
+    case Configure{actor, settings}:
+      configure(xs, actor, settings, minimum, pending)
+    case Minimum{actor, version}:
+      minimum_change(xs, actor, settings, minimum, version, pending)
+
+def journey_replay_step(result: JourneyTransition, control: JourneyControl) -> JourneyTransition:
+  match result:
+    case JourneyAccepted{state}:
+      journey_apply(state, control)
+    case other:
+      other
+
+def journey_replay(controls: +List<JourneyControl>, result: JourneyTransition) -> JourneyTransition:
+  match controls:
+    case Nil{}:
+      result
+    case Con{head, tail}:
+      journey_replay(tail, journey_replay_step(result, head))
