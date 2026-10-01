@@ -63,12 +63,14 @@ export async function signedControl(key: JourneyKey, id: string, entry: LogEntry
   return { envelope, proof: await signControlProof(entry, envelope, id, await importSigningKey(privateKey)) };
 }
 export async function journey(owner: Owner) {
+  // This helper exercises Stage 0 record workflows until the client artifact node replaces them.
+  // Storage tests separately use a signed Stage 1 minimum and require artifact-v1.
   const id = newId(), key = generateJourneyKey();
-  const first = await signedControl(key, id, { v: 1, seq: 0, prev: null, at: new Date().toISOString(), actor: owner.principal, type: 'genesis', body: { journey: id, name: 'Journey test', creator: { id: owner.principal, kind: 'person', recipient: owner.age.recipient, signingKey: owner.signing.publicKey }, grants: ['members.manage'], mode: 'sealed', visibility: 'private', minClientVersion: '0.1.5' } }, owner.signing.privateKey);
+  const first = await signedControl(key, id, { v: 1, seq: 0, prev: null, at: new Date().toISOString(), actor: owner.principal, type: 'genesis', body: { journey: id, name: 'Journey test', creator: { id: owner.principal, kind: 'person', recipient: owner.age.recipient, signingKey: owner.signing.publicKey }, grants: ['members.manage'], mode: 'sealed', visibility: 'private', minClientVersion: '0.1.4' } }, owner.signing.privateKey);
   const recovery = await createAgeIdentity();
   const recoveryWrap = (await wrapJourneyKey(key, [{ id: 'recovery', recipient: recovery.recipient }]))[0]!.ciphertext;
   const wraps = (await wrapJourneyKey(key, [{ id: owner.principal, recipient: owner.age.recipient }])).map(wrap => ({ principal: wrap.recipient, epoch: wrap.epoch, wrap: wrap.ciphertext }));
-  const created = await request('/v1/journeys', 'POST', { id, name: 'Journey test', creator: { id: owner.principal, recipient: owner.age.recipient, signingKey: owner.signing.publicKey }, control: first, wraps, recoveryWrap, minClientVersion: '0.1.5' }, { Cookie: owner.cookie });
+  const created = await request('/v1/journeys', 'POST', { id, name: 'Journey test', creator: { id: owner.principal, recipient: owner.age.recipient, signingKey: owner.signing.publicKey }, control: first, wraps, recoveryWrap, minClientVersion: '0.1.4' }, { Cookie: owner.cookie });
   expect(created.status).toBe(201);
   return { id, key, entries: [first] };
 }
