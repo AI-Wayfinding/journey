@@ -33,7 +33,12 @@ it('keeps the existing paged link overview read-only with artifact text/metadata
   expect(page).toBeGreaterThan(1); expect(reconstructed).toContain(text.content.markdown);
   expect(reconstructed).toContain('Whole artifact comment'); expect(reconstructed).toContain('SECRET filename.txt');
   expect(all).not.toContain('HIDDEN RECOVERY'); expect(all).not.toContain(attachment.descriptor.digest);
-  for (const suffix of ['search', 'show', `blobs/${attachment.descriptor.id}`]) expect((await request(`/a/${secret}/${suffix}`)).status).not.toBe(200);
+  for (const suffix of ['search', 'show', `blobs/${attachment.descriptor.id}`]) {
+    const response = await request(`/a/${secret}/${suffix}`);
+    // Unknown non-API paths can receive the existing SPA fallback, never link data.
+    if (response.ok) expect(response.headers.get('Content-Type')).toContain('text/html');
+    expect(await response.text()).not.toContain('LONG ARTIFACT TEXT');
+  }
   expect((await request(`/a/${secret}`, 'POST', { control: await artifact(j, owner, 'artifact.create', await body(owner)) })).status).not.toBe(201);
   expect((await submit(j, owner, await artifact(j, owner, 'artifact.delete', { format: 'artifact-v1', artifact: b.artifact, author: owner.principal, actor: owner.principal }))).status).toBe(201);
   const hidden = await (await request('/a/' + secret)).text();
