@@ -67,7 +67,7 @@ Visibility changes, projects, artifact migration, private interview access and p
 
 ## Stage 1 artifacts
 
-Stage 1 contracts are in `packages/core/src/artifacts.ts`. Storage and interface nodes implement their delivery separately. These artifacts are journey-visible, not author-private. Reserved types `html`, `applet`, `interview`, `sensemaking-document` and internal `recovery` are not active artifact types.
+Stage 1 contracts are in `packages/core/src/artifacts.ts`; portable binary crypto is in `packages/core/src/blobs.ts`. The server provides authenticated local/production R2 transport and the browser and CLI/MCP implement artifact and attachment workflows. These artifacts are journey-visible, not author-private. Reserved types `html`, `applet`, `interview`, `sensemaking-document` and internal `recovery` are not active artifact types.
 
 ### Signed actions and identity
 
@@ -105,15 +105,15 @@ The complete decrypted record is at most 1,048,576 UTF-8 JSON bytes. Unknown fie
 | `data` | `format:json\|csv\|toml\|yaml\|sqlite`, and exactly one of `text` or `primary`; SQLite requires an attachment |
 | `link` | absolute `http:` or `https:` `url`, supplied `summary` and `notes` |
 
-Attachments are `{blob,name,mime,path?}`. Each version allows at most eight distinct blob IDs. Names and MIME strings stay encrypted and do not authorize inline rendering. Package paths are relative display paths of at most 255 characters; empty components, `.`/`..`, backslashes, colons and control characters are refused. Skill attachments require paths, unique by exact value, and cannot replace `SKILL.md`. No archive extraction, dependency execution or remote fetching is part of the contract. URL credentials, whitespace/control characters, relative URLs and non-web schemes are refused. Validation never fetches a URL. Renderer nodes must keep links inert until deliberately opened and must not load remote images or execute Markdown HTML.
+Attachments are `{blob,name,mime,path?}`. Each version allows at most eight distinct blob IDs. Names and MIME strings stay encrypted and do not authorize inline rendering. Package paths are relative display paths of at most 255 characters; empty components, `.`/`..`, backslashes, colons and control characters are refused. Skill attachments require paths, unique by exact value, and cannot replace `SKILL.md`. No archive extraction, dependency execution or remote fetching is part of the contract. URL credentials, whitespace/control characters, relative URLs and non-web schemes are refused. Validation never fetches a URL. The browser keeps links inert until deliberately opened and does not load remote images or execute Markdown HTML.
 
 Keyed readers verify the encrypted content's type commitment and attachment descriptor list against the public proof. Content is never interpreted as actions, actor or grants. Public replay cannot inspect private content; keyed replay rejects malformed artifact payloads. Existing controls still accept only `control.labels`; artifact content does not weaken that rule. `readArtifactPayload` is a content decoder and must be called only after verifying the proof chain.
 
-### Blob descriptor and next-node crypto contract
+### Blob descriptor and binary crypto
 
 A descriptor is exactly `{v:1,journey,id,epoch,size,ciphertextSize,nonce,digest}`. Epochs start at 1. Raw `size` is an integer from zero through 25,000,000 inclusive. `ciphertextSize` is exactly `size + 16`. `nonce` is canonical base64 for 12 random bytes; `digest` is canonical base64 SHA-256 of the binary ciphertext including the AES-GCM tag.
 
-Binary blob encryption uses the journey epoch's 256-bit AES-GCM key and a fresh nonce. Associated data is UTF-8 canonical JSON for `{v:1,journey,id,epoch,size}`. Nonce travels in the descriptor, not prepended to the stored bytes. The blob-crypto node implements binary encryption/decryption; R2 stores those binary bytes, not base64 or data URLs. Base64 is used only when embedding bytes in the encrypted JSON archive. Readers verify digest, lengths and authenticated metadata. The 25,000,000-byte binary limit does not widen the JSON cap.
+Binary blob encryption uses the journey epoch's 256-bit AES-GCM key and a fresh nonce. Associated data is UTF-8 canonical JSON for `{v:1,journey,id,epoch,size}`. Nonce travels in the descriptor, not prepended to the stored bytes. `sealBlob` and `openBlob` implement binary encryption/decryption; R2 stores those binary bytes, not base64 or data URLs. Base64 is used only when embedding bytes in the encrypted JSON archive. Readers verify digest, lengths and authenticated metadata. The 25,000,000-byte binary limit does not widen the JSON cap.
 
 A later version may reuse an identical committed descriptor from an undeleted version of the same artifact. Descriptors cannot change after an ID is referenced. Cross-artifact references, including references previously used by a deleted artifact, conflict. All versions of an undeleted artifact retain live references, even attachments absent from the current head. Whole-artifact deletion ends those live references; cleanup must never remove a live reference. New staged blobs remain subject to uploader ownership, completion, current epoch and current-write checks in storage.
 
@@ -137,7 +137,17 @@ Stage 1 uses client/interface version `0.1.5` and both capabilities `control-pro
 
 Import and export both verify the archive against separately pinned `{journey,creator}`, public signatures and the full chain before returning content. All control keys must be available, keyed payloads must match their public projections, and blob digests, lengths, AES-GCM metadata and surviving references must verify. Missing live bytes, unreferenced bytes, duplicate IDs and unexpected fields fail. Only named fields survive output. Archive format/version mismatches are refused; legacy `importJourney` is separate and is not a Stage 1 migration path. A complete valid earlier chain is still a possible rollback without an external checkpoint. Downloaded archives, keys and content cannot be recalled.
 
-The Bend proofs cover symbolic authority and reference transitions in production functions. They do not claim cryptographic certification, upload atomicity or future UI rendering safety.
+The Bend proofs cover symbolic authority and reference transitions in production functions. They do not claim cryptographic certification. Local workerd/R2 tests exercise atomic commits and export, and browser tests separately exercise rendering safety.
+
+### Local integration checks
+
+Build rules and core before consuming them; build the client before tests that execute its CLI/MCP. Run suites serially, especially browser and client integration tests sharing port 18787. Test configs use local R2 and do not require HOME, live services or deployment. Builds write ignored outputs; evidence must not change tracked files.
+
+`node scripts/check-bend-boundary.mjs --rules` parses TypeScript expressions and required call sites. It rejects duplicated role, attribution, predecessor/reference authority and stubbed artifact adapters while retaining the Stage 0 checks. `--build` checks shared dependency/build ordering and `--guidance` checks the existing Bend instructions.
+
+`node scripts/check-stage1-negative-controls.mjs` copies tracked source into disposable ignored `.scratch/` trees, uses read-only dependency links, builds separate rules/core outputs and runs one named test per mutation. A mutation is a deliberately weakened production guard. The runner first demands passing baselines, then assertion failures for public signature/ciphertext binding, private-action rejection, creator/writer attribution, stale predecessors, cross-artifact references, inherited write access/minimums, upload ownership/completion/current access, deleted downloads/live-reference collection, byte limits/digests, URL validation and safe rendering. Bend mutations must also reject the actual production proofs in both modes. Boundary probes inject duplicated TypeScript decisions and replace an adapter with a stub. Missing tests, setup failures and surviving mutations cannot count as success; harness controls exercise all three cases. The runner deletes its disposable trees on success or failure and checks the tracked diff remains unchanged.
+
+Full Stage 1 regression includes package typechecks/builds, both Bend proof modes, Node/workerd/browser core suites, server workerd/R2, web unit/end-to-end and built-client unit/integration suites, followed by the focused Stage 1 suites and negative controls. `packages/server/test/stage1-storage.test.ts` round-trips a server archive with another writer, comments, historic live attachments and tombstoned metadata. `packages/server/test/stage1-link.test.ts` reloads the read-only paged overview, checks real writer attribution and newer-minimum refusal, and excludes deleted/recovery content and attachment download routes.
 
 ## Removal and export
 

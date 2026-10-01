@@ -274,6 +274,11 @@ describe('Stage 1 authenticated local R2 lifecycle', () => {
     for (const blob of [abandoned, live, deleted]) expect((await upload(j, owner, blob)).status).toBe(201);
     const a = await body(owner, [live]), d = await body(owner, [deleted]);
     expect((await submit(j, owner, await artifact(j, owner, 'artifact.create', a, payload([live])))).status).toBe(201);
+    const guest = await addPerson(j, owner);
+    const revised = { ...a, actor: guest.principal, version: newId(), predecessor: a.version, blobs: [] };
+    expect((await submit(j, guest, await artifact(j, guest, 'artifact.version', revised))).status).toBe(201);
+    const comment = { format: 'artifact-v1', artifact: a.artifact, author: owner.principal, actor: guest.principal, comment: newId(), onVersion: a.version };
+    expect((await submit(j, guest, await artifact(j, guest, 'artifact.comment', comment, { text: 'SECRET historic context' }))).status).toBe(201);
     expect((await submit(j, owner, await artifact(j, owner, 'artifact.create', d, payload([deleted])))).status).toBe(201);
     expect((await submit(j, owner, await artifact(j, owner, 'artifact.delete', { format: 'artifact-v1', artifact: d.artifact, author: owner.principal, actor: owner.principal }))).status).toBe(201);
     await collect(j);
@@ -300,6 +305,12 @@ describe('Stage 1 authenticated local R2 lifecycle', () => {
     const imported = await importArtifactJourney(encrypted, [owner.age.identity], trust);
     expect(imported.archive).toEqual(archive);
     expect(imported.state.artifacts!.items[String(d.artifact)]!.deleted).toBe(true);
-    expect(imported.state.artifacts!.items[String(a.artifact)]!.deleted).toBe(false);
+    const surviving = imported.state.artifacts!.items[String(a.artifact)]!;
+    expect(surviving.deleted).toBe(false); expect(surviving.author).toBe(owner.principal);
+    expect(surviving.versions.map(v => v.actor)).toEqual([owner.principal, guest.principal]);
+    expect(surviving.versions[1]!.blobs).toEqual([]);
+    expect(surviving.comments[0]).toMatchObject({ actor: guest.principal, onVersion: a.version });
+    const saved = imported.archive.blobs[0]!;
+    expect(await openBlob(new Uint8Array(Buffer.from(saved.ciphertext, 'base64')), saved.descriptor, j.key)).toEqual(new TextEncoder().encode('SECRET attachment bytes'));
   });
 });

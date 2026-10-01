@@ -1,7 +1,7 @@
 import { expect, it } from 'vitest';
 import { linkLookupHash, newId, newLinkSecret, seal, sealLinkIdentity } from '@ai-wayfinding/core';
 import { PAGE_LIMIT } from '../src/agentLink.js';
-import { addAgent, artifact, as, body, change, fixture, payload, request, staged, submit, upload } from './stage1-fixtures.js';
+import { addAgent, artifact, as, body, change, fixture, payload, request, agentHeaders, staged, submit, upload } from './stage1-fixtures.js';
 
 it('keeps the existing paged link overview read-only with artifact text/metadata and no recovery or downloads', async () => {
   const { owner, j } = await fixture(), agent = await addAgent(j, owner, 'read', true);
@@ -9,9 +9,15 @@ it('keeps the existing paged link overview read-only with artifact text/metadata
   expect((await request(`/v1/journeys/${j.id}/agent-links`, 'POST', { sessionId: agent.id, hash: await linkLookupHash(secret), blob: await sealLinkIdentity(secret, agent.age.identity, j.id, agent.principal) }, as(owner))).status).toBe(201);
   const attachment = await staged(j, owner);
   expect((await upload(j, owner, attachment)).status).toBe(201);
+  const writer = await addAgent(j, owner, 'readwrite');
   const b = await body(owner, [attachment]);
   const text = { ...payload([attachment]), title: 'Paged artifact', content: { kind: 'document', markdown: 'LONG ARTIFACT TEXT '.repeat(1500) } };
-  expect((await submit(j, owner, await artifact(j, owner, 'artifact.create', b, text))).status).toBe(201);
+  expect((await submit(j, owner, await artifact(j, owner, 'artifact.create', b, { ...text, title: 'Original title', content: { kind: 'document', markdown: 'Superseded text' } }))).status).toBe(201);
+  const edit = { ...b, actor: writer.principal, version: newId(), predecessor: b.version };
+  const signedEdit = await artifact(j, writer, 'artifact.version', edit, text);
+  const editPath = `/v1/journeys/${j.id}/log`, editBody = { control: signedEdit };
+  expect((await request(editPath, 'POST', editBody, await agentHeaders(writer, 'POST', editPath, editBody))).status).toBe(201);
+  j.controls.push(signedEdit);
   const comment = { format: 'artifact-v1', artifact: b.artifact, author: owner.principal, actor: owner.principal, comment: newId() };
   expect((await submit(j, owner, await artifact(j, owner, 'artifact.comment', comment, { text: 'Whole artifact comment' }))).status).toBe(201);
   const reserved = await (await request(`/v1/journeys/${j.id}/seq`, 'POST', {}, as(owner))).json() as { seq: number; epoch: number };
@@ -25,13 +31,14 @@ it('keeps the existing paged link overview read-only with artifact text/metadata
     const raw = await response.text(); expect(new TextEncoder().encode(raw).length).toBeLessThanOrEqual(PAGE_LIMIT);
     const data = JSON.parse(raw);
     expect(data.access.scope).toBe('read'); expect(data.howToWrite).toContain('read-only'); expect(data.attachments).toContain('member interface');
-    for (const item of data.items) { expect(item.id).toBe(b.artifact); expect(item.author.kind).toBe('person'); expect(item.writer.kind).toBe('person'); reconstructed += item.body; }
+    for (const item of data.items) { expect(item.id).toBe(b.artifact); expect(item.author.kind).toBe('person'); expect(item.writer.kind).toBe('agent'); expect(item.writer.name).toBe('Bot'); expect(item.version).toBe(edit.version); reconstructed += item.body; }
     all += raw;
     if (!data.page.next) break;
     expect(data.page.next).toBe(`https://app.wayfinding.support/a/${secret}?page=${++page}`);
   }
   expect(page).toBeGreaterThan(1); expect(reconstructed).toContain(text.content.markdown);
   expect(reconstructed).toContain('Whole artifact comment'); expect(reconstructed).toContain('SECRET filename.txt');
+  expect(all).not.toContain('Superseded text');
   expect(all).not.toContain('HIDDEN RECOVERY'); expect(all).not.toContain(attachment.descriptor.digest);
   for (const suffix of ['search', 'show', `blobs/${attachment.descriptor.id}`]) {
     const response = await request(`/a/${secret}/${suffix}`);
