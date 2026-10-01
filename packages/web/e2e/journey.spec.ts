@@ -361,7 +361,7 @@ test('two people share a journey with PRF passkeys and same-origin assets', asyn
     await expect(support.page.getByRole('link', { name: 'Add an item' })).toHaveCount(0);
     await expect(support.page.getByRole('link', { name: 'Only after Bob left' })).toBeVisible();
     await support.page.getByRole('link', { name: 'First observation' }).click();
-    await expect(support.page.getByText('A note shared with Bob')).toBeVisible();
+    await expect(support.page.locator('section > pre').filter({ hasText: 'A note shared with Bob' })).toBeVisible();
     await expect(support.page.getByText('I can see this now.')).toBeVisible();
     await support.page.reload();
     await expect(support.page.locator('section > pre').filter({ hasText: 'A note shared with Bob' })).toBeVisible();
