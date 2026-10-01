@@ -67,6 +67,43 @@ describe('Stage 1 authenticated local R2 lifecycle', () => {
     expect(await stored(j)).not.toContain('CALLER EXTRA');
   });
 
+  it('holds a stage exclusively during upload and commits attachment batches all-or-nothing', async () => {
+    const { owner, j } = await fixture(), first = await staged(j, owner), second = await staged(j, owner);
+    let entered!: () => void, release!: () => void;
+    const reading = new Promise<void>(r => { entered = r; }), resume = new Promise<void>(r => { release = r; });
+    const stream = new ReadableStream<Uint8Array>({ async pull(c) { entered(); await resume; c.enqueue(first.ciphertext); c.close(); } }, { highWaterMark: 0 });
+    const uploading = upload(j, owner, first, stream);
+    await reading;
+    try {
+      expect((await upload(j, owner, first)).status).toBe(403);
+      await expireStage(j, second.descriptor.id); await collect(j);
+      expect((await rows(j)).map(r => r.id)).toEqual([first.descriptor.id]);
+    } finally { release(); }
+    expect((await uploading).status).toBe(201);
+    const b = await body(owner, [first, second]), control = await artifact(j, owner, 'artifact.create', b, payload([first, second]));
+    const before = await stored(j);
+    expect((await submit(j, owner, control)).status).toBe(409);
+    expect(await stored(j)).toBe(before);
+    expect((await rows(j))[0]!.artifact).toBeNull();
+    expect((await request(`/v1/journeys/${j.id}/blobs/${first.descriptor.id}`, 'GET', undefined, as(owner))).status).toBe(404);
+  });
+
+  it('serializes a read/delete race and denies requests after the tombstone commits', async () => {
+    const { owner, j } = await fixture(), blob = await staged(j, owner), b = await body(owner, [blob]);
+    expect((await upload(j, owner, blob)).status).toBe(201);
+    expect((await submit(j, owner, await artifact(j, owner, 'artifact.create', b, payload([blob])))).status).toBe(201);
+    const tombstone = await artifact(j, owner, 'artifact.delete', { format: 'artifact-v1', artifact: b.artifact, author: owner.principal, actor: owner.principal });
+    const reading = request(`/v1/journeys/${j.id}/blobs/${blob.descriptor.id}`, 'GET', undefined, as(owner));
+    const deleting = submit(j, owner, tombstone);
+    const [read, removed] = await Promise.all([reading, deleting]);
+    expect([200, 404]).toContain(read.status); // A stream admitted before deletion cannot be recalled.
+    expect(removed.status).toBe(201);
+    if (read.ok) expect(await openBlob(new Uint8Array(await read.arrayBuffer()), blob.descriptor, j.key)).toEqual(new TextEncoder().encode('SECRET attachment bytes'));
+    expect((await request(`/v1/journeys/${j.id}/blobs/${blob.descriptor.id}`, 'GET', undefined, as(owner))).status).toBe(404);
+    await collect(j);
+    expect(await bucket().head(bucketKey(j, blob.descriptor.id))).toBeNull();
+  });
+
   it('rejects stolen stages, cross-journey references and dishonest descriptors without partial writes', async () => {
     const { owner, j } = await fixture(), guest = await addPerson(j, owner), blob = await staged(j, owner);
     expect((await upload(j, guest, blob)).status).toBe(403);
@@ -179,6 +216,34 @@ describe('Stage 1 authenticated local R2 lifecycle', () => {
     try { expect((await request(reading, 'GET', undefined, await agentHeaders(agent, 'GET', reading))).status).toBe(401); } finally { clock.mockRestore(); }
     expect((await change(j, owner, 'member.remove', { member: guest.principal })).status).toBe(201);
     expect((await request(reading, 'GET', undefined, await agentHeaders(agent, 'GET', reading))).status).toBe(403);
+  });
+
+  it('rechecks agent expiry after the bucket write, not only request authentication', async () => {
+    const { owner, j } = await fixture(), agent = await addAgent(j, owner, 'readwrite');
+    const path = `/v1/journeys/${j.id}/blobs`;
+    const response = await request(path, 'POST', { size: 0 }, await agentHeaders(agent, 'POST', path, { size: 0 }));
+    expect(response.status).toBe(201);
+    const stage = await response.json() as { id: string; epoch: number };
+    const blob = await sealBlob(new Uint8Array(), { id: stage.id, journey: j.id, epoch: stage.epoch }, j.key);
+    const control = await artifact(j, agent, 'artifact.create', await body(agent, [blob]), payload([blob]));
+    let restore = () => {};
+    await runInDurableObject(enclaveStub(j.id), async object => {
+      const o = object as unknown as { env: { ARTIFACT_BLOBS: R2Bucket } };
+      const real = o.env.ARTIFACT_BLOBS;
+      o.env.ARTIFACT_BLOBS = { put: async (...args: Parameters<R2Bucket['put']>) => {
+        const result = await real.put(...args);
+        const clock = vi.spyOn(Date, 'now').mockReturnValue(agent.expiresAt + 1);
+        restore = () => { clock.mockRestore(); o.env.ARTIFACT_BLOBS = real; };
+        return result;
+      } } as unknown as R2Bucket;
+    });
+    try {
+      expect((await upload(j, agent, blob)).status).toBe(403);
+      expect((await rows(j))[0]!.complete).toBe(0);
+      const before = await stored(j), logPath = `/v1/journeys/${j.id}/log`;
+      expect((await request(logPath, 'POST', { control }, await agentHeaders(agent, 'POST', logPath, { control }))).status).toBe(401);
+      expect(await stored(j)).toBe(before);
+    } finally { restore(); }
   });
 
   it('denies read-only guides and incompatible capabilities before accepting uploads or partial content', async () => {

@@ -66,10 +66,10 @@ export class EnclaveObject {
     const model = normalizedMembers(state, [subject.principal], Date.now());
     return rules.blob_stage(rules.member_access(rules.find(model.members, model.id(subject.principal)), model.members), this.identity(state, subject), this.artifactVersion(state, subject), state.pendingRotation === true, BigInt(epoch), BigInt(state.currentEpoch));
   }
-  private uploadAccess(state: LogState, input: Extract<EnclaveMessage, { op: 'blobUpload' }>): boolean {
+  private uploadAccess(state: LogState, input: Extract<EnclaveMessage, { op: 'blobUpload' }>, completing = false): boolean {
     const row = this.one('SELECT * FROM blobs WHERE id=?', input.descriptor.id);
     const model = normalizedMembers(state, [input.subject.principal, String(row?.owner ?? '')]);
-    return rules.blob_upload(this.stageAccess(state, input.subject, input.descriptor.epoch), !!row && row.epoch === input.descriptor.epoch && row.size === input.descriptor.size, model.id(String(row?.owner ?? '')), model.id(input.subject.principal), Number(row?.expires) > Date.now(), row?.complete === 0 && row.artifact === null && !this.uploading.has(input.descriptor.id));
+    return rules.blob_upload(this.stageAccess(state, input.subject, input.descriptor.epoch), !!row && row.epoch === input.descriptor.epoch && row.size === input.descriptor.size, model.id(String(row?.owner ?? '')), model.id(input.subject.principal), Number(row?.expires) > Date.now(), row?.complete === 0 && row.artifact === null && (completing || !this.uploading.has(input.descriptor.id)));
   }
   private key(journey: string, id: string): string { return `journeys/${journey}/blobs/${id}`; }
   private async schedule(): Promise<void> { await this.state.storage.setAlarm(Date.now() + 60_000); }
@@ -99,14 +99,13 @@ export class EnclaveObject {
       const descriptor = await verifyBlob(bytes, input.descriptor);
       await this.env.ARTIFACT_BLOBS.put(this.key(input.journeyId, descriptor.id), bytes);
       return await this.serialized(async () => {
-        this.uploading.delete(descriptor.id);
         const state = this.current();
-        if (!this.uploadAccess(state, input)) { await this.schedule(); return failure('forbidden', 403); }
+        if (!this.uploadAccess(state, input, true)) { await this.schedule(); return failure('forbidden', 403); }
         this.sql.exec('UPDATE blobs SET complete=1,descriptor=? WHERE id=?', JSON.stringify(copyBlobDescriptor(descriptor)), descriptor.id);
         await this.schedule(); return Response.json({ descriptor }, { status: 201 });
       });
     } catch { return failure('invalid-request', 400); }
-    finally { await reader?.cancel().catch(() => {}); this.uploading.delete(input.descriptor.id); }
+    finally { await reader?.cancel().catch(() => {}); await this.serialized(async () => { this.uploading.delete(input.descriptor.id); }); }
   }
   async alarm(): Promise<void> {
     await this.serialized(async () => {
