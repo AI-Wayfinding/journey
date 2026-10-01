@@ -1,12 +1,12 @@
-import { EXPIRED_LINK } from './messages.js';
+import { EXPIRED_LINK, UPDATE_REQUIRED } from './messages.js';
 import { prfOutput } from './prf.js';
 import { startAuthentication, startRegistration } from '@simplewebauthn/browser';
-import { canControl, canRenameAgent, canWriteContent, isPersonGuide, ownsAgent, createAgeIdentity, createSigningIdentity, linkLookupHash, newId, newLinkSecret, renewAgentEntries, sealLinkIdentity, signEntry, validAgentName, verifyLog, wrapJourneyKey } from '@ai-wayfinding/core';
+import { canControl, canRenameAgent, canWriteContent, isPersonGuide, ownsAgent, replayControl, effectiveScope, createAgeIdentity, createSigningIdentity, linkLookupHash, newId, newLinkSecret, sealLinkIdentity, validAgentName, wrapJourneyKey } from '@ai-wayfinding/core';
 import type { CommentBody, ItemBody, Member, ProtocolRecord } from '@ai-wayfinding/core';
 import { backupKey, clearPersonKeys, getAccountName, getPersonKeys, lockPersonKeys, newBackupCode, onPersonKeysCleared, parseBackupCode, restorePersonKeys, sealPersonKeys, sealUnlockedKeys, setAccountName, unlockPersonKeys } from './keys.js';
 import { passkeyError } from './passkey-errors.js';
 import type { PersonKeys, SealedPersonKeys } from './keys.js';
-import { ApiError, allRecords, api, appendEntry, createJourney, currentKey, encryptedEntry, exportEncrypted, itemVersions, letIn, listings, removeMember, rotatePending, saveRecord, verifiedJourney } from './journey.js';
+import { ApiError, allRecords, api, appendEntry, createJourney, currentKey, makeControl, exportEncrypted, itemVersions, letIn, listings, removeMember, rotatePending, saveRecord, verifiedJourney } from './journey.js';
 import type { JourneyContext, JourneyListing } from './journey.js';
 import './style.css';
 
@@ -32,6 +32,7 @@ function render(content: string): void {
 function error(message: string): void { const main = root.querySelector('main') ?? root; const box = document.createElement('p'); box.className = 'error'; box.setAttribute('role', 'alert'); box.textContent = message; main.prepend(box); }
 function perform(action: () => Promise<void>): void { void action().catch(cause => {
   if (cause instanceof ApiError && cause.status === 401 && getPersonKeys() && !['/recover', '/sign-in', '/continue', '/auth/verify'].includes(location.pathname)) { lockPersonKeys(); navigate('/continue'); return; }
+  if (cause instanceof Error && cause.message === UPDATE_REQUIRED) { render('<section class="panel"><h1>Update Wayfinding</h1></section>'); }
   error(passkeyError(cause));
 }); }
 function form(id: string, action: (form: HTMLFormElement) => Promise<void>): void {
@@ -256,7 +257,7 @@ async function accountScreen(): Promise<void> {
     // Preserve each journey's independent email choice when updating the account name.
     for (const row of journeys) {
       const ctx = await verifiedJourney(row.id, row.principal, keys);
-      if (!canWriteContent(ctx.state, row.principal)) continue;
+      if (!canControl(ctx.state, row.principal, 'Profile', row.principal)) continue;
       const visibleEmail = ctx.state.members[row.principal]?.profile?.email;
       await appendEntry(ctx, 'member.profile', { id: row.principal, name, ...(visibleEmail ? { email: visibleEmail } : {}) });
     }
@@ -321,7 +322,7 @@ async function context(id: string): Promise<JourneyContext | null> {
   const listing = (await listings()).find(row => row.id === id);
   if (!listing) { render('<section class="panel"><h1>Journey unavailable</h1><p>You no longer have access to this journey.</p></section>'); return null; }
   const ctx = await verifiedJourney(id, listing.principal, keys);
-  if (ctx.log.at(-1)?.type === 'member.remove' && isPersonGuide(ctx.state, ctx.principal)) {
+  if (ctx.state.pendingRotation && isPersonGuide(ctx.state, ctx.principal)) {
     try { await rotatePending(ctx); return verifiedJourney(id, listing.principal, keys); }
     catch { render('<section class="panel"><h1>Key update pending</h1><p>A person who manages people can complete it on the next visit.</p></section>'); return null; }
   }
@@ -336,8 +337,8 @@ async function journeyHome(id: string): Promise<void> {
   const ctx = await context(id); if (!ctx) return;
   const records = await allRecords(ctx), items = itemVersions(records).filter(v => !v.deleted && v.item.itemType !== 'recovery');
   const readOnly = !canWriteContent(ctx.state, ctx.principal);
-  const name = String(ctx.log[0]?.body.name ?? 'Journey');
-  render(`<section class="panel"><p class="eyebrow">JOURNEY</p><h1>${escape(name)}</h1>${ctx.log[0]?.body.description ? `<p>${escape(String(ctx.log[0].body.description))}</p>` : ''}<div class="actions">${readOnly ? '<p class="meta">Your access is read-only.</p>' : `<a class="button" href="/journeys/${id}/add">Add an item</a>`}<a class="button" href="/journeys/${id}/agent">Add your agent</a><a class="button" href="/journeys/${id}/members">Share this journey</a><a class="button" href="/journeys/${id}/export">Export</a></div></section><section class="panel"><h2>Items</h2><div class="grid"><div><label for="filter">Filter by type</label><select id="filter"><option value="">All types</option>${[...new Set(items.map(v => v.item.itemType))].map(t => `<option value="${escape(t)}">${escape(t)}</option>`).join('')}</select></div><div><label for="search">Search your items</label><input id="search" type="search" placeholder="Search titles and text" /></div></div><div id="items" class="cards"></div></section>`);
+  const name = ctx.state.settings?.name ?? 'Journey';
+  render(`<section class="panel"><p class="eyebrow">JOURNEY</p><h1>${escape(name)}</h1>${ctx.state.settings?.description ? `<p>${escape(ctx.state.settings!.description)}</p>` : ''}<div class="actions">${readOnly ? '<p class="meta">Your access is read-only.</p>' : `<a class="button" href="/journeys/${id}/add">Add an item</a>`}<a class="button" href="/journeys/${id}/agent">Add your agent</a><a class="button" href="/journeys/${id}/members">Share this journey</a><a class="button" href="/journeys/${id}/export">Export</a></div></section><section class="panel"><h2>Items</h2><div class="grid"><div><label for="filter">Filter by type</label><select id="filter"><option value="">All types</option>${[...new Set(items.map(v => v.item.itemType))].map(t => `<option value="${escape(t)}">${escape(t)}</option>`).join('')}</select></div><div><label for="search">Search your items</label><input id="search" type="search" placeholder="Search titles and text" /></div></div><div id="items" class="cards"></div></section>`);
   const showItems = () => { const filter = read('filter'), query = read('search').toLocaleLowerCase(); root.querySelector('#items')!.innerHTML = items.filter(({ item }) => (!filter || item.itemType === filter) && (!query || `${item.title} ${item.body}`.toLocaleLowerCase().includes(query))).map(({ item, root: itemRoot }) => `<article class="card"><p class="meta">${escape(item.itemType)}</p><h3><a href="/journeys/${id}/items/${escape(itemRoot)}">${escape(item.title)}</a></h3><p>${escape(item.body.slice(0, 160))}</p></article>`).join('') || '<p>No matching items.</p>'; };
   root.querySelector('#search')?.addEventListener('input', showItems); root.querySelector('#filter')?.addEventListener('change', showItems); showItems();
 }
@@ -364,13 +365,25 @@ async function itemForm(id: string, itemId?: string): Promise<void> {
 
 async function membersScreen(id: string): Promise<void> {
   const ctx = await context(id); if (!ctx) return;
-  const pendingRotation = ctx.log.at(-1)?.type === 'member.remove';
+  const pendingRotation = ctx.state.pendingRotation;
   const holder = isPersonGuide(ctx.state, ctx.principal);
   const pending = holder ? (await api<{ pending: { principal: string; recipient: string; signingKey: string; support: number; expires: number | null }[] }>(`/journeys/${id}/invites/pending`, 'GET', undefined, ctx.principal)).pending : [];
   const links = new Map((await api<{ links: { memberId: string; expiresAt: number }[] }>(`/journeys/${id}/agent-links`, 'GET', undefined, ctx.principal)).links.map(link => [link.memberId, link]));
   const linkNote = (memberId: string, member: Member): string => `<p class="notice link-note">Agent link. Anyone with the link can read this journey until ${escape(member.expiresAt ?? '')} or until you remove this agent. Wayfinding's server decrypts the journey while it answers the link.</p>${ownsAgent(ctx.state, ctx.principal, memberId) ? `<details id="renew-${escape(memberId)}" class="renew"${location.hash === `#renew-${memberId}` ? ' open' : ''}><summary>Extend access</summary><form class="renew-form" data-renew="${escape(memberId)}"><label for="renew-days-${escape(memberId)}">Keep the link working for</label><select id="renew-days-${escape(memberId)}" name="renew-days"><option value="1">1 day from now</option><option value="7" selected>7 days from now</option><option value="30">30 days from now</option></select><p class="meta">The link stays the same. You confirm with your passkey.</p><div class="actions"><button type="submit">Extend with passkey</button></div></form></details>` : ''}`;
-  const canAdd = canWriteContent(ctx.state, ctx.principal);
-  render(`<section class="panel"><p><a href="/journeys/${id}">← Back to journey</a></p><h1>People in this journey</h1><p>Only journey members can see who is here. People who manage members are marked below.</p><label class="checkbox" for="show-my-email"><input type="checkbox" id="show-my-email" ${ctx.state.members[ctx.principal]?.profile?.email ? 'checked' : ''} ${!canWriteContent(ctx.state, ctx.principal) ? 'disabled' : ''} /> Show my email to people in this journey</label>${pendingRotation ? '<p class="notice">Key update pending. A person who manages members can finish it on their next visit.</p>' : ''}<ul class="list">${Object.entries(ctx.state.members).map(([memberId, { member, grants, profile }]) => `<li><strong>${member.kind === 'agent' ? escape(memberName(member)) : escape(profile?.name || (member.support ? 'Wayfinding support (Hypha)' : 'Person'))}${memberId === ctx.principal ? ' (you)' : ''}</strong>${member.kind === 'person' && profile?.email ? `<p>${escape(profile.email)}</p>` : ''}<p class="meta">${escape(memberId)} · ${isPersonGuide(ctx.state, memberId) ? 'Manages people' : 'Member'}${member.kind === 'agent' || member.support ? ` · ${links.has(memberId) ? 'Agent link · ' : ''}${escape(member.scope ?? 'readwrite')} · ${escape(member.expiresAt ?? 'session')}` : ''}</p>${links.has(memberId) ? linkNote(memberId, member) : ''}${canRenameAgent(ctx.state, ctx.principal, memberId) || holder && memberId !== ctx.principal ? '<div class="actions">' : ''}${canRenameAgent(ctx.state, ctx.principal, memberId) ? `<button class="secondary" data-rename="${escape(memberId)}">Rename</button>` : ''}${holder && memberId !== ctx.principal ? `<button class="secondary" data-remove="${escape(memberId)}">Remove</button>${canControl(ctx.state, ctx.principal, 'Guide', memberId, true) ? `<button class="secondary" data-grant="${escape(memberId)}">${isPersonGuide(ctx.state, memberId) ? 'Stop managing people' : 'Let manage people'}</button>` : ''}` : ''}${canRenameAgent(ctx.state, ctx.principal, memberId) || holder && memberId !== ctx.principal ? '</div>' : ''}</li>`).join('')}</ul><div class="actions"><button id="leave" class="secondary">Leave journey</button></div></section>${canAdd ? `<section class="panel" id="agent-link-panel"><h2>Add agent by link</h2><p>For an agent that can read a web page but can't reach Wayfinding, such as Claude Cowork. It gets read-only access through a link.</p><form id="agent-link-form"><label for="link-name">Agent name</label><input id="link-name" name="link-name" maxlength="60" required /><label for="link-days">Link lasts</label><select id="link-days" name="link-days"><option value="1">1 day</option><option value="7" selected>7 days</option><option value="30">30 days</option></select><p class="notice">Anyone with this link can read this journey until it expires or you remove it. Wayfinding's server decrypts the journey while it answers the link.</p><div class="actions"><button type="submit">Create link with passkey</button></div></form></section>` : ''}${holder ? `<section class="panel"><h2>Share this journey with other wayfinders</h2><form id="invite-form"><label for="invite-email">Email addresses (separate with commas)</label><input id="invite-email" name="invite-email" type="text" placeholder="friend@example.org" /><label for="invite-scope">Invitation</label><select id="invite-scope" name="invite-scope"><option value="person">Invite a person</option><option value="support">Invite Wayfinding support</option></select><p class="meta">Support joins like any other person. Their access ends after seven days.</p><div class="actions"><button type="submit" id="invite-send">Send invitation</button><button type="button" id="invite-link-only" class="secondary">Copy link instead</button></div></form><div id="invitation"></div></section><section class="panel"><h2>Waiting to join</h2><ul class="list">${pending.length ? pending.map(row => `<li><code>${escape(row.principal)}</code>${row.support ? ' · Wayfinding support (Hypha), read only' : ''} <button data-let-in="${escape(row.principal)}">Let in</button></li>`).join('') : '<li>No one is waiting.</li>'}</ul></section>` : ''}`);
+  const canAdd = replayControl(ctx.state, ctx.principal, 'Add', undefined, { id: newId(), kind: 'agent', addedBy: ctx.principal, scope: 'read', recipient: ctx.keys.recipient, signingKey: ctx.keys.signingKey }).transition.$ === 'Accepted';
+  render(`<section class="panel"><p><a href="/journeys/${id}">← Back to journey</a></p><h1>People in this journey</h1><p>Only journey members can see who is here. People who manage members are marked below.</p><label class="checkbox" for="show-my-email"><input type="checkbox" id="show-my-email" ${ctx.state.members[ctx.principal]?.profile?.email ? 'checked' : ''} ${!canControl(ctx.state, ctx.principal, 'Profile', ctx.principal) ? 'disabled' : ''} /> Show my email to people in this journey</label>${pendingRotation ? '<p class="notice">Key update pending. A person who manages members can finish it on their next visit.</p>' : ''}<ul class="list">${Object.entries(ctx.state.members).map(([memberId, { member, grants, profile }]) => `<li><strong>${member.kind === 'agent' ? escape(memberName(member)) : escape(profile?.name || (member.support ? 'Wayfinding support (Hypha)' : 'Person'))}${memberId === ctx.principal ? ' (you)' : ''}</strong>${member.kind === 'person' && profile?.email ? `<p>${escape(profile.email)}</p>` : ''}<p class="meta">${escape(memberId)} · ${isPersonGuide(ctx.state, memberId) ? 'Guide' : 'Member'} · ${effectiveScope(ctx.state, memberId) === 'readwrite' ? 'Read-write' : 'Read-only'}${member.kind === 'agent' || member.support ? ` · ${links.has(memberId) ? 'Agent link · ' : ''}${escape(member.scope ?? 'readwrite')} · ${escape(member.expiresAt ?? 'session')}` : ''}</p>${links.has(memberId) ? linkNote(memberId, member) : ''}${canRenameAgent(ctx.state, ctx.principal, memberId) || canControl(ctx.state, ctx.principal, 'Remove', memberId) || holder ? '<div class="actions">' : ''}${canRenameAgent(ctx.state, ctx.principal, memberId) ? `<button class="secondary" data-rename="${escape(memberId)}">Rename</button>` : ''}${canControl(ctx.state, ctx.principal, 'Remove', memberId) && memberId !== ctx.principal ? `<button class="secondary" data-remove="${escape(memberId)}">Remove</button>` : ''}${canControl(ctx.state, ctx.principal, 'Guide', memberId, !isPersonGuide(ctx.state, memberId)) ? `<button class="secondary" data-grant="${escape(memberId)}">${isPersonGuide(ctx.state, memberId) ? 'Stop managing people' : 'Let manage people'}</button>` : ''}${canControl(ctx.state, ctx.principal, 'RoleChange', memberId) ? `<button class="secondary" data-role="${escape(memberId)}">${effectiveScope(ctx.state, memberId) === 'read' ? 'Make read-write' : 'Make read-only'}</button>` : ''}${canRenameAgent(ctx.state, ctx.principal, memberId) || canControl(ctx.state, ctx.principal, 'Remove', memberId) || holder ? '</div>' : ''}</li>`).join('')}</ul><div class="actions"><button id="leave" class="secondary" ${canControl(ctx.state, ctx.principal, 'Remove', ctx.principal) ? '' : 'disabled'}>Leave journey</button></div></section>${canAdd ? `<section class="panel" id="agent-link-panel"><h2>Add agent by link</h2><p>For an agent that can read a web page but can't reach Wayfinding, such as Claude Cowork. It gets read-only access through a link.</p><form id="agent-link-form"><label for="link-name">Agent name</label><input id="link-name" name="link-name" maxlength="60" required /><label for="link-days">Link lasts</label><select id="link-days" name="link-days"><option value="1">1 day</option><option value="7" selected>7 days</option><option value="30">30 days</option></select><p class="notice">Anyone with this link can read this journey until it expires or you remove it. Wayfinding's server decrypts the journey while it answers the link.</p><div class="actions"><button type="submit">Create link with passkey</button></div></form></section>` : ''}${holder ? `<section class="panel"><h2>Share this journey with other people</h2><form id="invite-form"><label for="invite-email">Email addresses (separate with commas)</label><input id="invite-email" name="invite-email" type="text" placeholder="friend@example.org" /><label for="invite-scope">Invitation</label><select id="invite-scope" name="invite-scope"><option value="person">Invite a person</option><option value="support">Invite Wayfinding support</option></select><p class="meta">Support joins like any other person. Their access ends after seven days.</p><div class="actions"><button type="submit" id="invite-send">Send invitation</button><button type="button" id="invite-link-only" class="secondary">Copy link instead</button></div></form><div id="invitation"></div></section><section class="panel"><h2>Waiting to join</h2><ul class="list">${pending.length ? pending.map(row => `<li><code>${escape(row.principal)}</code>${row.support ? ' · Wayfinding support (Hypha), read only' : ''} <button data-let-in="${escape(row.principal)}">Let in</button></li>`).join('') : '<li>No one is waiting.</li>'}</ul></section>` : ''}`);
+  if (holder) {
+    const settings = ctx.state.settings!;
+    const section = document.createElement('section'); section.className = 'panel';
+    section.innerHTML = `<h2>Journey settings</h2><form id="settings-form"><label for="settings-name">Journey name</label><input id="settings-name" name="settings-name" value="${escape(settings.name)}" required /><label for="settings-description">Description</label><textarea id="settings-description" name="settings-description">${escape(settings.description)}</textarea><label for="default-role">New people start with</label><select id="default-role" name="default-role"><option value="read-only" ${settings.defaultRole === 'read-only' ? 'selected' : ''}>Read-only</option><option value="read-write" ${settings.defaultRole === 'read-write' ? 'selected' : ''}>Read-write</option></select><p>Private journey · Invitation-only. Visibility and other joining policies are not available yet.</p><button type="submit">Save settings</button></form>`;
+    root.querySelector('main')!.append(section);
+    form('settings-form', async f => { const latest = await verifiedJourney(ctx.id, ctx.principal, ctx.keys); await appendEntry(latest, 'journey.settings', { name: input(f, 'settings-name'), description: input(f, 'settings-description'), defaultRole: input(f, 'default-role'), visibility: 'private', joiningPolicy: 'invitation-only' }); await membersScreen(id); });
+  }
+  const profile = document.createElement('section'); profile.className = 'panel';
+  profile.innerHTML = `<h2>Your name in this journey</h2><form id="journey-profile"><label for="journey-name">Your name</label><input id="journey-name" name="journey-name" maxlength="60" value="${escape(ctx.state.members[ctx.principal]?.profile?.name ?? '')}" /><button type="submit">Save my name</button></form>`;
+  root.querySelector('main')!.append(profile);
+  form('journey-profile', async f => { const latest = await verifiedJourney(ctx.id, ctx.principal, ctx.keys); const email = latest.state.members[latest.principal]?.profile?.email; await appendEntry(latest, 'member.profile', { id: latest.principal, name: input(f, 'journey-name'), ...(email ? { email } : {}) }); await membersScreen(id); });
+  root.querySelectorAll<HTMLButtonElement>('[data-role]').forEach(button => button.addEventListener('click', () => perform(async () => { const latest = await verifiedJourney(ctx.id, ctx.principal, ctx.keys); const target = button.dataset.role!; await appendEntry(latest, 'member.role', { member: target, role: effectiveScope(latest.state, target) === 'read' ? 'read-write' : 'read-only' }); await membersScreen(id); })));
   if (location.hash.startsWith('#renew-')) root.querySelector(location.hash)?.scrollIntoView();
   const fresh = async () => { const latest = await context(id); if (!latest) throw new Error('Sign in again.'); return latest; };
   form('agent-link-form', async f => {
@@ -384,10 +397,9 @@ async function membersScreen(id: string): Promise<void> {
     const agent = await api<{ principal: string }>(`/agent-sessions/${started.id}`);
     const expiresAt = Date.now() + days * 86_400_000;
     const member: Member = { id: agent.principal, kind: 'agent', recipient: identity.recipient, signingKey: signing.publicKey, addedBy: latest.principal, name, scope: 'read', expiresAt: new Date(expiresAt).toISOString() };
-    const entry = await signEntry({ v: 1, seq: latest.state.lastSeq + 1, prev: latest.state.lastHash, at: new Date().toISOString(), actor: latest.principal, type: 'member.add', body: { member, grants: [], kind: 'agent' } }, latest.keys.signingPrivateKey);
-    const verified = await verifyLog([...latest.log, entry]); if (!verified.ok) throw new Error(verified.error.message);
+    const control = await makeControl(latest, 'member.add', { member, grants: [], kind: 'agent' });
     const [wrap] = await wrapJourneyKey(currentKey(latest), [{ id: member.id, recipient: member.recipient }]);
-    await api(`/agent-sessions/${started.id}/approve`, 'POST', { code: started.code, principal: latest.principal, scope: 'read', expiresAt, wrap: wrap!.ciphertext, entry: await encryptedEntry(latest, entry) });
+    await api(`/agent-sessions/${started.id}/approve`, 'POST', { code: started.code, principal: latest.principal, scope: 'read', expiresAt, wrap: wrap!.ciphertext, control });
     const secret = newLinkSecret();
     await api(`/journeys/${id}/agent-links`, 'POST', { sessionId: started.id, hash: await linkLookupHash(secret), blob: await sealLinkIdentity(secret, identity.identity, id, member.id) }, latest.principal);
     // The link appears here once. Only its hash and the sealed identity are stored, so it cannot be shown again.
@@ -401,10 +413,8 @@ async function membersScreen(id: string): Promise<void> {
     if (expiresAt <= current) throw new Error('This link already lasts longer than that. Choose a longer time.');
     await passkeyConfirmation();
     const latest = await verifiedJourney(ctx.id, ctx.principal, ctx.keys);
-    // Two ordinary signed entries (remove, then add with the later expiry) keep the same URL and work for every client version.
-    const entries = await renewAgentEntries(latest.state, target, latest.principal, latest.keys.signingPrivateKey, new Date(expiresAt).toISOString());
-    const verified = await verifyLog([...latest.log, ...entries]); if (!verified.ok) throw new Error(verified.error.message);
-    await api(`/journeys/${id}/agent-links/${target}/renew`, 'POST', { entries: await Promise.all(entries.map(entry => encryptedEntry(latest, entry))), expiresAt }, latest.principal);
+    const control = await makeControl(latest, 'member.renew', { id: target, expiresAt: new Date(expiresAt).toISOString() });
+    await api(`/journeys/${id}/agent-links/${target}/renew`, 'POST', { control, expiresAt }, latest.principal);
     await membersScreen(id);
   } finally { if (button?.isConnected) button.disabled = false; } }); }));
   root.querySelector<HTMLInputElement>('#show-my-email')?.addEventListener('change', event => perform(async () => {
@@ -460,7 +470,7 @@ async function membersScreen(id: string): Promise<void> {
     if (!confirm('Leave this journey? You lose access now, but keep anything you already downloaded. Your agents go too.')) return;
     if (!canControl(latest.state, latest.principal, 'Remove', latest.principal)) throw new Error('The last person who manages members cannot leave. Grant that role to someone else first.');
     await passkeyConfirmation();
-    await appendEntry(latest, 'member.remove', { member: latest.principal }, { accessChanges: [{ principal: latest.principal, action: 'remove', kind: 'person', scope: 'readwrite' }] });
+    await appendEntry(latest, 'member.remove', { member: latest.principal });
     navigate('/');
   }));
 }
@@ -481,7 +491,7 @@ async function acceptInvite(): Promise<void> {
       try { const row = (await listings()).find(j => j.id === result.journeyId && j.principal === principal); if (row) {
         const ctx = await verifiedJourney(row.id, principal, keys);
         const name = await accountName(keys, (await listings()).filter(existing => existing.id !== row.id));
-        if (name && canWriteContent(ctx.state, principal)) await appendEntry(ctx, 'member.profile', { id: principal, name });
+        if (name && canControl(ctx.state, principal, 'Profile', principal)) await appendEntry(ctx, 'member.profile', { id: principal, name });
         navigate('/journeys/' + row.id); return;
       } }
       catch { /* The member has not yet posted the complete signed log and wrap. */ }
@@ -507,10 +517,9 @@ async function agentScreen(sessionId: string): Promise<void> {
     const latest = await verifiedJourney(ctx.id, ctx.principal, ctx.keys);
     const scope = input(f, 'agent-scope') as 'read' | 'readwrite', expiresAt = Date.now() + Number(input(f, 'agent-hours')) * 3_600_000;
     const member = { id: agent.principal, kind: 'agent' as const, recipient: agent.recipient, signingKey: agent.signingKey, addedBy: ctx.principal, name, scope, expiresAt: new Date(expiresAt).toISOString() };
-    const entry = await signEntry({ v: 1, seq: latest.state.lastSeq + 1, prev: latest.state.lastHash, at: new Date().toISOString(), actor: latest.principal, type: 'member.add', body: { member, grants: [], kind: 'agent' } }, latest.keys.signingPrivateKey);
-    const verified = await verifyLog([...latest.log, entry]); if (!verified.ok) throw new Error(verified.error.message);
+    const control = await makeControl(latest, 'member.add', { member, grants: [], kind: 'agent' });
     const [wrap] = await wrapJourneyKey(currentKey(latest), [{ id: member.id, recipient: member.recipient }]);
-    await api(`/agent-sessions/${sessionId}/approve`, 'POST', { code: input(f, 'agent-code'), principal: latest.principal, scope, expiresAt, wrap: wrap!.ciphertext, entry: await encryptedEntry(latest, entry) });
+    await api(`/agent-sessions/${sessionId}/approve`, 'POST', { code: input(f, 'agent-code'), principal: latest.principal, scope, expiresAt, wrap: wrap!.ciphertext, control });
     render(`<section class="panel"><h1>Agent approved</h1><p>You can see it in your journey's people and agents list.</p><a href="/journeys/${latest.id}/members">People &amp; agents</a></section>`);
   });
 }

@@ -1,6 +1,7 @@
 import { defineConfig } from '@playwright/test';
 export default defineConfig({
   testDir: './e2e',
+  workers: 1, // Every file uses the same local journey server and port.
   timeout: 180_000,
   use: { baseURL: 'http://localhost:18787', browserName: 'chromium', headless: true, actionTimeout: 15_000, trace: 'retain-on-failure' },
   webServer: {

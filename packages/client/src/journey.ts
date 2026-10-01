@@ -1,8 +1,8 @@
-import { canWriteContent, effectiveScope } from '@ai-wayfinding/core';
-import { CLIENT_VERSION, meetsMinClientVersion, newId, open, parseRecord, seal, unwrapJourneyKey, verifyLog } from '@ai-wayfinding/core';
-import type { CommentBody, Envelope, ItemBody, JourneyKey, LogEntry, LogState, ProtocolRecord } from '@ai-wayfinding/core';
+import { canWriteContent, canReadContent, effectiveScope } from '@ai-wayfinding/core';
+import { CLIENT_VERSION, meetsMinClientVersion, newId, open, parseRecord, seal, unwrapJourneyKey, verifyControlProofs, logDefinitions } from '@ai-wayfinding/core';
+import type { ControlProof, Member, CommentBody, Envelope, ItemBody, JourneyKey, LogState, ProtocolRecord } from '@ai-wayfinding/core';
 import { readCache, writeCache } from './cache.js';
-import type { CipherCache, CipherRow } from './cache.js';
+import type { CipherRow } from './cache.js';
 import { signedHeaders } from './signing.js';
 import { networkFetch } from './network.js';
 import type { RememberedAgent } from './storage.js';
@@ -13,7 +13,6 @@ export interface ItemView { item: ItemBody; comments: CommentBody[] }
 interface Verified { state: LogState; epochs: Map<number, JourneyKey>; log: CipherRow[] }
 const historyError = 'This journey history could not be verified. Stop and ask a member for help.';
 const updateError = () => `This journey uses a newer format than this Wayfinding client (${CLIENT_VERSION}) understands. Nothing is wrong with the journey or your access. Update the client, then try again:\n  npm install -g @ai-wayfinding/client@latest\n(If you installed it with --prefix "$HOME/.npm-global", add that same --prefix.) Your connection stays valid, so you do not need to connect or be approved again.\nIf you cannot install software here, stop and tell your operator (the person you work for) that the Wayfinding client needs updating, show them the command above, and ask them to run it or allow the update.`;
-function decode(value: string): Envelope { return JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as Envelope; }
 
 export class JourneyClient {
   private readonly fetcher: typeof fetch;
@@ -24,27 +23,33 @@ export class JourneyClient {
     const body = data === undefined ? '' : JSON.stringify(data);
     const route = '/v1' + path;
     const headers = await signedHeaders(this.session.signingPrivateKey, method, route, body);
-    const result = await this.fetcher(this.session.server + route, { method, headers: { ...headers, 'X-Agent-Session': this.session.sessionId, ...(data === undefined ? {} : { 'Content-Type': 'application/json', Origin: new URL(this.session.server).origin, 'X-Wayfinding': '1' }) }, ...(data === undefined ? {} : { body }) });
+    const result = await this.fetcher(this.session.server + route, { method, headers: { ...headers, 'X-Client-Version': CLIENT_VERSION, 'X-Control-Format': 'control-proof-v1', 'X-Agent-Session': this.session.sessionId, ...(data === undefined ? {} : { 'Content-Type': 'application/json', Origin: new URL(this.session.server).origin, 'X-Wayfinding': '1' }) }, ...(data === undefined ? {} : { body }) });
     if (!result.ok) {
-      if (result.status === 403 || result.status === 401) throw new Error('Access to this journey has ended');
       const error: unknown = await result.json().catch(() => null);
       const code = error && typeof error === 'object' && 'error' in error && error.error && typeof error.error === 'object' && 'code' in error.error ? String(error.error.code) : String(result.status);
+      if (code === 'client-too-old') throw new Error(updateError());
+      if (result.status === 403 || result.status === 401) throw new Error('Access to this journey has ended');
       throw new Error('Journey request failed (' + code + ').');
     }
     return result.json() as Promise<T>;
   }
   private async verified(): Promise<Verified> {
-    // Never trust a cache head without decrypting and verifying the entire signed chain.
+    const protocol = await this.request<{ minClientVersion: string; controlFormat: string }>(`/journeys/${this.session.journeyId}/protocol`);
+    if (protocol.controlFormat !== 'control-proof-v1' || !meetsMinClientVersion(CLIENT_VERSION, protocol.minClientVersion)) throw new Error(updateError());
     const cached = this.options.cacheRoot ? await readCache(this.options.cacheRoot, this.session.journeyId).catch(() => null) : null;
-    const log: CipherRow[] = cached?.log ? [...cached.log] : [];
+    // Fetch all public proofs. A legacy cache is never a Stage 0 trust anchor.
+    const rows: { seq: number; proof: ControlProof; envelope: Envelope }[] = [];
     for (;;) {
-      const after = log.length ? '?after=' + (log.at(-1)!.seq) : '';
-      const page = (await this.request<{ log: CipherRow[] }>(`/journeys/${this.session.journeyId}/log${after}`)).log;
+      const after = rows.length ? '?after=' + rows.at(-1)!.seq : '';
+      const page = (await this.request<{ log: typeof rows }>(`/journeys/${this.session.journeyId}/log${after}`)).log;
       if (!Array.isArray(page)) throw new Error(historyError);
-      log.push(...page);
-      if (log.length > 100_000) throw new Error('Journey history is too large.');
+      rows.push(...page);
+      if (rows.length > 100_000) throw new Error('Journey history is too large.');
       if (page.length < 1000) break;
     }
+    if (!rows.length || rows.some(row => !row.proof || !row.envelope || row.seq !== row.proof.seq)) throw new Error(historyError);
+    if (rows.some(row => row.proof.v !== 1 || !logDefinitions.some(d => d.name === row.proof.type))) throw new Error(updateError());
+    const log: CipherRow[] = rows.map(row => ({ seq: row.seq, entry: Buffer.from(JSON.stringify({ proof: row.proof, envelope: row.envelope })).toString('base64url') }));
     const response = await this.request<{ wraps: { epoch: number; wrap: string }[] }>(`/journeys/${this.session.journeyId}/wraps/me`);
     const epochs = new Map<number, JourneyKey>();
     for (const wrap of response.wraps) {
@@ -52,23 +57,11 @@ export class JourneyClient {
       const key = this.keys.get(wrap.epoch) ?? await unwrapJourneyKey({ epoch: wrap.epoch, recipient: this.session.principal, ciphertext: wrap.wrap }, this.session.identity);
       this.keys.set(wrap.epoch, key); epochs.set(wrap.epoch, key);
     }
-    const entries: LogEntry[] = [];
-    for (const row of log) {
-      const envelope = decode(row.entry);
-      if (row.seq !== entries.length || envelope.outside?.journey !== this.session.journeyId) throw new Error(historyError);
-      const key = epochs.get(envelope.outside.epoch);
-      if (!key) throw new Error('Missing a key for the journey history. Ask a member to approve access again.');
-      const record = await open(envelope, key).catch(() => { throw new Error(historyError); });
-      if (record.type !== 'membership' || record.typeVersion !== 1) throw new Error(historyError);
-      const wrapped = record.body.entry;
-      const entry = typeof wrapped === 'string' ? JSON.parse(wrapped) as LogEntry : record.body as unknown as LogEntry;
-      entries.push(entry);
-    }
-    const checked = await verifyLog(entries);
-    if (!checked.ok && checked.error.code === 'client-too-old') throw new Error(updateError());
+    const checked = await verifyControlProofs(rows.map(row => row.proof), rows.map(row => row.envelope), { journey: this.session.journeyId, creator: rows[0]!.proof.body.creator as Member }, [...epochs.values()]);
     if (!checked.ok || checked.state.journey !== this.session.journeyId) throw new Error(historyError);
     const mine = checked.state.members[this.session.principal]?.member;
     if (!mine || mine.kind !== 'agent' || mine.signingKey !== this.session.signingKey || mine.recipient !== this.session.recipient || mine.expiresAt && Date.parse(mine.expiresAt) <= Date.now()) throw new Error('Access to this journey has ended');
+    if (!canReadContent(checked.state, this.session.principal)) throw new Error('Access to this journey has ended');
     if (!meetsMinClientVersion(CLIENT_VERSION, checked.state.minClientVersion)) throw new Error(updateError());
     if (!epochs.has(checked.state.currentEpoch)) throw new Error('The journey key changed. Ask a member to reconnect this agent.');
     if (this.options.cacheRoot && (!cached || cached.seq !== checked.state.lastSeq || cached.hash !== checked.state.lastHash)) await writeCache(this.options.cacheRoot, this.session.journeyId, { seq: checked.state.lastSeq, hash: checked.state.lastHash!, log, records: cached?.records ?? [] });
@@ -102,7 +95,7 @@ export class JourneyClient {
   }
   private async writable(): Promise<Verified> {
     const verified = await this.verified();
-    if (!canWriteContent(verified.state, this.session.principal)) throw new Error('This journey is read-only for this agent. Ask a person to approve write access.');
+    if (!canWriteContent(verified.state, this.session.principal)) throw new Error('This journey is read-only for this agent. Its access follows the adding person’s current role and its original approval limit.');
     return verified;
   }
   private async write(record: ProtocolRecord, verified: Verified): Promise<void> {

@@ -8,7 +8,7 @@ const b64url = (bytes: Uint8Array): string => btoa(String.fromCharCode(...bytes)
 /** A separate agent process never has the person's cookies or keys. */
 export async function requestAgent(request: APIRequestContext, journeyId: string, name?: string, keyStorage?: 'file'): Promise<Agent> {
   const age = await createAgeIdentity(), signing = await createSigningIdentity();
-  const response = await request.post('/v1/agent-sessions', { data: { journeyId, agentPublicKey: { recipient: age.recipient, signingKey: signing.publicKey }, requestedScope: 'readwrite', ...(name === undefined ? {} : { name }), ...(keyStorage === undefined ? {} : { keyStorage }) }, headers: { 'X-Wayfinding': '1', Origin: ORIGIN } });
+  const response = await request.post('/v1/agent-sessions', { data: { journeyId, agentPublicKey: { recipient: age.recipient, signingKey: signing.publicKey }, requestedScope: 'readwrite', ...(name === undefined ? {} : { name }), ...(keyStorage === undefined ? {} : { keyStorage }) }, headers: { 'X-Client-Version': '0.1.4', 'X-Control-Format': 'control-proof-v1', 'X-Wayfinding': '1', Origin: ORIGIN } });
   if (!response.ok()) throw new Error(`Agent session rejected (${response.status()}): ${await response.text()}`);
   const { id, code, approvalUrl } = await response.json() as { id: string; code: string; approvalUrl: string };
   const { principal } = await (await request.get('/v1/agent-sessions/' + id)).json() as { principal: string };
@@ -20,7 +20,7 @@ async function signed(request: APIRequestContext, agent: Agent, method: 'GET' | 
   const hash = b64url(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(body))));
   const message = [method, '/v1' + path, hash, timestamp, nonce].join('\n');
   const signature = b64url(new Uint8Array(await crypto.subtle.sign('Ed25519', agent.signingPrivateKey, new TextEncoder().encode(message))));
-  const response = await request.fetch('/v1' + path, { method, data: method === 'GET' ? undefined : body, headers: { 'X-Agent-Session': agent.id, 'X-Agent-Timestamp': timestamp, 'X-Agent-Nonce': nonce, 'X-Agent-Signature': signature, ...(method === 'POST' ? { 'X-Wayfinding': '1', Origin: ORIGIN, 'Content-Type': 'application/json' } : {}) } });
+  const response = await request.fetch('/v1' + path, { method, data: method === 'GET' ? undefined : body, headers: { 'X-Client-Version': '0.1.4', 'X-Control-Format': 'control-proof-v1', 'X-Agent-Session': agent.id, 'X-Agent-Timestamp': timestamp, 'X-Agent-Nonce': nonce, 'X-Agent-Signature': signature, ...(method === 'POST' ? { 'X-Client-Version': '0.1.4', 'X-Control-Format': 'control-proof-v1', 'X-Wayfinding': '1', Origin: ORIGIN, 'Content-Type': 'application/json' } : {}) } });
   if (!response.ok()) throw new Error(`Signed agent request ${path} rejected (${response.status()}): ${await response.text()}`);
   return response.json();
 }

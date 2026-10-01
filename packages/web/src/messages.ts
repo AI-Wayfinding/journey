@@ -1,6 +1,8 @@
+export const UPDATE_REQUIRED = 'This journey needs a newer version of Wayfinding. Reload to update the app, then try again. Your access stays valid; do not ask for approval again.';
 /** Words a person sees when a request fails. Server codes stay stable; this is the only place they become text. */
 export const EXPIRED_LINK = 'Sign-in links work once and expire after 15 minutes. Ask for a new one.';
 const messages: Record<string, string> = {
+  'client-too-old': UPDATE_REQUIRED,
   unauthorized: 'Your sign-in has ended. Sign in again to continue.',
   forbidden: 'You don\'t have access to do that in this journey.',
   'not-found': 'We couldn\'t find that. It may have expired or been removed.',

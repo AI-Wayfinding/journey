@@ -1,4 +1,4 @@
-import { deriveRecipient, itemVersions, meetsMinClientVersion, open, openLinkIdentity, parseRecord, unwrapJourneyKey, verifyControlProofs, readControlProof } from '@ai-wayfinding/core';
+import { CLIENT_VERSION, canReadContent, logDefinitions, deriveRecipient, itemVersions, meetsMinClientVersion, open, openLinkIdentity, parseRecord, unwrapJourneyKey, verifyControlProofs, readControlProof } from '@ai-wayfinding/core';
 import type { ControlProof, Member, Envelope, JourneyKey, LogEntry, LogState, ProtocolRecord } from '@ai-wayfinding/core';
 
 /**
@@ -35,6 +35,7 @@ const historyError = 'This journey history could not be verified, so it is not s
 
 async function json<T>(response: Response): Promise<T> {
   if (response.status === 403 || response.status === 404) throw new LinkEnded();
+  if (response.status === 426) throw new Error('This journey needs a newer version of Wayfinding. Update the server, then try this same link; do not request approval again.');
   if (!response.ok) throw new Error('enclave failed');
   return response.json() as Promise<T>;
 }
@@ -50,13 +51,14 @@ async function readJourney(identity: string, memberId: string, journeyId: string
   }
   const epochs = new Map<number, JourneyKey>();
   for (const wrap of (await json<{ wraps: { epoch: number; wrap: string }[] }>(await call({ op: 'wraps' }))).wraps) epochs.set(wrap.epoch, await unwrapJourneyKey({ epoch: wrap.epoch, recipient: memberId, ciphertext: wrap.wrap }, identity));
-  if (!rows.length) throw new Error(historyError);
+  if (!rows.length || rows.some(row => !row.proof || !row.envelope || row.seq !== row.proof.seq)) throw new Error(historyError);
+  if (rows.some(row => row.proof.v !== 1 || !logDefinitions.some(definition => definition.name === row.proof.type))) throw new Error('This journey needs a newer version of Wayfinding. Update the server, then try this same link; do not request approval again.');
   const checked = await verifyControlProofs(rows.map(row => row.proof), rows.map(row => row.envelope), { journey: journeyId, creator: rows[0]!.proof.body.creator as Member }, [...epochs.values()]);
   if (!checked.ok || checked.state.journey !== journeyId) throw new Error(historyError);
   const state = checked.state;
   const mine = state.members[memberId]?.member;
-  if (!mine || mine.kind !== 'agent' || mine.recipient !== await deriveRecipient(identity)) throw new LinkEnded();
-  if (!meetsMinClientVersion('0.1.4', state.minClientVersion)) throw new Error('This journey needs a newer version of Wayfinding to be read.');
+  if (!mine || mine.kind !== 'agent' || mine.recipient !== await deriveRecipient(identity) || !canReadContent(state, memberId)) throw new LinkEnded();
+  if (!meetsMinClientVersion(CLIENT_VERSION, state.minClientVersion)) throw new Error('This journey needs a newer version of Wayfinding. Update the server, then try this same link; do not request approval again.');
   if (!epochs.has(state.currentEpoch)) throw new Error(historyError);
   const envelopes: Envelope[] = [];
   let after = 0;

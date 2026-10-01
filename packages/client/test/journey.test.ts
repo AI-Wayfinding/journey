@@ -1,64 +1,58 @@
 import { describe, expect, it, vi } from 'vitest';
-import { canonical, createAgeIdentity, createSigningIdentity, generateJourneyKey, hashEntry, importSigningKey, newId, seal, signEntry, wrapJourneyKey } from '@ai-wayfinding/core';
-import type { LogEntry } from '@ai-wayfinding/core';
+import { createAgeIdentity, createSigningIdentity, generateJourneyKey, hashControlProof, importSigningKey, newId, sealControlLabels, signControlProof, wrapJourneyKey, type ControlProof, type Envelope, type JsonObject } from '@ai-wayfinding/core';
 import { JourneyClient } from '../src/journey.js';
 import type { RememberedAgent } from '../src/storage.js';
-const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
 
 async function fixture(scope: 'read' | 'readwrite' = 'readwrite') {
   const journeyId = newId(), principal = newId(), ownerId = newId();
   const ownerAge = await createAgeIdentity(), ownerSign = await createSigningIdentity();
   const agentAge = await createAgeIdentity(), agentSign = await createSigningIdentity();
   const key = generateJourneyKey();
-  const owner = { id: ownerId, kind: 'person' as const, recipient: ownerAge.recipient, signingKey: ownerSign.publicKey };
-  const genesis = await signEntry({ v: 1, seq: 0, prev: null, at: new Date().toISOString(), actor: ownerId, type: 'genesis', body: { journey: journeyId, name: 'Test journey', creator: owner, grants: ['members.manage'], mode: 'sealed', visibility: 'private', minClientVersion: '0.1.0' } }, await importSigningKey(ownerSign.privateKey));
-  const member = { id: principal, kind: 'agent' as const, recipient: agentAge.recipient, signingKey: agentSign.publicKey, scope, addedBy: ownerId, expiresAt: new Date(Date.now() + 3_600_000).toISOString() };
-  const added = await signEntry({ v: 1, seq: 1, prev: await hashEntry(genesis), at: new Date().toISOString(), actor: ownerId, type: 'member.add', body: { member, grants: [], kind: 'agent' } }, await importSigningKey(ownerSign.privateKey));
-  const entries: LogEntry[] = [genesis, added];
+  const controls: { seq: number; proof: ControlProof; envelope: Envelope }[] = [];
+  async function append(type: string, body: JsonObject) {
+    const entry = { v: 1 as const, seq: controls.length, prev: controls.length ? await hashControlProof(controls.at(-1)!.proof) : null, at: new Date().toISOString(), actor: ownerId, type, body };
+    const envelope = await sealControlLabels(entry, { id: newId(), journey: journeyId, seq: entry.seq, epoch: 1, createdAt: entry.at }, key);
+    controls.push({ seq: entry.seq, envelope, proof: await signControlProof(entry, envelope, journeyId, await importSigningKey(ownerSign.privateKey)) });
+  }
+  await append('genesis', { journey: journeyId, name: 'Test journey', creator: { id: ownerId, kind: 'person', recipient: ownerAge.recipient, signingKey: ownerSign.publicKey }, grants: ['members.manage'], mode: 'sealed', visibility: 'private', minClientVersion: '0.1.4' });
+  await append('member.add', { member: { id: principal, kind: 'agent', recipient: agentAge.recipient, signingKey: agentSign.publicKey, scope, addedBy: ownerId, expiresAt: new Date(Date.now() + 3_600_000).toISOString() }, grants: [], kind: 'agent' });
   const wrap = (await wrapJourneyKey(key, [{ id: principal, recipient: agentAge.recipient }]))[0]!;
   const session: RememberedAgent = { server: 'https://app.wayfinding.support', journeyId, sessionId: newId(), principal, identity: agentAge.identity, recipient: agentAge.recipient, signingPrivateKey: agentSign.privateKey, signingKey: agentSign.publicKey, scope, expiresAt: Date.now() + 3_600_000 };
   const requests: string[] = [];
   const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const path = new URL(String(url)).pathname;
     requests.push((init?.method ?? 'GET') + ' ' + path);
+    if (path.endsWith('/protocol')) return Response.json({ minClientVersion: '0.1.4', controlFormat: 'control-proof-v1' });
     if (path.endsWith('/wraps/me')) return Response.json({ wraps: [{ epoch: 1, wrap: wrap.ciphertext }] });
-    if (path.endsWith('/log')) return Response.json({ log: await Promise.all(entries.map(async (entry, seq) => ({ seq, entry: encode(await seal({ type: 'membership', typeVersion: 1, body: entry }, { id: newId(), journey: journeyId, epoch: 1, createdAt: entry.at }, key)) }))) });
+    if (path.endsWith('/log')) return Response.json({ log: controls });
     if (path.endsWith('/records')) return Response.json({ records: [] });
     if (path.endsWith('/seq')) return Response.json({ seq: 1, epoch: 1 });
     return Response.json({ status: 'created' }, { status: 201 });
   });
-  return { session, entries, key, ownerId, ownerSign, fetcher, requests };
+  return { session, controls, append, ownerId, fetcher, requests };
 }
 
 describe('journey client guard', () => {
-  it('refuses a write when a signed log entry is forged before requesting a record sequence', async () => {
-    const f = await fixture();
-    f.entries[1]!.body = { ...f.entries[1]!.body, kind: 'person' };
-    const client = new JourneyClient(f.session, { fetch: f.fetcher });
-    await expect(client.add({ type: 'note', title: 'Sensitive title', body: 'Sensitive body', tags: [] })).rejects.toThrow(/verified|history/i);
+  it('refuses a forged control before requesting a content sequence', async () => {
+    const f = await fixture(); f.controls[1]!.proof.body.kind = 'person';
+    await expect(new JourneyClient(f.session, { fetch: f.fetcher }).add({ type: 'note', title: 'No', body: 'No', tags: [] })).rejects.toThrow(/verified|history/i);
     expect(f.requests.some(value => value.includes('/seq'))).toBe(false);
   });
-  it('refuses writes after a signed member removal even if a server still serves old wraps', async () => {
-    const f = await fixture();
-    const removal = await signEntry({ v: 1, seq: 2, prev: await hashEntry(f.entries[1]!), at: new Date().toISOString(), actor: f.ownerId, type: 'member.remove', body: { member: f.session.principal } }, await importSigningKey(f.ownerSign.privateKey));
-    f.entries.push(removal);
+  it('refuses removed agents despite remembered scope and old wraps', async () => {
+    const f = await fixture(); await f.append('member.remove', { member: f.session.principal });
     await expect(new JourneyClient(f.session, { fetch: f.fetcher }).add({ type: 'note', title: 'No', body: 'No', tags: [] })).rejects.toThrow('Access to this journey has ended');
     expect(f.requests.some(value => value.includes('/seq'))).toBe(false);
   });
-  it('tells the agent to update the client, with operator help, when the log has an entry type it does not know', async () => {
-    const f = await fixture();
-    const unsigned = { v: 1 as const, seq: 2, prev: await hashEntry(f.entries[1]!), at: new Date().toISOString(), actor: f.ownerId, type: 'member.future-thing', body: { id: f.ownerId } };
-    const signature = new Uint8Array(await crypto.subtle.sign('Ed25519', await importSigningKey(f.ownerSign.privateKey), new TextEncoder().encode(canonical(unsigned))));
-    f.entries.push({ ...unsigned, sig: btoa(Array.from(signature, byte => String.fromCharCode(byte)).join('')) } as LogEntry);
-    const failure = new JourneyClient(f.session, { fetch: f.fetcher }).list();
-    await expect(failure).rejects.toThrow(/npm install -g @ai-wayfinding\/client@latest/);
-    await expect(new JourneyClient(f.session, { fetch: f.fetcher }).list()).rejects.toThrow(/operator/);
+  it('fails closed with an update message for unsupported controls and newer signed minimum', async () => {
+    const f = await fixture(); f.controls[1]!.proof.type = 'future.control';
+    await expect(new JourneyClient(f.session, { fetch: f.fetcher }).list()).rejects.toThrow('npm install -g @ai-wayfinding/client@latest');
+    const newer = await fixture(); await newer.append('client.minVersion', { version: '999.0.0' });
+    await expect(new JourneyClient(newer.session, { fetch: newer.fetcher }).add({ type: 'note', title: 'No', body: 'No', tags: [] })).rejects.toThrow('newer format');
+    expect(newer.requests.some(value => value.includes('/seq'))).toBe(false);
   });
-  it('refuses read-only writes and a newer minimum client version', async () => {
-    const readOnly = await fixture('read');
-    await expect(new JourneyClient(readOnly.session, { fetch: readOnly.fetcher }).add({ type: 'note', title: 'No', body: 'No', tags: [] })).rejects.toThrow(/read.only/i);
-    const newer = await fixture();
-    newer.entries[0]!.body.minClientVersion = '999.0.0';
-    await expect(new JourneyClient(newer.session, { fetch: newer.fetcher }).add({ type: 'note', title: 'No', body: 'No', tags: [] })).rejects.toThrow(/verified|newer/i);
+  it('refuses read-only writes before reservation', async () => {
+    const f = await fixture('read');
+    await expect(new JourneyClient(f.session, { fetch: f.fetcher }).add({ type: 'note', title: 'No', body: 'No', tags: [] })).rejects.toThrow('read-only');
+    expect(f.requests.some(value => value.includes('/seq'))).toBe(false);
   });
 });

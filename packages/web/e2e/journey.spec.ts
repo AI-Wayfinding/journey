@@ -3,67 +3,8 @@ import { open, unwrapJourneyKey } from '@ai-wayfinding/core';
 import type { Envelope, JourneyKey } from '@ai-wayfinding/core';
 import { agentWritesItem, requestAgent } from './agent.js';
 
-declare global { interface Window { __passkeyCalls: { create: number; get: number } } }
+import { browserPerson, signUp } from './person.js';
 const calls = (page: Page) => page.evaluate(() => window.__passkeyCalls);
-let nextTestIp = 1;
-async function browserPerson(browser: Browser, hasPrf = true, omitPrfOnCreate = false): Promise<{ page: Page; context: BrowserContext; requests: string[]; cdp: CDPSession; authenticatorId: string }> {
-  // Local e2e traffic otherwise shares one unknown IP and hits the production 10-email/minute limit.
-  const context = await browser.newContext({ extraHTTPHeaders: { 'CF-Connecting-IP': `198.51.100.${nextTestIp++}` } });
-  const page = await context.newPage();
-  await page.addInitScript(({ omitPrfOnCreate }) => {
-    window.__passkeyCalls = { create: 0, get: 0 };
-    const create = navigator.credentials.create.bind(navigator.credentials);
-    const get = navigator.credentials.get.bind(navigator.credentials);
-    Object.defineProperty(navigator.credentials, 'create', { value: async (...args: Parameters<typeof create>) => {
-      window.__passkeyCalls.create++;
-      const credential = await create(...args);
-      if (omitPrfOnCreate && credential instanceof PublicKeyCredential) {
-        const extensions = credential.getClientExtensionResults.bind(credential);
-        Object.defineProperty(credential, 'getClientExtensionResults', { value: () => {
-          const results = extensions();
-          if (results.prf) delete results.prf.results;
-          return results;
-        } });
-      }
-      return credential;
-    } });
-    Object.defineProperty(navigator.credentials, 'get', { value: (...args: Parameters<typeof get>) => { window.__passkeyCalls.get++; return get(...args); } });
-  }, { omitPrfOnCreate });
-  const cdp = await context.newCDPSession(page);
-  await cdp.send('WebAuthn.enable');
-  const { authenticatorId } = await cdp.send('WebAuthn.addVirtualAuthenticator', { options: { protocol: 'ctap2', transport: 'internal', hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true, hasPrf } });
-  const requests: string[] = [];
-  page.on('request', request => requests.push(request.url()));
-  return { page, context, requests, cdp, authenticatorId };
-}
-async function signUp(page: Page, email: string): Promise<string[]> {
-  await page.goto('/');
-  await expect(page.getByRole('heading', { name: "Let's get started" })).toBeVisible();
-  await page.locator('#content').getByRole('link', { name: 'Start your journey' }).click();
-  await page.getByLabel('Email address').fill(email);
-  await page.getByRole('button', { name: 'Send sign-in link' }).click();
-  await expect(page.getByRole('heading', { name: 'Check your email' })).toBeVisible();
-  const message = await page.request.get(`/__test/email?address=${encodeURIComponent(email)}`);
-  expect(message.ok()).toBeTruthy();
-  const { text } = await message.json() as { text: string | null };
-  expect(text).toContain('/auth/verify#token=');
-  const link = /https?:\/\/[^\s]+#token=[A-Za-z0-9_-]+/.exec(text!)![0]!;
-  await page.goto(link);
-  await expect(page.getByRole('heading', { name: 'Create your passkey' })).toBeVisible();
-  await page.getByRole('button', { name: 'Create passkey' }).click();
-  await expect(page.getByRole('heading', { name: 'Save your backup codes' })).toBeVisible({ timeout: 30_000 });
-  const codes = (await page.locator('#backup-copy-value').textContent())!.trim().split('\n');
-  expect(codes).toHaveLength(8);
-  await page.getByLabel('I saved these codes').check();
-  await page.getByRole('button', { name: 'Continue', exact: true }).click();
-  await expect(page.getByRole('heading', { name: 'A place to find your way' })).toBeVisible({ timeout: 30_000 });
-  const count = await calls(page);
-  expect(count.create).toBe(1);
-  expect(count.get).toBeLessThanOrEqual(1);
-  console.log(`Sign-up taps: ${count.create} create, ${count.get} get`);
-  return codes;
-}
-
 test('account name and per-journey email visibility are shared only when chosen', async ({ browser }) => {
   const owner = await browserPerson(browser), guest = await browserPerson(browser);
   try {
@@ -291,7 +232,7 @@ test('two people share a journey with PRF passkeys and same-origin assets', asyn
     const itemPath = new URL(alice.page.url()).pathname;
     await alice.page.getByRole('link', { name: 'Back to journey' }).click();
     await alice.page.getByRole('link', { name: 'Share this journey' }).click();
-    await expect(alice.page.getByRole('heading', { name: 'Share this journey with other wayfinders' })).toBeVisible();
+    await expect(alice.page.getByRole('heading', { name: 'Share this journey with other people' })).toBeVisible();
     await alice.page.getByRole('button', { name: 'Copy link instead' }).click();
     const link = (await alice.page.locator('#invite-copy-value').textContent())!;
     expect(link).toMatch(/\/invite#[A-Za-z0-9_-]{43}/);
@@ -341,7 +282,7 @@ test('two people share a journey with PRF passkeys and same-origin assets', asyn
     console.log('Sign-in taps: 1 get');
     await bob.page.getByRole('link', { name: 'Our shared path' }).click();
     await bob.page.getByRole('link', { name: 'First observation' }).click();
-    const bobWrapsResponse = await bob.page.request.get('/v1' + journeyPath + '/wraps/me', { headers: { 'X-Principal': bobPrincipal } });
+    const bobWrapsResponse = await bob.page.request.get('/v1' + journeyPath + '/wraps/me', { headers: { 'X-Client-Version': '0.1.4', 'X-Control-Format': 'control-proof-v1', 'X-Principal': bobPrincipal } });
     const bobWraps = (await bobWrapsResponse.json()) as { wraps: { epoch: number; wrap: string }[] };
     expect(bobWraps.wraps.map(w => w.epoch)).toContain(1);
     const agent = await requestAgent(request, journeyPath.split('/').at(-1)!, 'Proposed <guide>');
@@ -363,12 +304,12 @@ test('two people share a journey with PRF passkeys and same-origin assets', asyn
     await agentWritesItem(request, agent, journeyPath.split('/').at(-1)!);
     await alice.page.getByRole('link', { name: 'People & agents' }).click();
     await expect(alice.page.getByText('Alice’s guide', { exact: false })).toBeVisible();
-    const beforeRenameWraps = await (await alice.page.request.get('/v1' + journeyPath + '/wraps/me', { headers: { 'X-Principal': alicePrincipal } })).json() as { wraps: { epoch: number }[] };
+    const beforeRenameWraps = await (await alice.page.request.get('/v1' + journeyPath + '/wraps/me', { headers: { 'X-Client-Version': '0.1.4', 'X-Control-Format': 'control-proof-v1', 'X-Principal': alicePrincipal } })).json() as { wraps: { epoch: number }[] };
     alice.page.once('dialog', dialog => void dialog.accept('<renamed guide>'));
     await alice.page.locator(`[data-rename="${agent.principal}"]`).click();
     await expect(alice.page.getByText('<renamed guide>', { exact: false })).toBeVisible();
     expect(await alice.page.locator('strong').filter({ hasText: '<renamed guide>' }).count()).toBe(1);
-    const afterRenameWraps = await (await alice.page.request.get('/v1' + journeyPath + '/wraps/me', { headers: { 'X-Principal': alicePrincipal } })).json() as { wraps: { epoch: number }[] };
+    const afterRenameWraps = await (await alice.page.request.get('/v1' + journeyPath + '/wraps/me', { headers: { 'X-Client-Version': '0.1.4', 'X-Control-Format': 'control-proof-v1', 'X-Principal': alicePrincipal } })).json() as { wraps: { epoch: number }[] };
     expect(afterRenameWraps.wraps.map(w => w.epoch)).toEqual(beforeRenameWraps.wraps.map(w => w.epoch));
     await expect(alice.page.locator('[data-rename]')).toHaveCount(1);
     await alice.page.getByRole('link', { name: 'Back to journey' }).click();
@@ -388,9 +329,9 @@ test('two people share a journey with PRF passkeys and same-origin assets', asyn
     await expect(alice.page.getByRole('heading', { name: 'Only after Bob left' })).toBeVisible();
     await bob.page.getByRole('link', { name: 'Back to journey' }).click();
     await expect(bob.page.getByText('You no longer have access to this journey.')).toBeVisible();
-    const denied = await bob.page.request.get('/v1' + journeyPath + '/records', { headers: { 'X-Principal': bobPrincipal } });
+    const denied = await bob.page.request.get('/v1' + journeyPath + '/records', { headers: { 'X-Client-Version': '0.1.4', 'X-Control-Format': 'control-proof-v1', 'X-Principal': bobPrincipal } });
     expect(denied.status()).toBe(403);
-    const afterRemoval = await alice.page.request.get('/v1' + journeyPath + '/records', { headers: { 'X-Principal': (await alice.page.request.get('/v1/journeys').then(r => r.json()) as { journeys: { principal: string; id: string }[] }).journeys.find(j => journeyPath.endsWith(j.id))!.principal } });
+    const afterRemoval = await alice.page.request.get('/v1' + journeyPath + '/records', { headers: { 'X-Client-Version': '0.1.4', 'X-Control-Format': 'control-proof-v1', 'X-Principal': (await alice.page.request.get('/v1/journeys').then(r => r.json()) as { journeys: { principal: string; id: string }[] }).journeys.find(j => journeyPath.endsWith(j.id))!.principal } });
     const envelopes = (await afterRemoval.json()) as { records: Envelope[] };
     const newest = envelopes.records.at(-1)!;
     expect(newest.outside.epoch).toBeGreaterThan(Math.max(...bobWraps.wraps.map(w => w.epoch)));
@@ -420,7 +361,7 @@ test('two people share a journey with PRF passkeys and same-origin assets', asyn
     await expect(alice.page.getByText('Wayfinding support (Hypha)')).toBeVisible({ timeout: 10_000 });
     const supportLists = await support.page.request.get('/v1/journeys');
     const supportPrincipal = ((await supportLists.json()) as { journeys: { id: string; principal: string }[] }).journeys.find(j => journeyPath.endsWith(j.id))!.principal;
-    expect((await support.page.request.post(`/v1${journeyPath}/seq`, { data: {}, headers: { 'X-Wayfinding': '1', Origin: 'http://localhost:18787', 'X-Principal': supportPrincipal } })).status()).toBe(403);
+    expect((await support.page.request.post(`/v1${journeyPath}/seq`, { data: {}, headers: { 'X-Client-Version': '0.1.4', 'X-Control-Format': 'control-proof-v1', 'X-Wayfinding': '1', Origin: 'http://localhost:18787', 'X-Principal': supportPrincipal } })).status()).toBe(403);
     expect(support.requests.every(url => new URL(url).hostname === 'localhost')).toBeTruthy();
   } finally { await alice.context.close(); await bob.context.close(); await support.context.close(); }
 });
