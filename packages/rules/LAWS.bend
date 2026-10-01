@@ -204,3 +204,30 @@ law server_missing_format_refused:
   for client: R.Version
   for minimum: R.Version
   {R.server_version(client, minimum, False{}) == False{} : Bool}
+
+# A signed support admission cannot widen its read-only limit.
+law server_support_scope_matches:
+  for scope: Maybe<&2, R.Role>
+  for admitted: Maybe<&2, R.Role>
+  for owner: Nat
+  for actor: Nat
+  {R.server_admission(R.Person{}, scope, admitted, owner, actor, True{}) == R.admission_scope(scope, Some{R.ReadOnly{}}) : Bool}
+
+# An agent cannot be admitted under another adding person or a different limit.
+law server_agent_admission_requires_owner:
+  for scope: Maybe<&2, R.Role>
+  for admitted: Maybe<&2, R.Role>
+  for +owner: Nat
+  for +actor: Nat
+  for support: Bool
+  for e: {Nat.is_eq(owner, actor) == False{} : Bool}
+  {R.server_admission(R.Agent{}, scope, admitted, owner, actor, support) == False{} : Bool}
+
+law server_agent_admission_requires_scope:
+  for +scope: Maybe<&2, R.Role>
+  for +admitted: Maybe<&2, R.Role>
+  for owner: Nat
+  for actor: Nat
+  for support: Bool
+  for e: {R.admission_scope(scope, admitted) == False{} : Bool}
+  {R.server_admission(R.Agent{}, scope, admitted, owner, actor, support) == False{} : Bool}

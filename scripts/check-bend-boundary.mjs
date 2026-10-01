@@ -48,7 +48,9 @@ function violations(source, path) {
     if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === 'includes' && node.arguments.some(arg => text(arg) === "'members.manage'")) {
       // addMember translates the verified signed grant into a boolean input.
       const adapter = path === 'packages/core/src/log.ts' && text(node.expression.expression) === '(body.grants as Grant[])';
-      if (!adapter) findings.push('guide authority must call Bend');
+      // liveGrantInput translates only the verified signed grant into replayControl's Bend input.
+      const liveGrantInput = path === 'packages/server/src/enclave.ts' && text(node) === "(proof.body.grants as string[]).includes('members.manage')";
+      if (!adapter && !liveGrantInput) findings.push('guide authority must call Bend');
     }
     if (ts.isBinaryExpression(node) && ['===', '!==', '==', '!='].includes(text(node.operatorToken))) {
       const expression = text(node);
@@ -80,7 +82,7 @@ function violations(source, path) {
 function sources(dir) {
   return readdirSync(root + dir, { withFileTypes: true }).flatMap(entry => entry.isDirectory() ? sources(`${dir}/${entry.name}`) : entry.name.endsWith('.ts') ? [`${dir}/${entry.name}`] : []);
 }
-function rules() {
+async function rules() {
   for (const name of packages) {
     for (const path of sources(`packages/${name}/src`)) {
       assert.deepEqual(violations(read(path), path), [], `Duplicate TypeScript decisions: ${path}`);
@@ -93,7 +95,7 @@ function rules() {
     'packages/web/src/main.ts': ['canWriteContent', 'isPersonGuide', 'canControl', 'canRenameAgent'],
     'packages/web/src/journey.ts': ['canWriteContent', 'isPersonGuide'],
     'packages/client/src/journey.ts': ['canWriteContent', 'effectiveScope'],
-    'packages/server/src/enclave.ts': ['rules.transport_access', 'rules.transport_remove', 'rules.transport_renew', 'rules.survives'],
+    'packages/server/src/enclave.ts': ['rules.server_version', 'rules.member_access', 'rules.server_content', 'rules.server_read', 'rules.server_admission', 'replayControl', 'normalizedMembers'],
   };
   for (const [path, calls] of Object.entries(required)) for (const call of calls) assert(read(path).includes(`${call}(`), `${path} must use ${call}`);
   // Negative controls: deleting a guard or restoring representative legacy
@@ -110,6 +112,22 @@ function rules() {
   ]) for (const path of ['packages/core/src/removal.ts', 'packages/server/src/enclave.ts', 'packages/server/src/index.ts', 'packages/web/src/main.ts', 'packages/client/src/journey.ts']) {
     assert(violations(fixture, path).length > 0, `Boundary negative control: ${path}: ${fixture}`);
   }
+  const grantInput = "(proof.body.grants as string[]).includes('members.manage')";
+  assert.deepEqual(violations(grantInput, 'packages/server/src/enclave.ts'), []);
+  assert(violations(grantInput, 'packages/server/src/index.ts').length > 0, 'Grant adapter exemption must be file-scoped');
+  assert(violations("(proof.body.grants as string[]).includes('members.manage', 1)", 'packages/server/src/enclave.ts').length > 0, 'Grant adapter exemption must be expression-scoped');
+  const { default: bend } = await import('../packages/rules/rules.mjs');
+  const absent = { $: 'None' };
+  const readonly = { $: 'Some', value: { $: 'ReadOnly' } };
+  const writable = { $: 'Some', value: { $: 'ReadWrite' } };
+  for (const scope of [absent, readonly, writable]) {
+    assert.equal(bend.server_admission({ $: 'Person' }, scope, absent, 0n, 1n, true), scope === readonly, 'Support admission must remain explicitly read-only');
+    assert.equal(bend.server_admission({ $: 'Person' }, scope, absent, 0n, 1n, false), true, 'Normal admission role comes from signed replay settings');
+    for (const admitted of [absent, readonly, writable]) {
+      assert.equal(bend.server_admission({ $: 'Agent' }, scope, admitted, 1n, 1n, false), scope === admitted, 'Agent scope must match the signed admission limit');
+      assert.equal(bend.server_admission({ $: 'Agent' }, scope, admitted, 2n, 1n, false), false, 'Agent admission cannot use another adding person');
+    }
+  }
   assert(!/UPDATE principals SET removedAt=.*WHERE kind=/.test(read('packages/server/src/enclave.ts')), 'SQL must not duplicate the cascade');
   console.log('Bend-only decision source checks passed');
 }
@@ -121,5 +139,5 @@ function agentGuidance() {
 const mode = process.argv[2];
 assert(['--build', '--rules', '--guidance'].includes(mode), 'Use --build, --rules or --guidance');
 if (mode === '--build') build();
-if (mode === '--rules') rules();
+if (mode === '--rules') await rules();
 if (mode === '--guidance') agentGuidance();

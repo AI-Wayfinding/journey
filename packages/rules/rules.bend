@@ -491,3 +491,22 @@ def server_read(access: Maybe<&2, Role>, identity: Bool, version: Bool) -> Bool:
 
 def server_content(access: Maybe<&2, Role>, identity: Bool, version: Bool, pending: Bool) -> Bool:
   content_write(access, pending) && identity && version
+
+# Match the signed admission limit and adding person, not caller access rows.
+def admission_scope(member: Maybe<&2, Role>, admitted: Maybe<&2, Role>) -> Bool:
+  match member admitted:
+    case None{} None{}:
+      True{}
+    case Some{ReadOnly{}} Some{ReadOnly{}}:
+      True{}
+    case Some{ReadWrite{}} Some{ReadWrite{}}:
+      True{}
+    case _ _:
+      False{}
+
+def server_admission(kind: MemberKind, scope: Maybe<&2, Role>, admitted: Maybe<&2, Role>, owner: Nat, actor: Nat, support: Bool) -> Bool:
+  match kind:
+    case Person{}:
+      Bool.not(support) || admission_scope(scope, Some{ReadOnly{}})
+    case Agent{}:
+      Nat.is_eq(owner, actor) && admission_scope(scope, admitted)

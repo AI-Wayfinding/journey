@@ -1,5 +1,5 @@
-import rules from '@ai-wayfinding/rules';
-import { canonical, isPersonGuide, readControlProof, replayControl, normalizedMembers, ruleVersion, verifyControlProofs, type LogState, type Member } from '@ai-wayfinding/core';
+import rules, { type Maybe, type Role } from '@ai-wayfinding/rules';
+import { canonical, contentRole, isPersonGuide, readControlProof, replayControl, normalizedMembers, ruleVersion, verifyControlProofs, type LogState, type Member } from '@ai-wayfinding/core';
 import { failure } from './types.js';
 import type { Admission, ControlInput, EnclaveMessage, Subject } from './types.js';
 
@@ -132,7 +132,7 @@ export class EnclaveObject {
     const live = replayControl(state, subject.principal, operation, target, operation === 'Add' ? next.members[(proof.body.member as Member).id]?.member : undefined, proof.type === 'grant.add' || operation === 'Add' && (proof.body.grants as string[]).includes('members.manage'), { $: proof.body.role === 'read-only' ? 'ReadOnly' : 'ReadWrite' }, now);
     if (live.transition.$ !== 'Accepted') return failure('forbidden', 403);
     const admission = input.admission;
-    if (proof.type === 'member.add' && !this.admission(proof.body.member as Member, admission, subject, now)) return failure('forbidden', 403);
+    if (proof.type === 'member.add' && !this.admission(proof.body.member as Member, admission, subject, live.model, now)) return failure('forbidden', 403);
     if (proof.type !== 'member.add' && admission) return failure('invalid-request', 400);
     if (input.control.envelope.outside.epoch !== (proof.type === 'key.rotate' ? next.currentEpoch : state.currentEpoch)) return failure('old-epoch', 409);
     const supplied = input.wraps ?? [];
@@ -149,9 +149,12 @@ export class EnclaveObject {
     });
     return Response.json({ seq: proof.seq, memberDelta: Object.keys(next.members).length - Object.keys(state.members).length, removed, minClientVersion: next.minClientVersion }, { status: 201 });
   }
-  private admission(member: Member, admission: Admission | undefined, subject: Subject, now: number): boolean {
+  private admission(member: Member, admission: Admission | undefined, subject: Subject, model: ReturnType<typeof normalizedMembers>, now: number): boolean {
     if (!admission || member.id !== admission.id || member.kind !== admission.kind || member.recipient !== admission.recipient || member.signingKey !== admission.signingKey) return false;
-    if (member.kind === 'person') return !!admission.accountHash && (admission.support ? member.support === true && member.scope === 'read' && Date.parse(member.expiresAt ?? '') === admission.expiresAt && admission.expiresAt! > now : member.support === undefined && member.expiresAt === undefined);
-    return member.addedBy === subject.principal && member.scope === admission.scope && Date.parse(member.expiresAt ?? '') === admission.expiresAt && admission.expiresAt! > now;
+    if (admission.scope !== undefined && !['read', 'readwrite'].includes(admission.scope)) return false;
+    const scope = (value: Member['scope']): Maybe<Role> => value === undefined ? { $: 'None' } : { $: 'Some', value: contentRole(value) };
+    if (!rules.server_admission({ $: member.kind === 'person' ? 'Person' : 'Agent' }, scope(member.scope), scope(admission.scope), model.id(member.addedBy), model.id(subject.principal), Boolean(admission.support))) return false;
+    if (member.kind === 'person') return !!admission.accountHash && (admission.support ? member.support === true && Date.parse(member.expiresAt ?? '') === admission.expiresAt && admission.expiresAt! > now : member.support === undefined && member.expiresAt === undefined);
+    return Date.parse(member.expiresAt ?? '') === admission.expiresAt && admission.expiresAt! > now;
   }
 }

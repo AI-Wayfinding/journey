@@ -143,3 +143,12 @@ def Laws.server_old_client_refused(client, minimum, format, e):
 
 def Laws.server_missing_format_refused(client, minimum):
   {==}
+
+def Laws.server_support_scope_matches(scope, admitted, owner, actor):
+  {==}
+
+def Laws.server_agent_admission_requires_owner(scope, admitted, owner, actor, support, e):
+  Equal.cong(Bool, Bool, b => b && R.admission_scope(scope, admitted), Nat.is_eq(owner, actor), False{}, e)
+
+def Laws.server_agent_admission_requires_scope(scope, admitted, owner, actor, support, e):
+  Equal.trans(Bool, Nat.is_eq(owner, actor) && R.admission_scope(scope, admitted), Nat.is_eq(owner, actor) && False{}, False{}, Equal.cong(Bool, Bool, b => Nat.is_eq(owner, actor) && b, R.admission_scope(scope, admitted), False{}, e), and_false(Nat.is_eq(owner, actor)))

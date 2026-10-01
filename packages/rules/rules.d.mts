@@ -15,6 +15,7 @@ declare const rules: {
   server_version(client: Version, minimum: Version, format: boolean): boolean;
   server_read(access: Maybe<Role>, identity: boolean, version: boolean): boolean;
   server_content(access: Maybe<Role>, identity: boolean, version: boolean, pending: boolean): boolean;
+  server_admission(kind: Kind, scope: Maybe<Role>, admitted: Maybe<Role>, owner: bigint, actor: bigint, support: boolean): boolean;
   legacy_settings(name: string, description: string): JourneySettings;
   active_settings(settings: JourneySettings): boolean;
   version_ge(a: Version, b: Version): boolean;
