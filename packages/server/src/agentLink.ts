@@ -1,4 +1,4 @@
-import { isArtifactAction, readArtifactPayload, type ArtifactPayload, CLIENT_VERSION, canReadContent, logDefinitions, deriveRecipient, itemVersions, meetsMinClientVersion, open, openLinkIdentity, parseRecord, unwrapJourneyKey, verifyControlProofs, readControlProof } from '@ai-wayfinding/core';
+import { isArtifactAction, readArtifactPayload, type ArtifactPayload, CLIENT_VERSION, canReadContent, controlDefinitions, deriveRecipient, itemVersions, meetsMinClientVersion, open, openLinkIdentity, parseRecord, unwrapJourneyKey, verifyControlProofs, readControlProof } from '@ai-wayfinding/core';
 import type { ControlProof, Member, Envelope, JourneyKey, LogEntry, LogState, ProtocolRecord } from '@ai-wayfinding/core';
 
 /**
@@ -52,7 +52,7 @@ async function readJourney(identity: string, memberId: string, journeyId: string
   const epochs = new Map<number, JourneyKey>();
   for (const wrap of (await json<{ wraps: { epoch: number; wrap: string }[] }>(await call({ op: 'wraps' }))).wraps) epochs.set(wrap.epoch, await unwrapJourneyKey({ epoch: wrap.epoch, recipient: memberId, ciphertext: wrap.wrap }, identity));
   if (!rows.length || rows.some(row => !row.proof || !row.envelope || row.seq !== row.proof.seq)) throw new Error(historyError);
-  if (rows.some(row => row.proof.v !== 1 || !logDefinitions.some(definition => definition.name === row.proof.type))) throw new Error('This journey needs a newer version of Wayfinding. Update the server, then try this same link; do not request approval again.');
+  if (rows.some(row => row.proof.v !== 1 || !controlDefinitions.some(definition => definition.name === row.proof.type))) throw new Error('This journey needs a newer version of Wayfinding. Update the server, then try this same link; do not request approval again.');
   const checked = await verifyControlProofs(rows.map(row => row.proof), rows.map(row => row.envelope), { journey: journeyId, creator: rows[0]!.proof.body.creator as Member }, [...epochs.values()]);
   if (!checked.ok || checked.state.journey !== journeyId) throw new Error(historyError);
   const state = checked.state;

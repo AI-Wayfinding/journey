@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { CLIENT_VERSION, copyArtifactPublic, isArtifactAction, validateArtifactPublic, validateBlobDescriptor, MAX_BLOB_BYTES, LINK_SECRET_PATTERN, isId, linkLookupHash, newId, validAgentName, logDefinitions, type ControlProof, type JsonObject, type Envelope } from '@ai-wayfinding/core';
+import { CLIENT_VERSION, copyArtifactPublic, isArtifactAction, validateArtifactPublic, validateBlobDescriptor, MAX_BLOB_BYTES, LINK_SECRET_PATTERN, isId, linkLookupHash, newId, validAgentName, controlDefinitions, type ControlProof, type JsonObject, type Envelope } from '@ai-wayfinding/core';
 import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse } from '@simplewebauthn/server';
 import { appPrfSalt, base64url, digest, emailHash, equalSecret, randomToken, unbase64url, verifyAgentSignature } from './crypto.js';
 import { ENDED_MESSAGE, LINK_RATE_LIMIT, LinkEnded, LinkExpired, expiredBody, linkResponse, readLink } from './agentLink.js';
@@ -90,7 +90,7 @@ function control(value: unknown, journey: string): ControlInput | null {
   const o = e.outside;
   if (Object.keys(e).some(k => !['outside', 'nonce', 'ciphertext'].includes(k)) || Object.keys(o).some(k => !['v', 'id', 'journey', 'seq', 'epoch', 'size', 'createdAt'].includes(k))) return null;
   if (Object.keys(p).sort().join(',') !== 'actor,at,body,envelopeHash,journey,prev,seq,sig,type,v' || p.v !== 1 || p.journey !== journey || !validSeq(p.seq) || !(p.prev === null || validString(p.prev, 64)) || !validString(p.at, 64) || !validString(p.actor, 128) || !validString(p.type, 64) || !object(p.body) || !validString(p.sig, 128) || !validString(p.envelopeHash, 64)) return null;
-  const definition = logDefinitions.find(d => d.name === p.type);
+  const definition = controlDefinitions.find(d => d.name === p.type);
   if (!definition || Object.keys(p.body).some(k => !definition.fields.includes(k)) || isArtifactAction(p.type) && !validateArtifactPublic(p.type, p.body as JsonObject).ok) return null;
   const body: JsonObject = {};
   for (const field of definition.fields) if (Object.hasOwn(p.body, field)) {
@@ -130,7 +130,7 @@ function registrationResponse(value: unknown): value is RegistrationResponse {
 function authenticationResponse(value: unknown): value is AuthenticationResponse {
   return object(value) && validString(value.id, 1024) && value.rawId === value.id && value.type === 'public-key' && object(value.clientExtensionResults) && object(value.response) && validString(value.response.clientDataJSON, 100_000) && validString(value.response.authenticatorData, 100_000) && validString(value.response.signature, 100_000);
 }
-app.onError(() => failure('internal', 500));
+app.onError(e => { console.error(e); return failure('internal', 500); });
 app.use('/v1/*', async (c, next) => {
   if (!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method) && (!validString(c.env.ORIGIN) || c.req.header('x-wayfinding') !== '1' || c.req.header('origin') !== c.env.ORIGIN)) return failure('csrf', 403);
   await next();
