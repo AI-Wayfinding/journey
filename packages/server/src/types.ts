@@ -1,12 +1,12 @@
-import type { Envelope } from '@ai-wayfinding/core';
+import type { ControlProof, Envelope } from '@ai-wayfinding/core';
 
 export type Kind = 'person' | 'agent';
 export type Scope = 'read' | 'readwrite';
 export interface Principal { id: string; kind: Kind; scope: Scope; expiresAt?: number; accountHash?: string }
-export interface AccessChange { principal: string; action: 'add' | 'remove'; kind: Kind; scope: Scope; expiresAt?: number; accountHash?: string; addedBy?: string }
 export interface EpochWrap { principal: string; epoch: number; wrap: string }
-export interface CipherEntry { seq: number; entry: string }
-export interface CreateJourney { id: string; name: string; creatorEmail: string; creatorHash: string; creator: Principal; genesis: string; wraps: EpochWrap[]; recoveryWrap: string; minClientVersion: string }
+export interface ControlInput { proof: ControlProof; envelope: Envelope }
+export interface Admission { id: string; kind: Kind; recipient: string; signingKey: string; accountHash?: string; support?: boolean; scope?: Scope; expiresAt?: number }
+export interface CreateJourney { id: string; name: string; creatorEmail: string; creatorHash: string; creator: Principal; control: ControlInput; wraps: EpochWrap[]; recoveryWrap: string; minClientVersion: string; clientVersion?: string; controlFormat?: string }
 export interface RecordInput { envelope: Envelope }
 export type ErrorCode = 'invalid-request' | 'unauthorized' | 'forbidden' | 'csrf' | 'not-found' | 'conflict' | 'old-epoch' | 'rate-limited' | 'too-large' | 'internal';
 export function failure(code: ErrorCode, status: number): Response { return Response.json({ error: { code } }, { status }); }
@@ -21,7 +21,7 @@ export function limitNumber(value: string | undefined, fallback: number): number
 export function sequenceCursor(value: string | undefined, fallback: number): number | null { if (value === undefined) return fallback; const n = Number(value); return /^\d+$/.test(value) && Number.isSafeInteger(n) ? n : null; }
 
 // Only the Worker calls these objects; the public JSON boundary validates and copies named fields first.
-export interface Subject { principal: string; accountHash?: string; agent?: boolean }
+export interface Subject { principal: string; accountHash?: string; agent?: boolean; clientVersion?: string; controlFormat?: string }
 export type RegistryMessage =
   | { op: 'emailStart'; ipHash: string; emailHash: string; tokenHash: string; email: string }
   | { op: 'emailVerify'; tokenHash: string; sessionHash: string }
@@ -42,7 +42,7 @@ export type RegistryMessage =
   | { op: 'journeyDelete'; id: string }
   | { op: 'registry' }
   | { op: 'link'; accountHash: string; journeyId: string; principal: string }
-  | { op: 'activity'; id: string; memberDelta: number; bytes: number }
+  | { op: 'activity'; id: string; memberDelta: number; bytes: number; minClientVersion?: string }
   | { op: 'inviteCreate'; hash: string; journeyId: string; expires: number; support: boolean }
   | { op: 'inviteRate'; journeyId: string; accountHash: string }
   | { op: 'inviteTake'; hash: string; accountHash: string; principal: string; recipient: string; signingKey: string }
@@ -62,10 +62,10 @@ type JourneyMessage = { journeyId: string; subject: Subject };
 export type EnclaveMessage =
   | { op: 'create'; data: CreateJourney }
   | (JourneyMessage & (
-      { op: 'access' | 'inviteAccess' | 'reserve' | 'wraps' | 'export' }
+      { op: 'access' | 'inviteAccess' | 'reserve' | 'wraps' | 'export' | 'protocol' }
+    | { op: 'linkAccess'; member: string }
+    | { op: 'controlWrite'; control: ControlInput; wraps?: EpochWrap[]; admission?: Admission }
     | { op: 'recordWrite'; envelope: Envelope }
     | { op: 'records'; after: number; limit: number }
-    | { op: 'logWrite'; entry: string; changes: AccessChange[]; memberWraps?: EpochWrap[]; wraps?: EpochWrap[]; epoch?: number }
     | { op: 'log'; after: number }
-    | { op: 'renew'; member: string; expiresAt: number; entries: string[] }
   ));

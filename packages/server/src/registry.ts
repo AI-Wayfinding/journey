@@ -25,6 +25,12 @@ export class Registry {
     this.sql.exec('CREATE TABLE IF NOT EXISTS agent_links (hash TEXT PRIMARY KEY, journeyId TEXT NOT NULL, memberId TEXT NOT NULL UNIQUE, addedBy TEXT NOT NULL, blob TEXT NOT NULL, expires INTEGER NOT NULL, since INTEGER NOT NULL, created INTEGER NOT NULL, rateStart INTEGER NOT NULL DEFAULT 0, rateCount INTEGER NOT NULL DEFAULT 0)');
     this.sql.exec('CREATE TABLE IF NOT EXISTS nonces (sessionId TEXT NOT NULL, nonce TEXT NOT NULL, expires INTEGER NOT NULL, PRIMARY KEY(sessionId,nonce))');
     this.sql.exec('CREATE TABLE IF NOT EXISTS rates (key TEXT PRIMARY KEY, start INTEGER NOT NULL, count INTEGER NOT NULL)');
+    this.sql.exec('CREATE TABLE IF NOT EXISTS journey_schema (version INTEGER NOT NULL)');
+    this.sql.exec('INSERT INTO journey_schema SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM journey_schema)');
+    if (Number(this.sql.exec('SELECT version FROM journey_schema').toArray()[0]?.version) < 2) this.state.storage.transactionSync(() => {
+      for (const table of ['journeys', 'account_principals', 'invites', 'pending_principals', 'agent_links']) this.sql.exec(`DELETE FROM ${table}`);
+      this.sql.exec('UPDATE journey_schema SET version=2');
+    });
   }
   private one(query: string, ...args: (string | number)[]): Row | null { return (this.sql.exec(query, ...args).toArray()[0] as Row | undefined) ?? null; }
   async fetch(request: Request): Promise<Response> {
@@ -140,7 +146,7 @@ export class Registry {
           case 'journeys': return this.sql.exec('SELECT j.id,j.name,j.created,j.lastActive,j.memberCount,j.storageBytes,j.visibility,j.mode,j.minClientVersion,p.principal FROM journeys j JOIN account_principals p ON p.journeyId=j.id WHERE p.accountHash=?', input.accountHash).toArray();
           case 'registry': return this.sql.exec('SELECT id,name,creatorEmail,created,lastActive,memberCount,storageBytes,visibility,mode,minClientVersion FROM journeys').toArray();
           case 'link': this.sql.exec('INSERT OR IGNORE INTO account_principals(accountHash,journeyId,principal) VALUES(?,?,?)', input.accountHash, input.journeyId, input.principal); return { ok: true };
-          case 'activity': this.sql.exec('UPDATE journeys SET lastActive=?,memberCount=MAX(0,memberCount+?),storageBytes=MAX(0,storageBytes+?) WHERE id=?', now, input.memberDelta, input.bytes, input.id); return { ok: true };
+          case 'activity': this.sql.exec('UPDATE journeys SET lastActive=?,memberCount=MAX(0,memberCount+?),storageBytes=MAX(0,storageBytes+?),minClientVersion=COALESCE(?,minClientVersion) WHERE id=?', now, input.memberDelta, input.bytes, input.minClientVersion ?? null, input.id); return { ok: true };
           case 'inviteCreate': this.sql.exec('INSERT INTO invites(hash,journeyId,expires,support) VALUES(?,?,?,?)', input.hash, input.journeyId, input.expires, input.support ? 1 : 0); return { ok: true };
           case 'inviteRate': {
             const key = `invite:${input.journeyId}:${input.accountHash}`;
@@ -158,7 +164,7 @@ export class Registry {
             return { journeyId: row.journeyId };
           }
           case 'invitePending': return this.sql.exec('SELECT principal,recipient,signingKey,support,expires FROM pending_principals WHERE journeyId=?', input.journeyId).toArray();
-          case 'pendingGet': return this.one('SELECT accountHash,support,expires FROM pending_principals WHERE journeyId=? AND principal=?', input.journeyId, input.principal);
+          case 'pendingGet': return this.one('SELECT accountHash,recipient,signingKey,support,expires FROM pending_principals WHERE journeyId=? AND principal=?', input.journeyId, input.principal);
           case 'pendingDelete': this.sql.exec('DELETE FROM pending_principals WHERE journeyId=? AND principal=?', input.journeyId, input.principal); return { ok: true };
           case 'agentCreate': {
             this.sql.exec('INSERT INTO agent_sessions(id,journeyId,principal,recipient,signingKey,requestedScope,status,code,remembered,createdAt,name,keyStorage) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)', input.id, input.journeyId, input.principal, input.recipient, input.signingKey, input.requestedScope, 'pending', input.code, input.remembered ? 1 : 0, now, input.name, input.keyStorage);

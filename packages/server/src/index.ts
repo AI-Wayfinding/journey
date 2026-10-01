@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { LINK_SECRET_PATTERN, isId, linkLookupHash, newId, validAgentName, type Envelope } from '@ai-wayfinding/core';
+import { LINK_SECRET_PATTERN, isId, linkLookupHash, newId, validAgentName, logDefinitions, type ControlProof, type JsonObject, type Envelope } from '@ai-wayfinding/core';
 import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse } from '@simplewebauthn/server';
 import { appPrfSalt, base64url, digest, emailHash, equalSecret, randomToken, unbase64url, verifyAgentSignature } from './crypto.js';
 import { ENDED_MESSAGE, LINK_RATE_LIMIT, LinkEnded, LinkExpired, expiredBody, linkResponse, readLink } from './agentLink.js';
@@ -8,7 +8,7 @@ import { EnclaveObject } from './enclave.js';
 import { invitationEmail, magicLinkEmail } from './email.js';
 import { Registry } from './registry.js';
 import { failure, limitNumber, object, sequenceCursor, validEpoch, validExpiry, validKind, validScope, validSeq, validString } from './types.js';
-import type { AccessChange, CreateJourney, EnclaveMessage, EpochWrap, RegistryMessage, Subject } from './types.js';
+import type { Admission, ControlInput, CreateJourney, EnclaveMessage, EpochWrap, RegistryMessage, Subject } from './types.js';
 export { EnclaveObject, Registry };
 export class EnclaveFresh extends EnclaveObject {}
 export class RegistryFresh extends Registry {}
@@ -73,13 +73,38 @@ async function agent(c: AppContext): Promise<Subject | null> {
   } catch { return null; }
   if (!await verifyAgentSignature(row.signingKey, c.req.method, path, body, timestamp, nonce, signature)) return null;
   if (!await registry(c.env, { op: 'nonce', id, nonce })) return null;
-  return { principal: row.principal, agent: true };
+  return { principal: row.principal, agent: true, ...capability(c) };
 }
 async function subject(c: AppContext): Promise<Subject | null> {
   if (c.req.header('x-agent-session')) return agent(c);
   const auth = await session(c);
   const principal = c.req.header('x-principal');
-  return auth !== null && auth.verifiedAt !== null && validString(principal, 128) ? { principal, accountHash: auth.accountHash } : null;
+  return auth !== null && auth.verifiedAt !== null && validString(principal, 128) ? { principal, accountHash: auth.accountHash, ...capability(c) } : null;
+}
+function capability(c: AppContext): Pick<Subject, 'clientVersion' | 'controlFormat'> { return { clientVersion: c.req.header('x-client-version'), controlFormat: c.req.header('x-control-format') }; }
+function control(value: unknown, journey: string): ControlInput | null {
+  if (!object(value) || Object.keys(value).some(k => !['proof', 'envelope'].includes(k)) || !object(value.proof) || !object(value.envelope) || !object(value.envelope.outside)) return null;
+  const p = value.proof, e = value.envelope;
+  if (!object(e.outside)) return null;
+  const o = e.outside;
+  if (Object.keys(p).sort().join(',') !== 'actor,at,body,envelopeHash,journey,prev,seq,sig,type,v' || p.v !== 1 || p.journey !== journey || !validSeq(p.seq) || !(p.prev === null || validString(p.prev, 64)) || !validString(p.at, 64) || !validString(p.actor, 128) || !validString(p.type, 64) || !object(p.body) || !validString(p.sig, 128) || !validString(p.envelopeHash, 64)) return null;
+  const definition = logDefinitions.find(d => d.name === p.type);
+  if (!definition || Object.keys(p.body).some(k => !definition.fields.includes(k))) return null;
+  const body: JsonObject = {};
+  for (const field of definition.fields) if (Object.hasOwn(p.body, field)) {
+    const v = p.body[field];
+    if ((field === 'creator' || field === 'member') && object(v)) {
+      const fields = ['id', 'recipient', 'signingKey', 'kind', 'scope', 'addedBy', 'expiresAt', 'support', 'name'];
+      if (Object.keys(v).some(k => !fields.includes(k))) return null;
+      const member: JsonObject = {};
+      for (const key of fields) if (Object.hasOwn(v, key)) member[key] = v[key] as JsonObject[string];
+      body[field] = member;
+    } else body[field] = Array.isArray(v) ? v.slice() as JsonObject[string] : v as JsonObject[string];
+  }
+  if (o.v !== 1 || !validString(o.id, 128) || o.journey !== journey || o.seq !== p.seq || !validEpoch(o.epoch) || !validSeq(o.size) || o.size > 1_048_576 || !validString(o.createdAt, 64) || !validString(e.nonce, 64) || !encrypted(e.ciphertext, 1_400_000)) return null;
+  try { if (unbase64url(e.nonce).length !== 12 || unbase64url(e.ciphertext).length !== o.size + 16) return null; } catch { return null; }
+  const proof: ControlProof = { v: 1, journey, seq: p.seq, prev: p.prev, at: p.at, actor: p.actor, type: p.type, body, envelopeHash: p.envelopeHash, sig: p.sig };
+  return { proof, envelope: { outside: { v: 1, id: o.id, journey, seq: p.seq, epoch: o.epoch, size: o.size, createdAt: o.createdAt }, nonce: e.nonce, ciphertext: e.ciphertext } };
 }
 function wraps(value: unknown, epoch: number): EpochWrap[] | null {
   if (!Array.isArray(value) || value.length > 100 || !value.every(w => object(w) && validString(w.principal, 128) && validString(w.wrap, 100_000) && w.epoch === epoch)) return null;
@@ -301,7 +326,9 @@ app.post('/v1/journeys', async c => {
   const credentials = await registry(c.env, { op: 'credentials', accountHash: auth.accountHash });
   if (!credentials.length) return failure('forbidden', 403);
   const b = await payload(c).catch(() => null);
-  if (!b || !validString(b.name, 200) || !object(b.creator) || !validString(b.creator.id, 128) || !validString(b.creator.recipient, 1024) || !validString(b.creator.signingKey, 1024) || !encrypted(b.genesis) || !encrypted(b.recoveryWrap, 100_000) || !validString(b.minClientVersion, 32)) return failure('invalid-request', 400);
+  if (!b || b.genesis !== undefined || b.legacy !== undefined || b.history !== undefined || !isId(b.id) || !object(b.creator) || !validString(b.creator.id, 128) || !validString(b.creator.recipient, 1024) || !validString(b.creator.signingKey, 1024) || !encrypted(b.recoveryWrap, 100_000)) return failure('invalid-request', 400);
+  const creation = control(b.control, b.id);
+  if (!creation || creation.proof.type !== 'genesis' || !object(creation.proof.body.creator) || creation.proof.body.creator.id !== b.creator.id || creation.proof.body.creator.recipient !== b.creator.recipient || creation.proof.body.creator.signingKey !== b.creator.signingKey) return failure('invalid-request', 400);
   // The creator's address comes from the verified sign-in, never from the request body.
   const creatorEmail = auth.email;
   if (!creatorEmail || await emailHash(creatorEmail, c.env.EMAIL_HASH_KEY) !== auth.accountHash) return failure('unauthorized', 401);
@@ -309,10 +336,10 @@ app.post('/v1/journeys', async c => {
   if (!isId(id)) return failure('invalid-request', 400);
   const initialWraps = wraps(b.wraps, 1);
   if (!initialWraps || initialWraps.length !== 1 || initialWraps[0]!.principal !== b.creator.id) return failure('invalid-request', 400);
-  const data: CreateJourney = { id, name: b.name, creatorEmail, creatorHash: auth.accountHash, creator: { id: b.creator.id, kind: 'person', scope: 'readwrite', accountHash: auth.accountHash }, genesis: b.genesis, wraps: initialWraps, recoveryWrap: b.recoveryWrap, minClientVersion: b.minClientVersion };
-  await registry(c.env, { op: 'journeyCreate', data });
+  const data: CreateJourney = { id, name: '[encrypted]', creatorEmail, creatorHash: auth.accountHash, creator: { id: b.creator.id, kind: 'person', scope: 'readwrite', accountHash: auth.accountHash }, control: creation, wraps: initialWraps, recoveryWrap: b.recoveryWrap, minClientVersion: String(creation.proof.body.minClientVersion), ...capability(c) };
   const created = await enclave(c.env, id, { op: 'create', data });
-  if (!created.ok) { await registry(c.env, { op: 'journeyDelete', id }); return failure('conflict', 409); }
+  if (!created.ok) return created;
+  await registry(c.env, { op: 'journeyCreate', data });
   return json({ id, principal: b.creator.id }, 201);
 });
 app.get('/v1/journeys', async c => {
@@ -320,7 +347,7 @@ app.get('/v1/journeys', async c => {
   const rows = await registry(c.env, { op: 'journeys', accountHash: auth.accountHash });
   const visible = [];
   for (const row of rows) {
-    const response = await enclave(c.env, row.id, { op: 'access', journeyId: row.id, subject: { principal: row.principal, accountHash: auth.accountHash } });
+    const response = await enclave(c.env, row.id, { op: 'access', journeyId: row.id, subject: { principal: row.principal, accountHash: auth.accountHash, ...capability(c) } });
     if (response.ok) visible.push({ id: row.id, name: row.name, created: row.created, lastActive: row.lastActive, memberCount: row.memberCount, storageBytes: row.storageBytes, visibility: row.visibility, mode: row.mode, minClientVersion: row.minClientVersion, principal: row.principal });
   }
   return json({ journeys: visible });
@@ -347,6 +374,7 @@ app.use('/v1/journeys/:id/*', async (c, next) => {
   await next();
 });
 function journeySubject(c: AppContext): Subject { return c.get('subject'); }
+app.get('/v1/journeys/:id/protocol', async c => enclave(c.env, c.req.param('id'), { op: 'protocol', journeyId: c.req.param('id'), subject: journeySubject(c) }));
 app.post('/v1/journeys/:id/seq', async c => enclave(c.env, c.req.param('id'), { op: 'reserve', journeyId: c.req.param('id'), subject: journeySubject(c) }));
 app.post('/v1/journeys/:id/records', async c => {
   const b = await payload(c).catch(() => null), id = c.req.param('id');
@@ -367,41 +395,36 @@ app.get('/v1/journeys/:id/records', async c => {
   return enclave(c.env, c.req.param('id'), { op: 'records', journeyId: c.req.param('id'), subject: journeySubject(c), after, limit });
 });
 app.post('/v1/journeys/:id/log', async c => {
-  const b = await payload(c).catch(() => null), id = c.req.param('id');
-  if (!b) return failure('invalid-request', 400);
-  if (journeySubject(c).agent && (b.accessChanges !== undefined || b.wraps !== undefined || b.epoch !== undefined || b.memberWraps !== undefined)) return failure('forbidden', 403);
-  if (!encrypted(b.entry) || b.accessChanges !== undefined && (!Array.isArray(b.accessChanges) || b.accessChanges.length > 100)) return failure('invalid-request', 400);
-  const changes: AccessChange[] = [];
-  const linked: { accountHash: string; principal: string }[] = [];
-  for (const value of b.accessChanges ?? []) {
-    if (!object(value) || !validString(value.principal, 128) || !['add', 'remove'].includes(String(value.action)) || !validKind(value.kind) || !validScope(value.scope) || value.expiresAt !== undefined && !validExpiry(value.expiresAt)) return failure('invalid-request', 400);
-    const change: AccessChange = { principal: value.principal, action: value.action as 'add' | 'remove', kind: value.kind, scope: value.scope };
-    if (value.expiresAt !== undefined) change.expiresAt = value.expiresAt as number;
-    if (change.action === 'add' && change.kind === 'person') {
-      const pending = await registry(c.env, { op: 'pendingGet', journeyId: id, principal: change.principal });
-      if (!pending) return failure('forbidden', 403);
-      // A support invitation cannot be turned into a writable or permanent server principal.
-      if (pending.support === 1 && (change.scope !== 'read' || change.expiresAt !== pending.expires || !validExpiry(pending.expires))) return failure('forbidden', 403);
-      change.accountHash = pending.accountHash;
-      linked.push({ accountHash: pending.accountHash, principal: change.principal });
-    }
-    // Agent additions are exclusively through the signed-in approval route.
-    if (change.action === 'add' && change.kind === 'agent') return failure('forbidden', 403);
-    changes.push(change);
+  const b = await payload(c).catch(() => null), id = c.req.param('id'), s = journeySubject(c);
+  if (!b || b.entry !== undefined || b.accessChanges !== undefined || b.epoch !== undefined || b.memberWraps !== undefined) return failure('invalid-request', 400);
+  const signed = control(b.control, id);
+  if (!signed) return failure('invalid-request', 400);
+  let admission: Admission | undefined;
+  if (signed.proof.type === 'member.add') {
+    const member = signed.proof.body.member;
+    if (!object(member) || member.kind !== 'person' || !validString(member.id, 128)) return failure('forbidden', 403);
+    const pending = await registry(c.env, { op: 'pendingGet', journeyId: id, principal: member.id });
+    if (!pending) return failure('forbidden', 403);
+    admission = { id: member.id, kind: 'person', recipient: pending.recipient, signingKey: pending.signingKey, accountHash: pending.accountHash, support: pending.support === 1, ...(pending.support === 1 ? { expiresAt: pending.expires } : {}) };
   }
-  const epoch = b.epoch;
-  if (epoch !== undefined && !validEpoch(epoch)) return failure('invalid-request', 400);
-  const rotated = b.wraps === undefined ? undefined : wraps(b.wraps, epoch as number);
-  const memberWraps = b.memberWraps === undefined ? undefined : Array.isArray(b.memberWraps) && b.memberWraps.length <= 100 && b.memberWraps.every(w => object(w) && validString(w.principal, 128) && validString(w.wrap, 100_000) && validEpoch(w.epoch)) && new Set(b.memberWraps.map(w => `${w.principal}:${w.epoch}`)).size === b.memberWraps.length ? b.memberWraps.map(w => ({ principal: w.principal as string, epoch: w.epoch as number, wrap: w.wrap as string })) : null;
-  if (rotated === null || memberWraps === null) return failure('invalid-request', 400);
-  const result = await enclave(c.env, id, { op: 'logWrite', journeyId: id, subject: journeySubject(c), entry: b.entry, changes, epoch, wraps: rotated, memberWraps });
+  if (signed.proof.type === 'member.renew') {
+    const auth = await session(c);
+    const expiresAt = Date.parse(String(signed.proof.body.expiresAt));
+    if (s.agent || !auth || auth.verifiedAt === null || Date.now() - auth.verifiedAt > 300_000) return failure('unauthorized', 401);
+    if (!validExpiry(expiresAt) || expiresAt > Date.now() + LINK_MAX_MS) return failure('invalid-request', 400);
+  }
+  const supplied = b.wraps === undefined ? undefined : wraps(b.wraps, signed.envelope.outside.epoch);
+  if (supplied === null) return failure('invalid-request', 400);
+  const result = await enclave(c.env, id, { op: 'controlWrite', journeyId: id, subject: s, control: signed, wraps: supplied, admission });
   if (result.ok) {
-    // Removing a member ends any agent link it owns immediately, so the link URL stops working.
-    const removed = changes.filter(change => change.action === 'remove').map(change => change.principal);
-    if (removed.length) await registry(c.env, { op: 'linkRevoke', journeyId: id, principals: removed });
-    for (const added of linked) { await registry(c.env, { op: 'link', accountHash: added.accountHash, journeyId: id, principal: added.principal }); await registry(c.env, { op: 'pendingDelete', journeyId: id, principal: added.principal }); }
-    const { memberDelta } = await result.clone().json() as { memberDelta: number };
-    await registry(c.env, { op: 'activity', id, memberDelta, bytes: b.entry.length });
+    const effects = await result.clone().json() as { memberDelta: number; removed: string[]; minClientVersion: string };
+    if (effects.removed.length) await registry(c.env, { op: 'linkRevoke', journeyId: id, principals: effects.removed });
+    if (signed.proof.type === 'member.renew') await registry(c.env, { op: 'linkRenew', journeyId: id, memberId: String(signed.proof.body.id), expires: Date.parse(String(signed.proof.body.expiresAt)) });
+    if (admission) {
+      await registry(c.env, { op: 'link', accountHash: admission.accountHash!, journeyId: id, principal: admission.id });
+      await registry(c.env, { op: 'pendingDelete', journeyId: id, principal: admission.id });
+    }
+    await registry(c.env, { op: 'activity', id, memberDelta: effects.memberDelta, bytes: JSON.stringify(signed).length, minClientVersion: effects.minClientVersion });
   }
   return result;
 });
@@ -466,15 +489,17 @@ app.post('/v1/agent-sessions/:id/approve', async c => {
   if (!attempt.available) return failure('not-found', 404);
   if (!attempt.matched) return failure('invalid-request', 400);
   if (row.keyStorage === 'link' && b.scope !== 'read') return failure('invalid-request', 400);
-  if (!validString(b.principal, 128) || !validScope(b.scope) || !validExpiry(b.expiresAt) || b.expiresAt > Date.now() + maxDuration || !encrypted(b.wrap, 100_000) || !encrypted(b.entry)) return failure('invalid-request', 400);
-  const s: Subject = { principal: b.principal, accountHash: auth.accountHash };
+  if (!validString(b.principal, 128) || !validScope(b.scope) || row.requestedScope === 'read' && b.scope !== 'read' || !validExpiry(b.expiresAt) || b.expiresAt > Date.now() + maxDuration || !encrypted(b.wrap, 100_000)) return failure('invalid-request', 400);
+  const signed = control(b.control, row.journeyId);
+  if (!signed || signed.proof.type !== 'member.add') return failure('invalid-request', 400);
+  const s: Subject = { principal: b.principal, accountHash: auth.accountHash, ...capability(c) };
   const check = await enclave(c.env, row.journeyId, { op: 'access', journeyId: row.journeyId, subject: s });
   if (!check.ok) return check;
   const { epoch } = await check.json() as { epoch: number };
-  const result = await enclave(c.env, row.journeyId, { op: 'logWrite', journeyId: row.journeyId, subject: s, entry: b.entry, changes: [{ principal: row.principal, kind: 'agent', scope: b.scope, action: 'add', expiresAt: b.expiresAt, addedBy: s.principal }], memberWraps: [{ principal: row.principal, epoch, wrap: b.wrap }] });
+  const result = await enclave(c.env, row.journeyId, { op: 'controlWrite', journeyId: row.journeyId, subject: s, control: signed, admission: { id: row.principal, kind: 'agent', recipient: row.recipient, signingKey: row.signingKey, scope: b.scope, expiresAt: b.expiresAt }, wraps: [{ principal: row.principal, epoch, wrap: b.wrap }] });
   if (!result.ok) return result;
   await registry(c.env, { op: 'agentApprove', id, scope: b.scope, expires: b.expiresAt });
-  await registry(c.env, { op: 'activity', id: row.journeyId, memberDelta: 1, bytes: b.entry.length });
+  await registry(c.env, { op: 'activity', id: row.journeyId, memberDelta: 1, bytes: JSON.stringify(signed).length });
   return json({ status: 'approved' });
 });
 // Agent links: a labelled exception to end-to-end encryption for agents that can only fetch web pages.
@@ -495,6 +520,8 @@ app.post('/v1/journeys/:id/agent-links', async c => {
   if (!access.ok) return access;
   const row = await registry(c.env, { op: 'agentGet', id: b.sessionId });
   if (!row || row.journeyId !== id || row.keyStorage !== 'link' || row.status !== 'approved' || row.scope !== 'read' || Number(row.expires) <= Date.now() || Number(row.expires) > Date.now() + LINK_MAX_MS) return failure('not-found', 404);
+  const ownership = await enclave(c.env, id, { op: 'linkAccess', journeyId: id, subject: s, member: row.principal });
+  if (!ownership.ok) return ownership;
   const created = await registry(c.env, { op: 'linkCreate', hash: b.hash, journeyId: id, memberId: row.principal, addedBy: s.principal, blob: b.blob, expires: Number(row.expires) });
   return created ? json({ memberId: row.principal, expiresAt: Number(row.expires) }, 201) : failure('conflict', 409);
 });
@@ -510,13 +537,15 @@ app.post('/v1/journeys/:id/agent-links/:member/renew', async c => {
   const id = c.req.param('id'), member = c.req.param('member'), s = await freshPerson(c);
   if (s instanceof Response) return s;
   const b = await payload(c).catch(() => null);
-  if (!b || !isId(member) || !Array.isArray(b.entries) || b.entries.length !== 2 || !b.entries.every(entry => encrypted(entry)) || !validExpiry(b.expiresAt) || b.expiresAt > Date.now() + LINK_MAX_MS) return failure('invalid-request', 400);
+  if (!b || !isId(member) || !validExpiry(b.expiresAt) || b.expiresAt > Date.now() + LINK_MAX_MS) return failure('invalid-request', 400);
+  const signed = control(b.control, id);
+  if (!signed || signed.proof.type !== 'member.renew' || signed.proof.body.id !== member || Date.parse(String(signed.proof.body.expiresAt)) !== b.expiresAt) return failure('invalid-request', 400);
   const links = await registry(c.env, { op: 'linkList', journeyId: id }) as { memberId: string }[];
   if (!links.some(link => link.memberId === member)) return failure('not-found', 404);
-  const result = await enclave(c.env, id, { op: 'renew', journeyId: id, subject: s, member, expiresAt: b.expiresAt, entries: b.entries as string[] });
+  const result = await enclave(c.env, id, { op: 'controlWrite', journeyId: id, subject: s, control: signed });
   if (!result.ok) return result;
   await registry(c.env, { op: 'linkRenew', journeyId: id, memberId: member, expires: b.expiresAt });
-  await registry(c.env, { op: 'activity', id, memberDelta: 0, bytes: (b.entries as string[]).reduce((sum, entry) => sum + entry.length, 0) });
+  await registry(c.env, { op: 'activity', id, memberDelta: 0, bytes: JSON.stringify(signed).length });
   return json({ expiresAt: b.expiresAt });
 });
 // Serves a journey to an agent that can only read web pages. The secret in the path is the whole credential.
@@ -531,7 +560,7 @@ app.get('/a/:secret', async c => {
   if (!row) return ended();
   if (row.limited) return linkResponse({ error: 'rate-limited', message: 'This link has been read too often. Try again later.', retryAfterSeconds: row.retryAfter }, 429, { 'Retry-After': String(row.retryAfter) });
   if (Number(row.expires) <= Date.now()) return linkResponse(expiredBody(c.env.ORIGIN, row.journeyId, row.memberId, Number(row.expires)), 410);
-  const subject: Subject = { principal: row.memberId, agent: true };
+  const subject: Subject = { principal: row.memberId, agent: true, clientVersion: '0.1.4', controlFormat: 'control-proof-v1' };
   const call: Enclave = message => enclave(c.env, row.journeyId, { ...message, journeyId: row.journeyId, subject });
   try {
     const pages = await readLink({ journeyId: row.journeyId, memberId: row.memberId, blob: row.blob, expires: Number(row.expires), since: Number(row.since) }, secret, c.env.ORIGIN, call);

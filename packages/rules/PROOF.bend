@@ -127,3 +127,19 @@ def Laws.journey_replay_is_production_transition(state, control):
 
 def Laws.settings_require_guide(xs, actor, settings, minimum, pending, e):
   Equal.trans(R.JourneyTransition, R.configure(xs, actor, settings, minimum, pending), R.journey_guard((R.stage_ready(minimum) && False{}) && R.active_settings(settings), R.JourneyState{xs, settings, minimum, pending}), R.JourneyDenied{}, Equal.cong(Bool, R.JourneyTransition, b => R.journey_guard((R.stage_ready(minimum) && b) && R.active_settings(settings), R.JourneyState{xs, settings, minimum, pending}), R.is_guide(R.find(xs, actor)), False{}, e), Equal.cong(Bool, R.JourneyTransition, b => R.journey_guard(b && R.active_settings(settings), R.JourneyState{xs, settings, minimum, pending}), R.stage_ready(minimum) && False{}, False{}, and_false(R.stage_ready(minimum))))
+
+def Laws.server_requires_current_read_access(access, identity, version, e):
+  Equal.cong(Bool, Bool, b => b && identity && version, R.access_read(access), False{}, e)
+
+def Laws.server_pending_blocks_content(access, identity, version):
+  Equal.cong(Bool, Bool, b => b && identity && version, R.content_write(access, True{}), False{}, Laws.pending_rotation_blocks_content(access))
+
+def Laws.server_old_client_refused(client, minimum, format, e):
+  match format:
+    case False{}:
+      {==}
+    case True{}:
+      Equal.cong(Bool, Bool, b => b && R.version_ge(client, minimum), R.stage_ready(client), False{}, e)
+
+def Laws.server_missing_format_refused(client, minimum):
+  {==}

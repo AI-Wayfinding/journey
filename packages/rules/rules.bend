@@ -481,3 +481,13 @@ def journey_replay(controls: +List<JourneyControl>, result: JourneyTransition) -
       result
     case Con{head, tail}:
       journey_replay(tail, journey_replay_step(result, head))
+
+# Server transport gates consume verified current access, never caller access rows.
+def server_version(+client: Version, +minimum: Version, format: Bool) -> Bool:
+  format && stage_ready(client) && version_ge(client, minimum)
+
+def server_read(access: Maybe<&2, Role>, identity: Bool, version: Bool) -> Bool:
+  access_read(access) && identity && version
+
+def server_content(access: Maybe<&2, Role>, identity: Bool, version: Bool, pending: Bool) -> Bool:
+  content_write(access, pending) && identity && version

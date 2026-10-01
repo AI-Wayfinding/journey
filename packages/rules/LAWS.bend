@@ -179,3 +179,28 @@ law settings_require_guide:
   for +pending: Bool
   for e: {R.is_guide(R.find(xs, actor)) == False{} : Bool}
   {R.configure(xs, actor, settings, minimum, pending) == R.JourneyDenied{} : R.JourneyTransition}
+
+law server_requires_current_read_access:
+  for access: Maybe<&2, R.Role>
+  for identity: Bool
+  for version: Bool
+  for e: {R.access_read(access) == False{} : Bool}
+  {R.server_read(access, identity, version) == False{} : Bool}
+
+law server_pending_blocks_content:
+  for access: Maybe<&2, R.Role>
+  for identity: Bool
+  for version: Bool
+  {R.server_content(access, identity, version, True{}) == False{} : Bool}
+
+law server_old_client_refused:
+  for +client: R.Version
+  for minimum: R.Version
+  for format: Bool
+  for e: {R.stage_ready(client) == False{} : Bool}
+  {R.server_version(client, minimum, format) == False{} : Bool}
+
+law server_missing_format_refused:
+  for client: R.Version
+  for minimum: R.Version
+  {R.server_version(client, minimum, False{}) == False{} : Bool}

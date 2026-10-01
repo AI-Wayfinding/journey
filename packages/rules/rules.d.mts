@@ -12,6 +12,9 @@ export interface JourneyState { $: 'JourneyState'; members: List<Member>; settin
 export type JourneyControl = { $: 'LegacyControl' | 'NewControl'; control: Control } | { $: 'Configure'; actor: bigint; settings: JourneySettings } | { $: 'Minimum'; actor: bigint; version: Version };
 export type JourneyTransition = { $: 'JourneyAccepted'; state: JourneyState } | { $: 'JourneyDenied' | 'JourneyInvalid' | 'JourneyLastGuide' | 'UpgradeRequired' };
 declare const rules: {
+  server_version(client: Version, minimum: Version, format: boolean): boolean;
+  server_read(access: Maybe<Role>, identity: boolean, version: boolean): boolean;
+  server_content(access: Maybe<Role>, identity: boolean, version: boolean, pending: boolean): boolean;
   legacy_settings(name: string, description: string): JourneySettings;
   active_settings(settings: JourneySettings): boolean;
   version_ge(a: Version, b: Version): boolean;

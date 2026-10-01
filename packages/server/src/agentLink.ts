@@ -1,5 +1,5 @@
-import { deriveRecipient, itemVersions, meetsMinClientVersion, open, openLinkIdentity, parseRecord, unwrapJourneyKey, verifyLog, CLIENT_VERSION } from '@ai-wayfinding/core';
-import type { Envelope, JourneyKey, LogEntry, LogState, ProtocolRecord } from '@ai-wayfinding/core';
+import { deriveRecipient, itemVersions, meetsMinClientVersion, open, openLinkIdentity, parseRecord, unwrapJourneyKey, verifyControlProofs, readControlProof } from '@ai-wayfinding/core';
+import type { ControlProof, Member, Envelope, JourneyKey, LogEntry, LogState, ProtocolRecord } from '@ai-wayfinding/core';
 
 /**
  * Agent links are a deliberate, labelled exception to end-to-end encryption: while a link is live, this Worker decrypts the
@@ -32,7 +32,6 @@ export interface Enclave { (message: { op: 'log'; after: number } | { op: 'wraps
 
 export class LinkEnded extends Error {}
 const historyError = 'This journey history could not be verified, so it is not shown. Ask the person to check the journey.';
-const decodeEnvelope = (value: string): Envelope => JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(value.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0)))) as Envelope;
 
 async function json<T>(response: Response): Promise<T> {
   if (response.status === 403 || response.status === 404) throw new LinkEnded();
@@ -42,32 +41,22 @@ async function json<T>(response: Response): Promise<T> {
 
 /** Verifies the whole signed log as the client does, then returns its state and the decrypted records. */
 async function readJourney(identity: string, memberId: string, journeyId: string, call: Enclave): Promise<{ state: LogState; genesis: LogEntry; records: ProtocolRecord[] }> {
-  const rows: { seq: number; entry: string }[] = [];
+  const rows: { seq: number; proof: ControlProof; envelope: Envelope }[] = [];
   for (;;) {
-    const page = (await json<{ log: { seq: number; entry: string }[] }>(await call({ op: 'log', after: rows.length ? rows.at(-1)!.seq : -1 }))).log;
+    const page = (await json<{ log: { seq: number; proof: ControlProof; envelope: Envelope }[] }>(await call({ op: 'log', after: rows.length ? rows.at(-1)!.seq : -1 }))).log;
     rows.push(...page);
     if (rows.length > 100_000) throw new Error(historyError);
     if (page.length < 1000) break;
   }
   const epochs = new Map<number, JourneyKey>();
   for (const wrap of (await json<{ wraps: { epoch: number; wrap: string }[] }>(await call({ op: 'wraps' }))).wraps) epochs.set(wrap.epoch, await unwrapJourneyKey({ epoch: wrap.epoch, recipient: memberId, ciphertext: wrap.wrap }, identity));
-  const entries: LogEntry[] = [];
-  for (const row of rows) {
-    const envelope = decodeEnvelope(row.entry);
-    if (row.seq !== entries.length || envelope.outside?.journey !== journeyId) throw new Error(historyError);
-    const key = epochs.get(envelope.outside.epoch);
-    if (!key) throw new Error(historyError);
-    const record = await open(envelope, key);
-    if (record.type !== 'membership' || record.typeVersion !== 1) throw new Error(historyError);
-    const wrapped = record.body.entry;
-    entries.push(typeof wrapped === 'string' ? JSON.parse(wrapped) as LogEntry : record.body as unknown as LogEntry);
-  }
-  const checked = await verifyLog(entries);
+  if (!rows.length) throw new Error(historyError);
+  const checked = await verifyControlProofs(rows.map(row => row.proof), rows.map(row => row.envelope), { journey: journeyId, creator: rows[0]!.proof.body.creator as Member }, [...epochs.values()]);
   if (!checked.ok || checked.state.journey !== journeyId) throw new Error(historyError);
   const state = checked.state;
   const mine = state.members[memberId]?.member;
   if (!mine || mine.kind !== 'agent' || mine.recipient !== await deriveRecipient(identity)) throw new LinkEnded();
-  if (!meetsMinClientVersion(CLIENT_VERSION, state.minClientVersion)) throw new Error('This journey needs a newer version of Wayfinding to be read.');
+  if (!meetsMinClientVersion('0.1.4', state.minClientVersion)) throw new Error('This journey needs a newer version of Wayfinding to be read.');
   if (!epochs.has(state.currentEpoch)) throw new Error(historyError);
   const envelopes: Envelope[] = [];
   let after = 0;
@@ -88,7 +77,8 @@ async function readJourney(identity: string, memberId: string, journeyId: string
     parseRecord(record);
     records.push(record);
   }
-  return { state, genesis: entries[0]!, records };
+  const genesis = (await readControlProof(rows[0]!.proof, rows[0]!.envelope, epochs.get(rows[0]!.envelope.outside.epoch))).entry;
+  return { state, genesis, records };
 }
 
 interface Person { name: string; kind: 'person' | 'agent'; email?: string }
@@ -129,7 +119,7 @@ export async function readLink(row: LinkRow, secret: string, origin: string, cal
   const url = renewUrl(origin, row.journeyId, row.memberId);
   const header = (number: number, of: number, next: string | null): Record<string, unknown> => ({
     about: ABOUT,
-    journey: { id: row.journeyId, name: genesisBody.name ?? '', description: genesisBody.description ?? '', kind: genesisBody.journeyKind ?? 'individual' },
+    journey: { id: row.journeyId, name: state.settings?.name ?? genesisBody.name ?? '', description: state.settings?.description ?? genesisBody.description ?? '', kind: genesisBody.journeyKind ?? 'individual' },
     access: { agentName: mine.name ?? 'Agent', scope: 'read', expiresAt: new Date(expires).toISOString(), expiresInHours: Math.max(0, Math.floor(remaining / 3_600_000)), expiringSoon: remaining < 86_400_000 || remaining < total * 0.2, renewUrl: url, renewHint: `Access ends ${utc(expires)}. To continue, ask the person to open ${url} and extend it with their passkey; the link stays the same.` },
     page: { number, of, next },
     howToWrite: HOW_TO_WRITE,
