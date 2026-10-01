@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { encode } from '../src/codec.js';
 import { ARTIFACT_TYPES, MAX_BLOB_BYTES, MAX_ARTIFACT_PAYLOAD_BYTES, CLIENT_VERSION, CLIENT_CAPABILITIES, artifactTypeHash, copyArtifactPublic, newId, validateArtifactPayload, validateArtifactPublic, validateBlobDescriptor, suggestedArtifact, validArtifactUrl, validPackagePath, supportsArtifacts, seal, open, readArtifactPayload, signControlProof, hashControlProof, verifyControlProofs, signEntry, liveArtifactBlobIds, canonical } from '../src/index.js';
 import type { JsonObject, BlobDescriptor, ArtifactPayload, ControlProof } from '../src/index.js';
 import { artifactFixture, artifactAppend, artifactBody, artifactResult, documentPayload, person, agent } from './stage0-fixture.js';
@@ -158,7 +159,7 @@ describe('signed artifact replay calls production Bend', () => {
     const extra = { ...row.proof, body: { ...row.proof.body, secret: 'never-store' } };
     // Re-sign extras so this test catches shape validation, not just a bad signature.
     const { sig: _sig, ...unsigned } = extra;
-    extra.sig = Buffer.from(await crypto.subtle.sign('Ed25519', f.guide.key, new TextEncoder().encode(canonical(unsigned)))).toString('base64');
+    extra.sig = encode(new Uint8Array(await crypto.subtle.sign('Ed25519', f.guide.key, new TextEncoder().encode(canonical(unsigned)))));
     expect((await verifyControlProofs([f.controls[0]!.proof, extra], f.controls.map(c => c.envelope), f.trust)).ok).toBe(false);
     const envelope = { ...row.envelope, ciphertext: row.envelope.ciphertext.slice(0, -4) + 'AAAA' };
     expect((await verifyControlProofs(f.controls.map(c => c.proof), [f.controls[0]!.envelope, envelope], f.trust)).ok).toBe(false);

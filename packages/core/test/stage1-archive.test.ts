@@ -1,4 +1,5 @@
 import { expect, it } from 'vitest';
+import { encode } from '../src/codec.js';
 import { artifactTypeHash, canonical, exportArtifactJourney, importArtifactJourney, verifyArtifactArchive, wrapJourneyKey, newId, sealIdentity, seal, hashControlProof, signControlProof } from '../src/index.js';
 import type { ArtifactArchive, BlobDescriptor } from '../src/index.js';
 import { artifactFixture, artifactAppend, artifactBody, documentPayload, person } from './stage0-fixture.js';
@@ -8,11 +9,11 @@ async function fixture() {
   const nonce = crypto.getRandomValues(new Uint8Array(12)), rawKey = await crypto.subtle.importKey('raw', Uint8Array.from(f.key.key).buffer, 'AES-GCM', false, ['encrypt']);
   const associated = { v: 1, journey: f.journey, id, epoch: 1, size: bytes.length };
   const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce, additionalData: new TextEncoder().encode(canonical(associated)) }, rawKey, bytes));
-  const descriptor: BlobDescriptor = { ...associated, v: 1, ciphertextSize: ciphertext.length, nonce: Buffer.from(nonce).toString('base64'), digest: Buffer.from(await crypto.subtle.digest('SHA-256', ciphertext)).toString('base64') };
+  const descriptor: BlobDescriptor = { ...associated, v: 1, ciphertextSize: ciphertext.length, nonce: encode(nonce), digest: encode(new Uint8Array(await crypto.subtle.digest('SHA-256', ciphertext))) };
   const body = await artifactBody(f.guide.member.id, { blobs: [descriptor] });
   await artifactAppend(f, f.guide, 'artifact.create', body, { ...documentPayload(), attachments: [{ blob: descriptor, name: 'secret.bin', mime: 'application/octet-stream' }] });
   await artifactAppend(f, f.guide, 'artifact.version', { ...body, version: newId(), predecessor: body.version, blobs: [] });
-  const archive: ArtifactArchive = { format: 'artifact-v1', version: 1, journey: f.journey, creator: f.guide.member, controls: f.controls, envelopes: [], wraps: await wrapJourneyKey(f.key, [{ id: f.guide.member.id, recipient: f.guide.member.recipient }]), blobs: [{ descriptor, ciphertext: Buffer.from(ciphertext).toString('base64') }], unavailableDeletedBlobs: [] };
+  const archive: ArtifactArchive = { format: 'artifact-v1', version: 1, journey: f.journey, creator: f.guide.member, controls: f.controls, envelopes: [], wraps: await wrapJourneyKey(f.key, [{ id: f.guide.member.id, recipient: f.guide.member.recipient }]), blobs: [{ descriptor, ciphertext: encode(ciphertext) }], unavailableDeletedBlobs: [] };
   return { f, archive, body, descriptor };
 }
 it('round-trips a versioned encrypted archive with proofs, payloads, wraps and surviving historic blobs', async () => {
@@ -72,7 +73,7 @@ it('retains tombstoned metadata history, explains unavailable deleted bytes and 
 it('verifies authenticated blob metadata and private payload projection, not merely a re-signed hash', async () => {
   const { f, archive, body } = await fixture();
   const altered = structuredClone(archive), descriptor = altered.blobs[0]!.descriptor;
-  descriptor.nonce = Buffer.from(new Uint8Array(12).fill(9)).toString('base64');
+  descriptor.nonce = encode(new Uint8Array(12).fill(9));
   const entry = { v: 1 as const, seq: 1, prev: await hashControlProof(altered.controls[0]!.proof), at: '2026-01-02T00:00:00.000Z', actor: f.guide.member.id, type: 'artifact.create', body: { ...body, blobs: [descriptor] } };
   const envelope = await seal({ type: 'artifact.content', typeVersion: 1, body: { ...documentPayload(), attachments: [{ blob: descriptor, name: 'secret.bin', mime: 'application/octet-stream' }] } }, { id: newId(), journey: f.journey, seq: 1, epoch: 1, createdAt: entry.at }, f.key);
   altered.controls = [altered.controls[0]!, { proof: await signControlProof(entry, envelope, f.journey, f.guide.key), envelope }];
