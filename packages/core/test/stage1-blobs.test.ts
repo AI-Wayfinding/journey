@@ -29,8 +29,9 @@ describe('Stage 1 portable binary blobs', () => {
 
   it('rejects limit-plus-one actual raw bytes before encryption, even with a claimed size', async () => {
     const key = generateJourneyKey();
-    await expect(sealBlob(new Uint8Array(MAX_BLOB_BYTES + 1), meta(), key)).rejects.toThrow('Invalid blob raw size');
-    await expect(sealBlob(new Uint8Array(MAX_BLOB_BYTES + 1), { ...meta(), size: 0 } as never, key)).rejects.toThrow('Invalid blob raw size');
+    const outcome = async (metadata: ReturnType<typeof meta>) => sealBlob(new Uint8Array(MAX_BLOB_BYTES + 1), metadata, key).then(() => 'accepted', error => error.message);
+    expect(await outcome(meta())).toBe('Invalid blob raw size');
+    expect(await outcome({ ...meta(), size: 0 } as never)).toBe('Invalid blob raw size');
   });
 
   it('uses fresh nonces, only the supplied byte view, and the documented canonical AAD', async () => {
