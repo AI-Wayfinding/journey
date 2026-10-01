@@ -2,12 +2,14 @@ import { EXPIRED_LINK, UPDATE_REQUIRED } from './messages.js';
 import { prfOutput } from './prf.js';
 import { startAuthentication, startRegistration } from '@simplewebauthn/browser';
 import { canControl, canRenameAgent, canWriteContent, isPersonGuide, ownsAgent, replayControl, effectiveScope, createAgeIdentity, createSigningIdentity, linkLookupHash, newId, newLinkSecret, sealLinkIdentity, validAgentName, wrapJourneyKey } from '@ai-wayfinding/core';
-import type { CommentBody, ItemBody, Member, ProtocolRecord } from '@ai-wayfinding/core';
+import type { ArtifactAttachment, ArtifactContent, ArtifactPayload, ArtifactType, Member, ProtocolRecord } from '@ai-wayfinding/core';
 import { backupKey, clearPersonKeys, getAccountName, getPersonKeys, lockPersonKeys, newBackupCode, onPersonKeysCleared, parseBackupCode, restorePersonKeys, sealPersonKeys, sealUnlockedKeys, setAccountName, unlockPersonKeys } from './keys.js';
 import { passkeyError } from './passkey-errors.js';
 import type { PersonKeys, SealedPersonKeys } from './keys.js';
 import { ApiError, allRecords, api, appendEntry, createJourney, currentKey, makeControl, exportEncrypted, itemVersions, letIn, listings, removeMember, rotatePending, saveRecord, verifiedJourney } from './journey.js';
 import type { JourneyContext, JourneyListing } from './journey.js';
+import { ARTIFACT_TYPES, MAX_ARTIFACT_ATTACHMENTS, MAX_BLOB_BYTES, suggestedArtifact, validPackagePath } from '@ai-wayfinding/core';
+import { artifactViews, artifactText, attachmentBytes, commentArtifact, deleteArtifact, downloadAttachment, saveArtifact, uploadAttachment } from './artifacts.js';
 import './style.css';
 
 const root = document.querySelector<HTMLDivElement>('#app')!;
@@ -320,10 +322,18 @@ function recoveryScreen(): void {
 async function context(id: string): Promise<JourneyContext | null> {
   const keys = await requireKeys(); if (!keys) return null;
   const listing = (await listings()).find(row => row.id === id);
-  if (!listing) { render('<section class="panel"><h1>Journey unavailable</h1><p>You no longer have access to this journey.</p></section>'); return null; }
-  const ctx = await verifiedJourney(id, listing.principal, keys);
+  // Listings omit incompatible clients. A remembered principal lets the authenticated
+  // protocol endpoint distinguish an update from removal; it never grants access.
+  const principal = listing?.principal ?? sessionStorage.getItem(`wayfinding-principal:${keys.signingKey}:${id}`);
+  if (!principal) { render('<section class="panel"><h1>Journey unavailable</h1><p>You no longer have access to this journey.</p></section>'); return null; }
+  let ctx: JourneyContext;
+  try { ctx = await verifiedJourney(id, principal, keys); }
+  catch (cause) {
+    if (!(cause instanceof ApiError && [403, 404].includes(cause.status))) throw cause;
+    render('<section class="panel"><h1>Journey unavailable</h1><p>You no longer have access to this journey.</p></section>'); return null;
+  }
   if (ctx.state.pendingRotation && isPersonGuide(ctx.state, ctx.principal)) {
-    try { await rotatePending(ctx); return verifiedJourney(id, listing.principal, keys); }
+    try { await rotatePending(ctx); return verifiedJourney(id, principal, keys); }
     catch { render('<section class="panel"><h1>Key update pending</h1><p>A person who manages people can complete it on the next visit.</p></section>'); return null; }
   }
   return ctx;
@@ -335,31 +345,79 @@ function agentPromptScreen(id: string): void {
 }
 async function journeyHome(id: string): Promise<void> {
   const ctx = await context(id); if (!ctx) return;
-  const records = await allRecords(ctx), items = itemVersions(records).filter(v => !v.deleted && v.item.itemType !== 'recovery');
-  const readOnly = !canWriteContent(ctx.state, ctx.principal);
-  const name = ctx.state.settings?.name ?? 'Journey';
-  render(`<section class="panel"><p class="eyebrow">JOURNEY</p><h1>${escape(name)}</h1>${ctx.state.settings?.description ? `<p>${escape(ctx.state.settings!.description)}</p>` : ''}<div class="actions">${readOnly ? '<p class="meta">Your access is read-only.</p>' : `<a class="button" href="/journeys/${id}/add">Add an item</a>`}<a class="button" href="/journeys/${id}/agent">Add your agent</a><a class="button" href="/journeys/${id}/members">Share this journey</a><a class="button" href="/journeys/${id}/export">Export</a></div></section><section class="panel"><h2>Items</h2><div class="grid"><div><label for="filter">Filter by type</label><select id="filter"><option value="">All types</option>${[...new Set(items.map(v => v.item.itemType))].map(t => `<option value="${escape(t)}">${escape(t)}</option>`).join('')}</select></div><div><label for="search">Search your items</label><input id="search" type="search" placeholder="Search titles and text" /></div></div><div id="items" class="cards"></div></section>`);
-  const showItems = () => { const filter = read('filter'), query = read('search').toLocaleLowerCase(); root.querySelector('#items')!.innerHTML = items.filter(({ item }) => (!filter || item.itemType === filter) && (!query || `${item.title} ${item.body}`.toLocaleLowerCase().includes(query))).map(({ item, root: itemRoot }) => `<article class="card"><p class="meta">${escape(item.itemType)}</p><h3><a href="/journeys/${id}/items/${escape(itemRoot)}">${escape(item.title)}</a></h3><p>${escape(item.body.slice(0, 160))}</p></article>`).join('') || '<p>No matching items.</p>'; };
-  root.querySelector('#search')?.addEventListener('input', showItems); root.querySelector('#filter')?.addEventListener('change', showItems); showItems();
+  const artifacts = await artifactViews(ctx), readOnly = !canWriteContent(ctx.state, ctx.principal);
+  render(`<section class="panel"><p class="eyebrow">JOURNEY</p><h1>${escape(ctx.state.settings?.name ?? 'Journey')}</h1>${ctx.state.settings?.description ? `<p>${escape(ctx.state.settings.description)}</p>` : ''}<div class="actions">${readOnly ? '<p class="meta">Your access is read-only or a key update is pending.</p>' : `<a class="button" href="/journeys/${id}/add">Add an artifact</a>`}<a class="button" href="/journeys/${id}/agent">Add your agent</a><a class="button" href="/journeys/${id}/members">Share this journey</a><a class="button" href="/journeys/${id}/export">Export</a></div></section><section class="panel"><h2>Artifacts</h2><div class="grid"><div><label for="filter">Filter by type</label><select id="filter"><option value="">All types</option>${ARTIFACT_TYPES.map(t => `<option value="${t}">${t}</option>`).join('')}</select></div><div><label for="search">Search your artifacts</label><input id="search" type="search" placeholder="Search titles, tags and text" /></div></div><div id="artifacts" class="cards"></div></section>`);
+  const show = () => {
+    const filter = root.querySelector<HTMLSelectElement>('#filter')!.value, query = root.querySelector<HTMLInputElement>('#search')!.value.toLocaleLowerCase();
+    root.querySelector('#artifacts')!.innerHTML = artifacts.filter(view => {
+      const p = view.versions.at(-1)!.payload;
+      return (!filter || p.content.kind === filter) && (!query || `${p.title} ${p.tags.join(' ')} ${artifactText(p)} ${p.attachments.map(a => a.name).join(' ')}`.toLocaleLowerCase().includes(query));
+    }).map(view => { const p = view.versions.at(-1)!.payload; return `<article class="card"><p class="meta">${escape(p.content.kind)} · ${escape(p.tags.join(', '))}</p><h3><a href="/journeys/${id}/artifacts/${view.state.id}">${escape(p.title)}</a></h3><p>${escape(artifactText(p).slice(0, 160))}</p></article>`; }).join('') || '<p>No matching artifacts.</p>';
+  };
+  root.querySelector('#search')?.addEventListener('input', show); root.querySelector('#filter')?.addEventListener('change', show); show();
 }
-async function itemScreen(id: string, itemId: string): Promise<void> {
-  const ctx = await context(id); if (!ctx) return;
-  const view = itemVersions(await allRecords(ctx)).find(entry => entry.item.id === itemId || entry.versions.some(v => v.id === itemId));
-  if (!view || view.deleted) throw new Error('Item not found.');
-  const { item, versions, comments } = view;
-  const readOnly = !canWriteContent(ctx.state, ctx.principal);
-  render(`<section class="panel"><p><a href="/journeys/${id}">← Back to journey</a></p><p class="eyebrow">${escape(item.itemType)}</p><h1>${escape(item.title)}</h1><p class="meta">Tags: ${escape(item.tags.join(', ') || 'none')}</p><pre>${escape(item.body)}</pre>${readOnly ? '' : `<div class="actions"><a href="/journeys/${id}/items/${escape(itemId)}/edit" class="button">Edit item</a><button class="secondary" id="delete-item">Delete item</button></div>`}</section><section class="panel"><h2>Versions</h2><ul class="list">${versions.map(v => `<li><p class="meta">${escape(v.created)} · ${escape(ctx.state.members[v.author]?.member.kind === 'agent' ? memberName(ctx.state.members[v.author]!.member) : v.authoredBy)}</p><pre>${escape(v.body)}</pre></li>`).join('')}</ul></section><section class="panel"><h2>Comments</h2><ul class="list">${comments.map(c => `<li><p class="meta">${escape(c.body.at)} · ${escape(ctx.state.members[String(c.body.author)]?.member.kind === 'agent' ? memberName(ctx.state.members[String(c.body.author)]!.member) : c.body.author)}</p><p>${escape(c.body.body)}</p></li>`).join('')}</ul>${readOnly ? '<p>Your access is read-only.</p>' : `<form id="comment-form"><label for="comment">Add a comment</label><textarea id="comment" name="comment" required></textarea><div class="actions"><button type="submit">Add comment</button></div></form>`}</section>`);
-  form('comment-form', async f => { const body: CommentBody = { id: newId(), item: itemId, onVersion: item.id, author: ctx.principal, authoredBy: 'human', at: new Date().toISOString(), body: input(f, 'comment') }; await saveRecord(ctx, { type: 'comment', typeVersion: 1, body }); await itemScreen(id, itemId); });
-  root.querySelector('#delete-item')?.addEventListener('click', () => perform(async () => { if (!confirm('Delete this item? Its encrypted versions remain in the journey history.')) return; await saveRecord(ctx, { type: 'delete', typeVersion: 1, body: { target: itemId } }); navigate(`/journeys/${id}`); }));
+function attribution(ctx: JourneyContext, actor: string): string {
+  const member = ctx.state.members[actor]?.member ?? ctx.log.flatMap(e => [e.body.creator, e.body.member]).find(m => m && typeof m === 'object' && !Array.isArray(m) && m.id === actor) as Member | undefined;
+  return `${member?.kind === 'agent' ? memberName(member) : ctx.state.members[actor]?.profile?.name || 'Person'} · ${actor}`;
 }
-async function itemForm(id: string, itemId?: string): Promise<void> {
+async function artifactScreen(id: string, artifactId: string): Promise<void> {
   const ctx = await context(id); if (!ctx) return;
-  if (!canWriteContent(ctx.state, ctx.principal)) throw new Error('This journey is read-only for you.');
-  const previous = itemId ? itemVersions(await allRecords(ctx)).find(v => v.versions.some(item => item.id === itemId)) : null;
-  render(`<section class="panel"><p><a href="/journeys/${id}">← Back to journey</a></p><h1>${previous ? 'Edit item' : 'Add an item'}</h1><form id="item-form"><label for="item-type">Type</label><select id="item-type" name="item-type">${['note','decision','question','learning','tension','practice','success','resource'].map(t => `<option value="${t}" ${previous?.item.itemType === t ? 'selected' : ''}>${t}</option>`).join('')}</select><label for="item-title">Title</label><input id="item-title" name="item-title" value="${escape(previous?.item.title ?? '')}" required /><label for="item-body">Body (Markdown as plain text)</label><textarea id="item-body" name="item-body">${escape(previous?.item.body ?? '')}</textarea><label for="tags">Tags (comma-separated)</label><input id="tags" name="tags" value="${escape(previous?.item.tags.join(', ') ?? '')}" /><label for="authored-by">Authored by</label><select id="authored-by" name="authored-by"><option value="human" selected>Person</option><option value="mixed">Person and agent</option><option value="agent">Agent</option></select><div class="actions"><button type="submit">Save item</button></div></form></section>`);
-  form('item-form', async f => {
-    const body: ItemBody = { id: newId(), itemType: input(f, 'item-type'), title: input(f, 'item-title'), body: input(f, 'item-body'), author: ctx.principal, authoredBy: input(f, 'authored-by') as ItemBody['authoredBy'], created: new Date().toISOString(), tags: input(f, 'tags').split(',').map(s => s.trim()).filter(Boolean), ...(previous ? { replaces: previous.item.id } : {}) };
-    await saveRecord(ctx, { type: 'item', typeVersion: 1, body }); navigate(`/journeys/${id}/items/${previous ? itemId : body.id}`);
+  const view = (await artifactViews(ctx)).find(v => v.state.id === artifactId);
+  if (!view) throw new Error('Artifact not found. It may have been deleted.');
+  const payload = view.versions.at(-1)!.payload, readOnly = !canWriteContent(ctx.state, ctx.principal);
+  const downloads: ArtifactAttachment[] = [];
+  const attachments = (p: ArtifactPayload) => `<ul class="list">${p.attachments.map(a => { const n = downloads.push(a) - 1; return `<li>${escape(a.path ?? a.name)} · ${a.blob.size} bytes <button class="secondary" data-download="${n}">Download ${escape(a.name)}</button></li>`; }).join('')}</ul>`;
+  render(`<section class="panel"><p><a href="/journeys/${id}">← Back to journey</a></p><p class="eyebrow">${escape(payload.content.kind)}</p><h1>${escape(payload.title)}</h1><p class="meta" id="artifact-author">Author: ${escape(attribution(ctx, view.state.author))}</p><p class="meta">Tags: ${escape(payload.tags.join(', ') || 'none')}</p><pre>${escape(artifactText(payload))}</pre>${payload.content.kind === 'data' ? '<p class="notice">Data view is not available yet. Text is shown without interpretation; attachments are download-only.</p>' : ''}${attachments(payload)}${readOnly ? '' : `<div class="actions"><a href="/journeys/${id}/artifacts/${artifactId}/edit" class="button">Edit artifact</a><button class="secondary" id="delete-artifact">Delete artifact</button></div>`}</section><section class="panel"><h2>Versions</h2><ul class="list" id="versions">${view.versions.map(v => `<li><p class="meta">${escape(v.id)} · ${escape(v.at)} · Writer: ${escape(attribution(ctx, v.actor))}</p><h3>${escape(v.payload.title)}</h3><p>Tags: ${escape(v.payload.tags.join(', '))}</p><pre>${escape(artifactText(v.payload))}</pre>${attachments(v.payload)}</li>`).join('')}</ul></section><section class="panel"><h2>Comments</h2><p>Comments belong to the whole artifact; a version is recorded for context.</p><ul class="list" id="comments">${view.comments.map(c => `<li><p class="meta">${escape(c.at)} · Writer: ${escape(attribution(ctx, c.actor))} · Version: ${escape(c.onVersion ?? 'none')}</p><p>${escape(c.text)}</p></li>`).join('')}</ul>${readOnly ? '<p>Your access is read-only or a key update is pending.</p>' : '<form id="comment-form"><label for="comment">Add a comment</label><textarea id="comment" name="comment" required></textarea><button type="submit">Add comment</button></form>'}</section>`);
+  root.querySelectorAll<HTMLButtonElement>('[data-download]').forEach(button => button.addEventListener('click', () => perform(async () => { const a = downloads[Number(button.dataset.download)]!; downloadAttachment(a.name, await attachmentBytes(ctx, a)); })));
+  form('comment-form', async f => { await commentArtifact(ctx, view, input(f, 'comment')); await artifactScreen(id, artifactId); });
+  root.querySelector('#delete-artifact')?.addEventListener('click', () => perform(async () => {
+    if (!confirm('Delete this artifact and all its comments? Signed proofs and encrypted metadata remain as retained history, not secure erasure. Its files will no longer be available. Previously downloaded copies cannot be recalled.')) return;
+    await deleteArtifact(ctx, view); navigate(`/journeys/${id}`);
+  }));
+}
+async function artifactForm(id: string, artifactId?: string): Promise<void> {
+  const ctx = await context(id); if (!ctx) return;
+  if (!canWriteContent(ctx.state, ctx.principal)) throw new Error('This journey is read-only for you, or a key update is pending.');
+  const previous = artifactId ? (await artifactViews(ctx)).find(v => v.state.id === artifactId) : undefined;
+  if (artifactId && !previous) throw new Error('Artifact not found.');
+  const p = previous?.versions.at(-1)!.payload;
+  render(`<section class="panel"><p><a href="/journeys/${id}">← Back to journey</a></p><h1>${previous ? 'Edit artifact' : 'Add an artifact'}</h1><form id="artifact-form"><label for="artifact-type">Type</label><select id="artifact-type" name="artifact-type" ${previous ? 'disabled' : ''}>${ARTIFACT_TYPES.map(t => `<option value="${t}" ${p?.content.kind === t || !p && t === 'document' ? 'selected' : ''}>${t}</option>`).join('')}</select><p>Type and original author cannot change. Each save records you as its version writer.</p><label for="artifact-title">Title</label><input id="artifact-title" name="artifact-title" value="${escape(p?.title ?? '')}" required /><div id="type-fields"></div><label for="tags">Tags (comma-separated)</label><input id="tags" name="tags" value="${escape(p?.tags.join(', ') ?? '')}" /><div class="actions" id="suggested-tags">${['note','decision','question','learning','tension','practice','success','resource','position','interview','lesson'].map(t => `<button type="button" class="secondary" data-tag="${t}">${t}</button>`).join('')}</div><p class="meta">Suggested tags are optional, not artifact types.</p>${p?.attachments.length ? `<h2>Keep attachments</h2>${p.attachments.map((a, i) => `<label class="checkbox"><input type="checkbox" name="keep-${i}" checked /> ${escape(a.path ?? a.name)}</label>`).join('')}` : ''}<label for="attachments">Add attachments</label><input id="attachments" name="attachments" type="file" multiple /><label for="package-paths">Package paths (one per new file, optional)</label><textarea id="package-paths" name="package-paths" placeholder="scripts/example.txt"></textarea><p class="meta">At most eight files, each at most 25,000,000 bytes (25 MB). Skill attachments use relative paths; SKILL.md is the text above. File and image artifacts use the first kept or new file as primary. No files are executed or remotely fetched.</p><p id="upload-status" role="status"></p><button type="submit">Save artifact</button></form></section>`);
+  const fields = () => {
+    const type = read('artifact-type');
+    root.querySelector('#type-fields')!.innerHTML = type === 'link' ? `<label for="link-url">URL</label><input id="link-url" name="link-url" type="url" required value="${escape(p?.content.kind === 'link' ? p.content.url : '')}" /><label for="link-summary">Summary</label><textarea id="link-summary" name="link-summary">${escape(p?.content.kind === 'link' ? p.content.summary : '')}</textarea><label for="artifact-body">Notes</label><textarea id="artifact-body" name="artifact-body">${escape(p?.content.kind === 'link' ? p.content.notes : '')}</textarea>` : `${type === 'data' ? `<label for="data-format">Data format</label><select id="data-format" name="data-format">${['json','csv','toml','yaml','sqlite'].map(f => `<option ${p?.content.kind === 'data' && p.content.format === f ? 'selected' : ''}>${f}</option>`).join('')}</select><p>Attach an original data file, or enter text below. SQLite requires a file.</p>` : ''}${['file','image'].includes(type) ? '<p>Attach a primary file. Inline preview is not available yet.</p>' : `<label for="artifact-body">${type === 'skill' ? 'SKILL.md' : type === 'prompt' ? 'Prompt text' : 'Body (plain text; Markdown is not executed)'}</label><textarea id="artifact-body" name="artifact-body" ${['skill','prompt'].includes(type) ? 'required' : ''}>${escape(p ? artifactText(p) : '')}</textarea>`}`;
+  };
+  fields(); root.querySelector('#artifact-type')?.addEventListener('change', fields);
+  root.querySelectorAll<HTMLButtonElement>('[data-tag]').forEach(button => button.addEventListener('click', () => {
+    const tags = read('tags').split(',').map(t => t.trim()).filter(Boolean), mapped = suggestedArtifact(button.dataset.tag!, tags)!;
+    (root.querySelector('#tags') as HTMLInputElement).value = mapped.tags.join(', ');
+  }));
+  form('artifact-form', async f => {
+    const files = Array.from((f.elements.namedItem('attachments') as HTMLInputElement).files ?? []);
+    const kept = (p?.attachments ?? []).filter((_, i) => new FormData(f).has(`keep-${i}`));
+    if (files.length + kept.length > MAX_ARTIFACT_ATTACHMENTS) throw new Error('At most eight attachments are allowed.');
+    if (files.some(file => file.size > MAX_BLOB_BYTES)) throw new Error('Files can be at most 25,000,000 bytes (25 MB).');
+    const type = read('artifact-type') as ArtifactType, paths = input(f, 'package-paths').split('\n').map(s => s.trim()).filter(Boolean);
+    if (paths.length && paths.length !== files.length) throw new Error('Supply one package path per new file.');
+    const newPaths = files.map((file, i) => paths[i] ?? (type === 'skill' ? file.name : undefined));
+    const allPaths = [...kept.map(a => a.path), ...newPaths].filter((path): path is string => path !== undefined);
+    if (allPaths.some(path => !validPackagePath(path) || type === 'skill' && path === 'SKILL.md') || new Set(allPaths).size !== allPaths.length) throw new Error('Package paths must be distinct relative paths, without traversal or SKILL.md.');
+    if (type === 'skill' && kept.some(a => !a.path)) throw new Error('Every skill attachment needs a package path.');
+    if (['file','image'].includes(type) && !files.length && !kept.length) throw new Error('Attach a primary file.');
+    const attachments = kept.slice();
+    for (const [i, file] of files.entries()) { root.querySelector('#upload-status')!.textContent = `Encrypting and uploading ${i + 1} of ${files.length}…`; attachments.push(await uploadAttachment(ctx, file, newPaths[i])); }
+    const text = input(f, 'artifact-body');
+    let content: ArtifactContent;
+    switch (type) {
+      case 'skill': content = { kind: type, skill: text }; break;
+      case 'prompt': content = { kind: type, text }; break;
+      case 'document': content = { kind: type, markdown: text }; break;
+      case 'file': case 'image': content = { kind: type, primary: attachments[0]!.blob.id }; break;
+      case 'data': content = { kind: type, format: input(f, 'data-format') as 'json' | 'csv' | 'toml' | 'yaml' | 'sqlite', ...(attachments.length ? { primary: attachments[0]!.blob.id } : { text }) }; break;
+      case 'link': content = { kind: type, url: input(f, 'link-url'), summary: input(f, 'link-summary'), notes: text }; break;
+    }
+    const payload: ArtifactPayload = { title: input(f, 'artifact-title'), tags: [...new Set(input(f, 'tags').split(',').map(s => s.trim()).filter(Boolean))], content, attachments };
+    const saved = await saveArtifact(ctx, payload, previous ? { id: previous.state.id, author: previous.state.author, head: previous.state.head } : undefined);
+    navigate(`/journeys/${id}/artifacts/${saved}`);
   });
 }
 
@@ -526,7 +584,7 @@ async function agentScreen(sessionId: string): Promise<void> {
 async function exportScreen(id: string): Promise<void> {
   const ctx = await context(id); if (!ctx) return;
   const recipient = itemVersions(await allRecords(ctx)).find(v => v.item.itemType === 'recovery' && !v.deleted)?.item.body ?? '';
-  render(`<section class="panel"><p><a href="/journeys/${id}">← Back to journey</a></p><h1>Export your journey</h1><p>Your export contains the signed journey history, encrypted items and comments, and your key wraps. The download is encrypted to you and, by default, your recovery key. Save both to open it later.</p><form id="export-form"><label for="recovery-recipient">Recovery recipient (age public key)</label><input id="recovery-recipient" name="recovery-recipient" required placeholder="age1…" value="${escape(recipient)}" /><div class="actions"><button type="submit">Download encrypted export</button></div></form></section>`);
+  render(`<section class="panel"><p><a href="/journeys/${id}">← Back to journey</a></p><h1>Export your journey</h1><p>Your export contains the signed journey history, encrypted artifacts, comments and surviving files, and your key wraps. Deleted artifacts retain signed proofs and encrypted metadata, but their files are unavailable. Previously downloaded copies cannot be recalled. The download is encrypted to you and, by default, your recovery key. Save both to open it later.</p><form id="export-form"><label for="recovery-recipient">Recovery recipient (age public key)</label><input id="recovery-recipient" name="recovery-recipient" required placeholder="age1…" value="${escape(recipient)}" /><div class="actions"><button type="submit">Download encrypted export</button></div></form></section>`);
   form('export-form', async f => { const latest = await verifiedJourney(ctx.id, ctx.principal, ctx.keys); const ciphertext = await exportEncrypted(latest, [ctx.keys.recipient, input(f, 'recovery-recipient')]); download(`wayfinding-${id}.age.txt`, ciphertext); });
 }
 function navigate(path: string): void {
@@ -558,9 +616,9 @@ async function route(): Promise<void> {
     if (sub === 'members' || sub === 'people') return membersScreen(id);
     if (sub === 'agent') return agentPromptScreen(id);
     if (sub === 'export') return exportScreen(id);
-    if (sub === 'add') return itemForm(id);
-    const item = /^items\/([0-7][0-9A-HJKMNP-TV-Z]{25})(?:\/(edit))?$/.exec(sub);
-    if (item) return item[2] ? itemForm(id, item[1]) : itemScreen(id, item[1]!);
+    if (sub === 'add') return artifactForm(id);
+    const artifact = /^artifacts\/([0-7][0-9A-HJKMNP-TV-Z]{25})(?:\/(edit))?$/.exec(sub);
+    if (artifact) return artifact[2] ? artifactForm(id, artifact[1]) : artifactScreen(id, artifact[1]!);
     if (!sub) return journeyHome(id);
   }
   if (path === '/') return getPersonKeys() ? home() : startScreen();

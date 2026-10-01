@@ -34,6 +34,8 @@ button:disabled { opacity:.5; cursor:not-allowed; }
 pre,code { font-family:var(--font-mono); overflow-wrap:anywhere; white-space:pre-wrap; } pre { border:1px solid var(--ink); padding:14px; background:white; }
 .cards { display:grid; gap:12px; } .card { border:1px solid var(--ink); padding:18px; background:white; }
 .card p { margin:6px 0; } .card a { font-weight:600; }
+#suggested-tags { gap:8px; margin-top:12px; } #suggested-tags button { padding:6px 10px; font-size:14px; }
+#artifact-form input[type=file] { overflow:hidden; } #versions pre { max-height:32rem; overflow:auto; }
 @media(max-width:600px) { header { padding:14px 20px; } main { margin:24px auto 64px; } nav { gap:12px; } .panel { padding:22px; } }
 .site-footer { max-width:1200px; margin-inline:auto; padding:40px 32px 56px; display:flex; justify-content:space-between; gap:24px; flex-wrap:wrap; font-size:14px; color:var(--muted); }
 .site-footer > span { color:var(--ink); font:22px var(--font-display); }

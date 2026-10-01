@@ -1,6 +1,6 @@
-import { canWriteContent, canReadContent, isPersonGuide, createAgeIdentity, generateJourneyKey, newId, open, parseRecord, recipientsHash, seal, sealIdentity, sealControlLabels, signControlProof, unwrapJourneyKey, verifyControlProofs, wrapJourneyKey, meetsMinClientVersion, logDefinitions, readControlProof } from '@ai-wayfinding/core';
+import { canWriteContent, canReadContent, isPersonGuide, createAgeIdentity, generateJourneyKey, newId, open, parseRecord, recipientsHash, seal, sealIdentity, sealControlLabels, signControlProof, unwrapJourneyKey, verifyControlProofs, wrapJourneyKey, meetsMinClientVersion, controlDefinitions, readControlProof, verifyArtifactArchive, exportArtifactJourney } from '@ai-wayfinding/core';
 import { plainError, UPDATE_REQUIRED } from './messages.js';
-import type { ControlProof, Envelope, JourneyKey, KeyWrap, LogEntry, LogState, Member, ProtocolRecord } from '@ai-wayfinding/core';
+import type { ArtifactArchive, ControlProof, Envelope, JourneyKey, KeyWrap, LogEntry, LogState, Member, ProtocolRecord } from '@ai-wayfinding/core';
 import { getPersonKeys, rememberJourneyKey } from './keys.js';
 import type { PersonKeys } from './keys.js';
 
@@ -23,6 +23,7 @@ export async function listings(): Promise<JourneyListing[]> {
   const rows = (await api<{ journeys: JourneyListing[] }>('/journeys')).journeys;
   const keys = getPersonKeys();
   if (!keys) return rows;
+  for (const row of rows) sessionStorage.setItem(`wayfinding-principal:${keys.signingKey}:${row.id}`, row.principal);
   return Promise.all(rows.map(async row => ({ id: row.id, principal: row.principal, name: (await verifiedJourney(row.id, row.principal, keys)).state.settings!.name })));
 }
 export async function allLogRows(id: string, principal: string): Promise<EntryRow[]> {
@@ -39,11 +40,12 @@ export function assertSupported(minimum: string, format = 'control-proof-v1'): v
   if (format !== 'control-proof-v1' || !meetsMinClientVersion(INTERFACE_VERSION, minimum)) throw new Error(UPDATE_REQUIRED);
 }
 export async function verifiedJourney(id: string, principal: string, keys: PersonKeys): Promise<JourneyContext> {
-  const protocol = await api<{ minClientVersion: string; controlFormat: string }>(`/journeys/${id}/protocol`, 'GET', undefined, principal);
+  const protocol = await api<{ minClientVersion: string; controlFormat: string; artifactFormat?: string }>(`/journeys/${id}/protocol`, 'GET', undefined, principal);
   assertSupported(protocol.minClientVersion, protocol.controlFormat);
+  if (protocol.artifactFormat !== undefined && protocol.artifactFormat !== 'artifact-v1') throw new Error(UPDATE_REQUIRED);
   const rows = await allLogRows(id, principal);
   if (!rows.length || rows.some(row => !row.proof || !row.envelope || row.seq !== row.proof.seq)) throw new Error(historyError);
-  if (rows.some(row => row.proof.v !== 1 || !logDefinitions.some(definition => definition.name === row.proof.type))) throw new Error(UPDATE_REQUIRED);
+  if (rows.some(row => row.proof.v !== 1 || !controlDefinitions.some(definition => definition.name === row.proof.type))) throw new Error(UPDATE_REQUIRED);
   const wraps = (await api<{ wraps: { epoch: number; wrap: string }[] }>(`/journeys/${id}/wraps/me`, 'GET', undefined, principal)).wraps;
   const epochs = new Map<number, JourneyKey>();
   for (const wrap of wraps) {
@@ -136,7 +138,15 @@ export async function removeMember(ctx: JourneyContext, target: string): Promise
 }
 export async function exportEncrypted(ctx: JourneyContext, recipients: string[]): Promise<string> {
   const latest = await verifiedJourney(ctx.id, ctx.principal, ctx.keys);
-  const raw = await api<{ log: EntryRow[]; envelopes: Envelope[] }>(`/journeys/${ctx.id}/export`, 'GET', undefined, ctx.principal);
+  const raw = await api<ArtifactArchive | { log: EntryRow[]; envelopes: Envelope[] }>(`/journeys/${ctx.id}/export`, 'GET', undefined, ctx.principal);
+  if ('format' in raw && raw.format === 'artifact-v1') {
+    const trust = { journey: ctx.id, creator: latest.controls[0]!.proof.body.creator as Member };
+    const checked = await verifyArtifactArchive(raw, [ctx.keys.identity], trust);
+    if (checked.state.lastHash !== latest.state.lastHash) throw new Error('Journey history changed. Reload before exporting.');
+    const wraps = (await Promise.all([...latest.epochs.values()].map(key => wrapJourneyKey(key, recipients.map((recipient, i) => ({ id: `export-${i}`, recipient })))))).flat();
+    return exportArtifactJourney({ ...checked.archive, wraps }, recipients, [ctx.keys.identity], trust);
+  }
+  if (!('log' in raw)) throw new Error(historyError);
   if (raw.log.length !== latest.controls.length) throw new Error('Journey history changed. Reload before exporting.');
   const checked = await verifyControlProofs(raw.log.map(row => row.proof), raw.log.map(row => row.envelope), { journey: ctx.id, creator: latest.controls[0]!.proof.body.creator as Member });
   if (!checked.ok || checked.state.lastHash !== latest.state.lastHash) throw new Error(historyError);

@@ -22,7 +22,15 @@ A guide manages people independently of their read-only or read-write content ro
 
 Read-only people can change their own name and email choice, approve and manage their own agents, create and renew read-only agent links, and leave. The last guide cannot leave or give up guide authority. Removal revokes the removed person's agents too. A remaining guide completes key rotation before further content writes.
 
-The browser verifies signed controls bound to their encrypted labels before showing settings or access. Unknown controls or a newer required version clear the view and show an update message; approval is not needed again. Server schema v2 purges legacy journeys rather than reading or migrating them. Clients at 0.1.3 or older cannot read new journeys.
+The browser verifies signed controls bound to their encrypted labels before showing settings or access. Unknown controls or a newer required version clear the view and show an update message; approval is not needed again. Server schema v2 purges legacy journeys rather than reading or migrating them. New journeys require client/interface version `0.1.5`, `control-proof-v1` and `artifact-v1`. A remembered, account-scoped principal ID in this tab lets the authenticated protocol check show an update message when the server omits an incompatible journey from listings. This ID is not a key or an access grant.
+
+## Artifacts and files
+
+Journey members can create skills, prompts, Markdown documents, images, files, data and links. Suggested tags are optional; free tags keep their case and deduplicate exact values. Recovery records are separate and never appear in artifact lists, searches or counts. Types and original authors cannot change. Each save adds a version with its actual signer shown as writer. Whole-artifact comments keep a version ID for context. A stale edit fails with a reload message rather than replacing a newer version.
+
+Files are encrypted in the browser before staging and binary upload to private R2 storage. The limit is **25,000,000 raw bytes per file, inclusive**; empty files are valid. Each version can contain up to eight attachments. Skill packages have required `SKILL.md` text and optional files with distinct relative paths. Downloads require current membership and verify the ciphertext descriptor and authenticated bytes before creating a temporary local download URL. No URL, Markdown, package or attachment is automatically fetched or executed. Images and data are download-only or inert text here; the separate data-view stage owns previews and parsers.
+
+Read-only access or a pending key rotation stops writes, including staged uploads. Current access is checked again before upload and commit through the shared Bend rules. Deletion hides the artifact, versions, comments and downloads, but retains signed proofs and encrypted metadata. It is not secure erasure and cannot recall downloaded copies. Exports include surviving files and explicit unavailable-deleted-blob IDs; the signed archive is verified before encrypting it to the person and their recovery recipient.
 
 ## Local tests
 
@@ -35,8 +43,9 @@ npm run typecheck -w @ai-wayfinding/web
 npm run test -w @ai-wayfinding/web
 npm run build -w @ai-wayfinding/web
 npm run test:e2e -w @ai-wayfinding/web
+npm run test:e2e -w @ai-wayfinding/web -- e2e/stage1-artifacts.spec.ts
 ```
 
-Playwright builds the app and starts `wrangler dev` on `localhost:18787` with the test-only `packages/server/test/wrangler.jsonc` and local Durable Objects in `.scratch/`. Its wrapper fakes email delivery and rate limits but uses real Worker routes, WebAuthn verification, signed journey requests and encrypted records. The Chromium CDP authenticator is configured with `hasPrf: true` for the full journey and `hasPrf: false` for the no-PRF stop. The tests count WebAuthn create/get calls, not physical touches on a real device. No test identity is compiled into production. The full journey covers sign-up, sign-in, invite admission, agent approval and signed write, comments, support read-only access, and removal with a rotated key. It does not contact a Cloudflare account.
+Playwright builds the app and starts `wrangler dev` on `localhost:18787` with the test-only `packages/server/test/wrangler.jsonc` and local Durable Objects and R2 in `.scratch/`. Its wrapper fakes email delivery and rate limits but uses real Worker routes, WebAuthn verification, signed journey requests and encrypted records. The Chromium CDP authenticator is configured with `hasPrf: true` for the full journey and `hasPrf: false` for the no-PRF stop. The tests count WebAuthn create/get calls, not physical touches on a real device. No test identity is compiled into production. The full journey covers sign-up, sign-in, invite admission, agent approval and signed write, comments, support read-only access, and removal with a rotated key. It does not contact a Cloudflare account.
 
 The Worker cannot prove that a hostile client encrypted a log entry. Devices verify the full signed log before they trust membership or wrap a key. A server that replays an old valid log can only be detected with a separate client checkpoint; this app does not persist one. A later version could store a non-secret log hash without storing any usable keys.

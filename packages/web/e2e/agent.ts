@@ -1,5 +1,6 @@
 import type { APIRequestContext } from '@playwright/test';
-import { createAgeIdentity, createSigningIdentity, importSigningKey, newId, seal, unwrapJourneyKey } from '@ai-wayfinding/core';
+import type { ControlProof, Envelope, Member } from '@ai-wayfinding/core';
+import { createAgeIdentity, createSigningIdentity, ARTIFACT_FORMAT, artifactTypeHash, importSigningKey, newId, sealArtifactPayload, signControlProof, unwrapJourneyKey, verifyControlProofs } from '@ai-wayfinding/core';
 
 type Agent = { id: string; code: string; approvalUrl: string; principal: string; identity: string; signingPrivateKey: CryptoKey };
 const ORIGIN = 'http://localhost:18787';
@@ -29,8 +30,12 @@ export async function agentWritesItem(request: APIRequestContext, agent: Agent, 
   const wraps = await signed(request, agent, 'GET', `/journeys/${journeyId}/wraps/me`) as { wraps: { epoch: number; wrap: string }[] };
   const newest = wraps.wraps.at(-1)!;
   const key = await unwrapJourneyKey({ epoch: newest.epoch, recipient: 'agent', ciphertext: newest.wrap }, agent.identity);
-  const reserved = await signed(request, agent, 'POST', `/journeys/${journeyId}/seq`, {}) as { seq: number; epoch: number };
-  if (reserved.epoch !== key.epoch) throw new Error('Agent key changed before the write');
-  const envelope = await seal({ type: 'item', typeVersion: 1, body: { id: newId(), itemType: 'note', title: 'Agent observation', body: 'Written by the approved agent', author: agent.principal, authoredBy: 'agent', tags: [], created: new Date().toISOString() } }, { id: newId(), journey: journeyId, seq: reserved.seq, epoch: reserved.epoch, createdAt: new Date().toISOString() }, key);
-  await signed(request, agent, 'POST', `/journeys/${journeyId}/records`, { envelope });
+  const rows = (await signed(request, agent, 'GET', `/journeys/${journeyId}/log`) as { log: { proof: ControlProof; envelope: Envelope }[] }).log;
+  const verified = await verifyControlProofs(rows.map(r => r.proof), rows.map(r => r.envelope), { journey: journeyId, creator: rows[0]!.proof.body.creator as Member });
+  if (!verified.ok) throw new Error(verified.error.message);
+  const at = new Date().toISOString(), seq = verified.state.lastSeq + 1;
+  const body = { format: ARTIFACT_FORMAT, artifact: newId(), version: newId(), author: agent.principal, actor: agent.principal, typeHash: await artifactTypeHash('document'), blobs: [] };
+  const envelope = await sealArtifactPayload('artifact.create', body, { title: 'Agent observation', content: { kind: 'document', markdown: 'Written by the approved agent' }, tags: ['note'], attachments: [] }, { id: newId(), journey: journeyId, seq, epoch: key.epoch, createdAt: at }, key);
+  const proof = await signControlProof({ v: 1, seq, prev: verified.state.lastHash, at, actor: agent.principal, type: 'artifact.create', body }, envelope, journeyId, agent.signingPrivateKey);
+  await signed(request, agent, 'POST', `/journeys/${journeyId}/log`, { control: { proof, envelope } });
 }

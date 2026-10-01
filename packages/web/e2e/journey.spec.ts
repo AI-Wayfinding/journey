@@ -5,7 +5,7 @@ import { agentWritesItem, requestAgent } from './agent.js';
 
 import { browserPerson, signUp } from './person.js';
 const calls = (page: Page) => page.evaluate(() => window.__passkeyCalls);
-const journeyHeaders = { 'X-Client-Version': '0.1.4', 'X-Control-Format': 'control-proof-v1' };
+const journeyHeaders = { 'X-Client-Version': '0.1.5', 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': 'artifact-v1' };
 test('account name and per-journey email visibility are shared only when chosen', async ({ browser }) => {
   const owner = await browserPerson(browser), guest = await browserPerson(browser);
   try {
@@ -227,11 +227,11 @@ test('two people share a journey with PRF passkeys and same-origin assets', asyn
     expect(await alice.page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
     const journeyPath = new URL(alice.page.url()).pathname;
     const alicePrincipal = ((await (await alice.page.request.get('/v1/journeys', { headers: journeyHeaders })).json()) as { journeys: { id: string; principal: string }[] }).journeys.find(j => journeyPath.endsWith(j.id))!.principal;
-    await alice.page.getByRole('link', { name: 'Add an item' }).click();
+    await alice.page.getByRole('link', { name: 'Add an artifact' }).click();
     await alice.page.getByLabel('Title').fill('First observation');
-    await alice.page.getByLabel('Body (Markdown as plain text)').fill('A note shared with Bob');
-    await alice.page.getByRole('button', { name: 'Save item' }).click();
-    await expect(alice.page.getByRole('heading', { name: 'First observation' })).toBeVisible();
+    await alice.page.getByLabel('Body (plain text; Markdown is not executed)').fill('A note shared with Bob');
+    await alice.page.getByRole('button', { name: 'Save artifact' }).click();
+    await expect(alice.page.getByRole('heading', { name: 'First observation', level: 1 })).toBeVisible();
     const itemPath = new URL(alice.page.url()).pathname;
     await alice.page.getByRole('link', { name: 'Back to journey' }).click();
     await alice.page.getByRole('link', { name: 'Share this journey' }).click();
@@ -285,7 +285,7 @@ test('two people share a journey with PRF passkeys and same-origin assets', asyn
     console.log('Sign-in taps: 1 get');
     await bob.page.getByRole('link', { name: 'Our shared path' }).click();
     await bob.page.getByRole('link', { name: 'First observation' }).click();
-    const bobWrapsResponse = await bob.page.request.get('/v1' + journeyPath + '/wraps/me', { headers: { 'X-Client-Version': '0.1.4', 'X-Control-Format': 'control-proof-v1', 'X-Principal': bobPrincipal } });
+    const bobWrapsResponse = await bob.page.request.get('/v1' + journeyPath + '/wraps/me', { headers: { 'X-Client-Version': '0.1.5', 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': 'artifact-v1', 'X-Principal': bobPrincipal } });
     const bobWraps = (await bobWrapsResponse.json()) as { wraps: { epoch: number; wrap: string }[] };
     expect(bobWraps.wraps.map(w => w.epoch)).toContain(1);
     const agent = await requestAgent(request, journeyPath.split('/').at(-1)!, 'Proposed <guide>');
@@ -307,18 +307,18 @@ test('two people share a journey with PRF passkeys and same-origin assets', asyn
     await agentWritesItem(request, agent, journeyPath.split('/').at(-1)!);
     await alice.page.getByRole('link', { name: 'People & agents' }).click();
     await expect(alice.page.getByText('Alice’s guide', { exact: false })).toBeVisible();
-    const beforeRenameWraps = await (await alice.page.request.get('/v1' + journeyPath + '/wraps/me', { headers: { 'X-Client-Version': '0.1.4', 'X-Control-Format': 'control-proof-v1', 'X-Principal': alicePrincipal } })).json() as { wraps: { epoch: number }[] };
+    const beforeRenameWraps = await (await alice.page.request.get('/v1' + journeyPath + '/wraps/me', { headers: { 'X-Client-Version': '0.1.5', 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': 'artifact-v1', 'X-Principal': alicePrincipal } })).json() as { wraps: { epoch: number }[] };
     alice.page.once('dialog', dialog => void dialog.accept('<renamed guide>'));
     await alice.page.locator(`[data-rename="${agent.principal}"]`).click();
     await expect(alice.page.getByText('<renamed guide>', { exact: false })).toBeVisible();
     expect(await alice.page.locator('strong').filter({ hasText: '<renamed guide>' }).count()).toBe(1);
-    const afterRenameWraps = await (await alice.page.request.get('/v1' + journeyPath + '/wraps/me', { headers: { 'X-Client-Version': '0.1.4', 'X-Control-Format': 'control-proof-v1', 'X-Principal': alicePrincipal } })).json() as { wraps: { epoch: number }[] };
+    const afterRenameWraps = await (await alice.page.request.get('/v1' + journeyPath + '/wraps/me', { headers: { 'X-Client-Version': '0.1.5', 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': 'artifact-v1', 'X-Principal': alicePrincipal } })).json() as { wraps: { epoch: number }[] };
     expect(afterRenameWraps.wraps.map(w => w.epoch)).toEqual(beforeRenameWraps.wraps.map(w => w.epoch));
     await expect(alice.page.locator('[data-rename]')).toHaveCount(1);
     await alice.page.getByRole('link', { name: 'Back to journey' }).click();
     await expect(alice.page.getByRole('link', { name: 'Agent observation' })).toBeVisible();
     await alice.page.getByRole('link', { name: 'Agent observation' }).click();
-    await expect(alice.page.locator('p.meta').filter({ hasText: '<renamed guide>' })).toBeVisible();
+    await expect(alice.page.locator('#artifact-author').filter({ hasText: '<renamed guide>' })).toBeVisible();
     await alice.page.getByRole('link', { name: 'Back to journey' }).click();
     await alice.page.getByRole('link', { name: 'Share this journey' }).click();
     alice.page.on('dialog', dialog => void dialog.accept());
@@ -326,17 +326,17 @@ test('two people share a journey with PRF passkeys and same-origin assets', asyn
     await expect(alice.page.locator(`[data-remove="${bobPrincipal}"]`)).toHaveCount(0, { timeout: 20_000 });
     await expect(alice.page.getByText('Key update pending')).toHaveCount(0);
     await alice.page.getByRole('link', { name: 'Back to journey' }).click();
-    await alice.page.getByRole('link', { name: 'Add an item' }).click();
+    await alice.page.getByRole('link', { name: 'Add an artifact' }).click();
     await alice.page.getByLabel('Title').fill('Only after Bob left');
-    await alice.page.getByRole('button', { name: 'Save item' }).click();
-    await expect(alice.page.getByRole('heading', { name: 'Only after Bob left' })).toBeVisible();
+    await alice.page.getByRole('button', { name: 'Save artifact' }).click();
+    await expect(alice.page.getByRole('heading', { name: 'Only after Bob left', level: 1 })).toBeVisible();
     await bob.page.getByRole('link', { name: 'Back to journey' }).click();
     await expect(bob.page.getByText('You no longer have access to this journey.')).toBeVisible();
-    const denied = await bob.page.request.get('/v1' + journeyPath + '/records', { headers: { 'X-Client-Version': '0.1.4', 'X-Control-Format': 'control-proof-v1', 'X-Principal': bobPrincipal } });
+    const denied = await bob.page.request.get('/v1' + journeyPath + '/records', { headers: { 'X-Client-Version': '0.1.5', 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': 'artifact-v1', 'X-Principal': bobPrincipal } });
     expect(denied.status()).toBe(403);
-    const afterRemoval = await alice.page.request.get('/v1' + journeyPath + '/records', { headers: { 'X-Client-Version': '0.1.4', 'X-Control-Format': 'control-proof-v1', 'X-Principal': (await alice.page.request.get('/v1/journeys', { headers: journeyHeaders }).then(r => r.json()) as { journeys: { principal: string; id: string }[] }).journeys.find(j => journeyPath.endsWith(j.id))!.principal } });
-    const envelopes = (await afterRemoval.json()) as { records: Envelope[] };
-    const newest = envelopes.records.at(-1)!;
+    const afterRemoval = await alice.page.request.get('/v1' + journeyPath + '/log', { headers: { 'X-Client-Version': '0.1.5', 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': 'artifact-v1', 'X-Principal': (await alice.page.request.get('/v1/journeys', { headers: journeyHeaders }).then(r => r.json()) as { journeys: { principal: string; id: string }[] }).journeys.find(j => journeyPath.endsWith(j.id))!.principal } });
+    const envelopes = (await afterRemoval.json()) as { log: { envelope: Envelope }[] };
+    const newest = envelopes.log.at(-1)!.envelope;
     expect(newest.outside.epoch).toBeGreaterThan(Math.max(...bobWraps.wraps.map(w => w.epoch)));
     const oldKey: JourneyKey = { epoch: 1, key: new Uint8Array(32) };
     await expect(open(newest, oldKey)).rejects.toThrow('Wrong journey key epoch');
@@ -358,7 +358,7 @@ test('two people share a journey with PRF passkeys and same-origin assets', asyn
     await expect(alice.page.getByText('Wayfinding support (Hypha), read only')).toBeVisible();
     await alice.page.getByRole('button', { name: 'Let in' }).click();
     await expect(support.page.getByRole('heading', { name: 'Our shared path' })).toBeVisible({ timeout: 20_000 });
-    await expect(support.page.getByRole('link', { name: 'Add an item' })).toHaveCount(0);
+    await expect(support.page.getByRole('link', { name: 'Add an artifact' })).toHaveCount(0);
     await expect(support.page.getByRole('link', { name: 'Only after Bob left' })).toBeVisible();
     await support.page.getByRole('link', { name: 'First observation' }).click();
     await expect(support.page.locator('section > pre').filter({ hasText: 'A note shared with Bob' })).toBeVisible();
@@ -372,7 +372,7 @@ test('two people share a journey with PRF passkeys and same-origin assets', asyn
     const supportPrincipal = ((await supportLists.json()) as { journeys: { id: string; principal: string }[] }).journeys.find(j => journeyPath.endsWith(j.id))!.principal;
     const supportWraps = await (await support.page.request.get(`/v1${journeyPath}/wraps/me`, { headers: { ...journeyHeaders, 'X-Principal': supportPrincipal } })).json() as { wraps: { epoch: number }[] };
     expect(supportWraps.wraps.map(w => w.epoch)).toEqual([1, newest.outside.epoch]);
-    expect((await support.page.request.post(`/v1${journeyPath}/seq`, { data: {}, headers: { 'X-Client-Version': '0.1.4', 'X-Control-Format': 'control-proof-v1', 'X-Wayfinding': '1', Origin: 'http://localhost:18787', 'X-Principal': supportPrincipal } })).status()).toBe(403);
+    expect((await support.page.request.post(`/v1${journeyPath}/seq`, { data: {}, headers: { 'X-Client-Version': '0.1.5', 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': 'artifact-v1', 'X-Wayfinding': '1', Origin: 'http://localhost:18787', 'X-Principal': supportPrincipal } })).status()).toBe(403);
     expect(support.requests.every(url => new URL(url).hostname === 'localhost')).toBeTruthy();
   } finally { await alice.context.close(); await bob.context.close(); await support.context.close(); }
 });
@@ -389,11 +389,11 @@ test('an agent link is created, read as JSON, extended and revoked', async ({ br
     await expect(alice.page.getByRole('heading', { name: 'Link test journey' })).toBeVisible();
     const journeyPath = new URL(alice.page.url()).pathname;
     const journeyId = journeyPath.split('/').pop()!;
-    await alice.page.getByRole('link', { name: 'Add an item' }).click();
+    await alice.page.getByRole('link', { name: 'Add an artifact' }).click();
     await alice.page.getByLabel('Title').fill('Packing list');
-    await alice.page.getByLabel('Body (Markdown as plain text)').fill('Passport, charger, **umbrella**');
-    await alice.page.getByRole('button', { name: 'Save item' }).click();
-    await expect(alice.page.getByRole('heading', { name: 'Packing list' })).toBeVisible();
+    await alice.page.getByLabel('Body (plain text; Markdown is not executed)').fill('Passport, charger, **umbrella**');
+    await alice.page.getByRole('button', { name: 'Save artifact' }).click();
+    await expect(alice.page.getByRole('heading', { name: 'Packing list', level: 1 })).toBeVisible();
 
     // Create the link.
     await alice.page.goto(`${journeyPath}/people`);
@@ -425,7 +425,7 @@ test('an agent link is created, read as JSON, extended and revoked', async ({ br
     expect(data.journey).toMatchObject({ id: journeyId, name: 'Link test journey' });
     expect(data.access).toMatchObject({ agentName: 'Cowork helper', scope: 'read' });
     expect(data.access.renewUrl).toContain(`/journeys/${journeyId}/people#renew-`);
-    expect(data.items).toMatchObject([{ title: 'Packing list', body: 'Passport, charger, **umbrella**', author: { kind: 'person' } }]);
+    expect(data.items).toMatchObject([{ title: 'Packing list', body: 'Packing list\n\nPassport, charger, **umbrella**', author: { kind: 'person' } }]);
     expect(data.page).toEqual({ number: 1, of: 1, next: null });
     const firstExpiry = Date.parse(data.access.expiresAt);
     expect(firstExpiry).toBeGreaterThan(Date.now() + 6 * 86_400_000);

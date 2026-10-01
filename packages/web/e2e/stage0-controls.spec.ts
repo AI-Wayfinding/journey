@@ -1,7 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
 import { browserPerson, signUp } from './person.js';
 async function principal(page: Page, id: string) {
-  const data = await (await page.request.get('/v1/journeys', { headers: { 'X-Client-Version': '0.1.4', 'X-Control-Format': 'control-proof-v1' } })).json() as { journeys: { id: string; principal: string }[] };
+  const data = await (await page.request.get('/v1/journeys', { headers: { 'X-Client-Version': '0.1.5', 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': 'artifact-v1' } })).json() as { journeys: { id: string; principal: string }[] };
   return data.journeys.find(row => row.id === id)!.principal;
 }
 test('signed settings, separate role and guide authority, and read-only personal controls survive reload', async ({ browser, request }) => {
@@ -39,7 +39,7 @@ test('signed settings, separate role and guide authority, and read-only personal
     await guide.page.reload(); await guide.page.getByRole('button', { name: 'Let in' }).click();
     await expect(guest.page.getByRole('heading', { name: 'Current signed name', exact: true })).toBeVisible({ timeout: 20_000 });
     await expect(guest.page.getByText('Current signed description')).toBeVisible();
-    await expect(guest.page.getByRole('link', { name: 'Add an item' })).toHaveCount(0);
+    await expect(guest.page.getByRole('link', { name: 'Add an artifact' })).toHaveCount(0);
     const guestId = await principal(guest.page, id);
     await guest.page.goto(path + '/members');
     await expect(guest.page.getByRole('heading', { name: 'Journey settings' })).toHaveCount(0);
@@ -84,7 +84,7 @@ test('signed settings, separate role and guide authority, and read-only personal
     await guest.page.locator(`[data-grant="${guideId}"]`).click(); await expect(guest.page.locator('#leave')).toBeEnabled();
     await guest.page.locator('#leave').click(); await expect(guest.page.getByRole('heading', { name: 'A place to find your way' })).toBeVisible();
     await guide.page.goto(path); await expect(guide.page.getByRole('heading', { name: 'Read-only guide settings', exact: true })).toBeVisible();
-    await expect(guide.page.getByRole('link', { name: 'Add an item' })).toHaveCount(0);
+    await expect(guide.page.getByRole('link', { name: 'Add an artifact' })).toHaveCount(0);
   } finally { await guide.context.close(); await guest.context.close(); }
 });
 
@@ -103,6 +103,6 @@ test('a future control clears the browser view rather than showing partial conte
     await expect(person.page.getByRole('heading', { name: 'Update Wayfinding' })).toBeVisible();
     await expect(person.page.getByRole('alert')).toContainText('do not ask for approval again');
     await expect(person.page.getByText('Must not remain rendered')).toHaveCount(0);
-    await expect(person.page.getByRole('link', { name: 'Add an item' })).toHaveCount(0);
+    await expect(person.page.getByRole('link', { name: 'Add an artifact' })).toHaveCount(0);
   } finally { await person.context.close(); }
 });
