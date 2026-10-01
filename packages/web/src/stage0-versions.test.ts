@@ -29,16 +29,16 @@ async function fixture() {
   return { id, principal, controls, requests, append, minimum: (value: string) => { minimum = value; } };
 }
 it('requires browser update for newer protocol and unsupported control formats', () => {
-  expect(() => assertSupported('0.1.5')).toThrow(UPDATE_REQUIRED);
+  expect(() => assertSupported('0.1.6')).toThrow(UPDATE_REQUIRED);
   expect(() => assertSupported('0.1.4', 'future')).toThrow(UPDATE_REQUIRED);
 });
 it('uses signed minimum and never writes through an older browser context', async () => {
   const f = await fixture(), context = await verifiedJourney(f.id, f.principal, keys);
-  await f.append('client.minVersion', { version: '0.1.5' });
+  await f.append('client.minVersion', { version: '0.1.6' });
   await expect(verifiedJourney(f.id, f.principal, keys)).rejects.toThrow(UPDATE_REQUIRED);
   await expect(saveRecord(context, { type: 'item', typeVersion: 1, body: {} })).rejects.toThrow(UPDATE_REQUIRED);
   expect(f.requests.some(r => r.includes('/seq') || r.includes('/records'))).toBe(false);
-  f.minimum('0.1.5'); f.requests.length = 0;
+  f.minimum('0.1.6'); f.requests.length = 0;
   await expect(verifiedJourney(f.id, f.principal, keys)).rejects.toThrow(UPDATE_REQUIRED);
   expect(f.requests).toHaveLength(1);
 });

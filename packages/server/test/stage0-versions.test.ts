@@ -33,12 +33,12 @@ describe('Stage 0 version and format barrier', () => {
       expect((await request(`/v1/journeys/${j.id}/log`, 'POST', { control: candidate }, { ...as(owner), 'X-Client-Version': '99.0.0' })).status).toBe(400);
       expect(await snapshot(j)).toBe(before);
     }
-    expect((await change(j, owner, 'client.minVersion', { version: '0.1.5' })).status).toBe(201);
+    expect((await change(j, owner, 'client.minVersion', { version: '0.1.6' })).status).toBe(201);
     expect((await request(`/v1/journeys/${j.id}/export`, 'GET', undefined, as(owner))).status).toBe(426);
-    const headers = { ...as(owner), 'X-Client-Version': '0.1.5' };
+    const headers = { ...as(owner), 'X-Client-Version': '0.1.6' };
     expect((await request(`/v1/journeys/${j.id}/export`, 'GET', undefined, headers)).status).toBe(200);
     const lower = await proof(j, owner, 'client.minVersion', { version: '0.1.3' });
     expect((await request(`/v1/journeys/${j.id}/log`, 'POST', { control: lower }, headers)).status).toBe(403);
-    expect(await (await request(`/v1/journeys/${j.id}/protocol`, 'GET', undefined, as(owner))).json()).toEqual({ minClientVersion: '0.1.5', controlFormat: 'control-proof-v1' });
+    expect(await (await request(`/v1/journeys/${j.id}/protocol`, 'GET', undefined, as(owner))).json()).toEqual({ minClientVersion: '0.1.6', controlFormat: 'control-proof-v1' });
   });
 });
