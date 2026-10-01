@@ -45,7 +45,7 @@ export async function artifact(j: Journey, actor: Pick<Person, 'principal' | 'si
   return { proof: await signControlProof(entry, envelope, j.id, await importSigningKey(actor.signing.privateKey)), envelope };
 }
 export const rows = (j: Journey) => runInDurableObject(enclaveStub(j.id), (_o, s) => s.storage.sql.exec('SELECT * FROM blobs ORDER BY id').toArray());
-export const collect = (j: Journey) => runInDurableObject(enclaveStub(j.id), o => o.alarm());
+export const collect = (j: Journey) => runInDurableObject(enclaveStub(j.id), o => o.alarm!());
 export const expireStage = (j: Journey, id: string) => runInDurableObject(enclaveStub(j.id), (_o, s) => { s.storage.sql.exec('UPDATE blobs SET expires=0 WHERE id=?', id); });
 export async function stored(j: Journey) {
   return runInDurableObject(enclaveStub(j.id), (_o, s) => JSON.stringify(['meta', 'log', 'authority', 'blobs', 'records'].map(t => s.storage.sql.exec(`SELECT * FROM ${t} ORDER BY 1`).toArray())));

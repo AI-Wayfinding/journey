@@ -1,7 +1,7 @@
 import { runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it, vi } from 'vitest';
 import { exportArtifactJourney, generateJourneyKey, importArtifactJourney, MAX_BLOB_BYTES, newId, openBlob, recipientsHash, sealBlob, type ArtifactArchive, type Member } from '@ai-wayfinding/core';
-import { artifact, as, addAgent, addPerson, agentHeaders, begin, body, bucket, bucketKey, change, collect, enclaveStub, expireStage, fixture, payload, request, rows, settings, staged, state, stored, submit, upload, proof, wraps } from './stage1-fixtures.js';
+import { artifact, as, addAgent, addPerson, agentHeaders, body, bucket, bucketKey, change, collect, enclaveStub, expireStage, fixture, payload, request, rows, settings, staged, state, stored, submit, upload, proof, wraps } from './stage1-fixtures.js';
 
 describe('Stage 1 authenticated local R2 lifecycle', () => {
   it('stores binary ciphertext only, denies staged reads, commits atomically and retries the exact proof', async () => {
@@ -134,7 +134,6 @@ describe('Stage 1 authenticated local R2 lifecycle', () => {
     const stream = new ReadableStream<Uint8Array>({ async pull(c) { entered(); await resume; c.enqueue(blob.ciphertext); c.close(); } }, { highWaterMark: 0 });
     const result = upload(j, guest, blob, stream);
     await reading;
-    let clock: ReturnType<typeof vi.spyOn> | undefined;
     if (scenario === 'downgrade') expect((await change(j, owner, 'member.role', { member: guest.principal, role: 'read-only' })).status).toBe(201);
     if (scenario === 'remove') expect((await change(j, owner, 'member.remove', { member: guest.principal })).status).toBe(201);
     if (scenario === 'pending' || scenario === 'epoch') {
@@ -156,7 +155,7 @@ describe('Stage 1 authenticated local R2 lifecycle', () => {
       expect((await submit(j, guest, control)).ok).toBe(false);
       expect(await stored(j)).toBe(before);
       if (scenario !== 'version') expect((await request(`/v1/journeys/${j.id}/blobs`, 'POST', { size: 0 }, as(guest))).status).toBe(scenario === 'expiry' || scenario === 'epoch' ? 201 : 403);
-    } finally { clock?.mockRestore(); }
+    } finally { release(); }
   });
 
   it('inherits agent limits from the person, authenticates exact binary bytes, and checks live expiry', async () => {
@@ -188,7 +187,7 @@ describe('Stage 1 authenticated local R2 lifecycle', () => {
     const guide = await addPerson(j, owner, { grants: ['members.manage'] });
     expect((await request(`/v1/journeys/${j.id}/blobs`, 'POST', { size: 0 }, as(guide))).status).toBe(403);
     expect((await submit(j, guide, await artifact(j, guide, 'artifact.create', await body(guide)))).status).toBe(403);
-    for (const extra of [{ 'X-Client-Version': '0.1.4' }, { 'X-Artifact-Format': '' }, { 'X-Control-Format': '' }]) {
+    for (const extra of [{ 'X-Client-Version': '0.1.4' }, { 'X-Artifact-Format': '' }, { 'X-Control-Format': '' }] as Record<string, string>[]) {
       for (const route of ['log', 'records', 'export']) expect((await request(`/v1/journeys/${j.id}/${route}`, 'GET', undefined, { ...as(owner), ...extra })).status).toBe(426);
       expect((await request(`/v1/journeys/${j.id}/blobs`, 'POST', { size: 0 }, { ...as(owner), ...extra })).status).toBe(426);
     }
