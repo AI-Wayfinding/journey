@@ -152,3 +152,42 @@ def Laws.server_agent_admission_requires_owner(scope, admitted, owner, actor, su
 
 def Laws.server_agent_admission_requires_scope(scope, admitted, owner, actor, support, e):
   Equal.trans(Bool, Nat.is_eq(owner, actor) && R.admission_scope(scope, admitted), Nat.is_eq(owner, actor) && False{}, False{}, Equal.cong(Bool, Bool, b => Nat.is_eq(owner, actor) && b, R.admission_scope(scope, admitted), False{}, e), and_false(Nat.is_eq(owner, actor)))
+
+def Laws.artifacts_require_current_write(members, actor, minimum, pending, index, action, e):
+  Equal.cong(Bool, R.ArtifactTransition, b => R.artifact_authorized(b && R.artifact_ready(minimum), index, actor, action), R.content_write(R.member_access(R.find(members, actor), members), pending), False{}, e)
+
+def Laws.artifact_pending_denies(members, actor, minimum, index, action):
+  Laws.artifacts_require_current_write(members, actor, minimum, True{}, index, action, Laws.pending_rotation_blocks_content(R.member_access(R.find(members, actor), members)))
+
+def Laws.artifact_edit_preserves_creator_actor_and_history(xs, used, actor, id, version, creator, kind, head, deleted, versions, author, writer, typeHash, predecessor, blobs):
+  {==}
+
+def Laws.artifact_create_pins_real_creator(xs, used, actor, id, version, author, writer, kind, blobs):
+  {==}
+
+def Laws.artifact_deleted_never_resurrects(xs, used, actor, id, version, creator, kind, head, versions, predecessor, author, writer, typeHash, blobs):
+  {==}
+
+def Laws.artifact_stale_predecessor_conflicts(xs, used, actor, id, version, creator, kind, head, deleted, versions, predecessor, author, writer, typeHash, blobs, e):
+  +fresh = Bool.not(deleted || R.nat_has(used, version))
+  +next = {R.ArtifactIndex{R.artifact_put(xs, R.Artifact{id, creator, kind, version, False{}, R.ArtifactVersion{version, actor, blobs} <> versions}), version <> used} : R.ArtifactIndex}
+  Equal.trans(R.ArtifactTransition, R.artifact_guard(fresh && Nat.is_eq(predecessor, head) && Nat.is_eq(author, creator) && Nat.is_eq(writer, actor) && Nat.is_eq(typeHash, kind) && R.artifact_references(blobs, xs, id), next), R.artifact_guard(fresh && False{} && Nat.is_eq(author, creator) && Nat.is_eq(writer, actor) && Nat.is_eq(typeHash, kind) && R.artifact_references(blobs, xs, id), next), R.ArtifactConflict{}, Equal.cong(Bool, R.ArtifactTransition, b => R.artifact_guard(fresh && b && Nat.is_eq(author, creator) && Nat.is_eq(writer, actor) && Nat.is_eq(typeHash, kind) && R.artifact_references(blobs, xs, id), next), Nat.is_eq(predecessor, head), False{}, e), Equal.cong(Bool, R.ArtifactTransition, b => R.artifact_guard(b && Nat.is_eq(author, creator) && Nat.is_eq(writer, actor) && Nat.is_eq(typeHash, kind) && R.artifact_references(blobs, xs, id), next), fresh && False{}, False{}, and_false(fresh)))
+
+def Laws.artifact_cross_reference_denied(xs, id, blob, tail, e):
+  Equal.cong(Bool, Bool, b => Bool.not(b) && R.artifact_references(tail, xs, id), R.artifact_other_blob(xs, id, blob), True{}, e)
+
+def Laws.artifact_invalid_reference_conflicts(index):
+  {==}
+
+def Laws.artifact_comment_references_same_artifact(xs, used, actor, comment, context, creator, author, writer, deleted, versions, id, kind, head):
+  {==}
+
+def Laws.artifact_deleted_references_not_live(id, author, kind, head, versions, tail, blob):
+  {==}
+
+def Laws.artifact_legacy_client_denied(client, minimum, control):
+  match control:
+    case False{}:
+      {==}
+    case True{}:
+      {==}

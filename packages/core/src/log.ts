@@ -1,4 +1,4 @@
-import { projectMembers, replayControl, normalizedMembers, replayJourneyControl, ruleSettings, stage0Rules } from './rules.js';
+import { projectMembers, replayControl, normalizedMembers, replayJourneyControl, ruleSettings, stage0Rules, replayArtifact } from './rules.js';
 import { isId } from './ids.js';
 import { asBuffer, decode, encode, utf8 } from './codec.js';
 import { ruleVersion } from './versions.js';
@@ -14,7 +14,7 @@ export type ContentRole = 'read-only' | 'read-write';
 export type JoiningPolicy = 'invitation-only' | 'guide-approved' | 'immediate';
 export const validJoiningPolicy = (value: unknown): value is JoiningPolicy => ['invitation-only', 'guide-approved', 'immediate'].includes(value as string);
 export interface JourneySettings { name: string; description: string; defaultRole: ContentRole; visibility: 'private' | 'public'; joiningPolicy: JoiningPolicy }
-export interface LogState { settings?: JourneySettings; pendingRotation?: boolean; journey: string; members: Record<string, DerivedMember>; grants: Record<string, Grant[]>; currentEpoch: number; minClientVersion: string; lastSeq: number; lastHash: string | null }
+export interface LogState { artifacts?: ArtifactHistory; settings?: JourneySettings; pendingRotation?: boolean; journey: string; members: Record<string, DerivedMember>; grants: Record<string, Grant[]>; currentEpoch: number; minClientVersion: string; lastSeq: number; lastHash: string | null }
 export interface LogError { code: 'invalid-entry' | 'broken-chain' | 'invalid-signature' | 'unauthorized' | 'last-holder' | 'client-too-old'; seq: number; message: string }
 export type LogResult = { ok: true; state: LogState } | { ok: false; error: LogError };
 type EffectError = { code: LogError['code']; message: string };
@@ -78,6 +78,20 @@ function validVersion(value: unknown): boolean {
   if (typeof value !== 'string') return false;
   try { ruleVersion(value); return true; } catch { return false; }
 }
+import { isArtifactAction, validateArtifactPublic, emptyArtifactHistory, projectArtifact } from './artifacts.js';
+import type { ArtifactHistory, BlobDescriptor } from './artifacts.js';
+async function artifactEffect(state: LogState, type: string, body: JsonObject, actor: string, at?: string): Promise<EffectError | null> {
+  if (!isArtifactAction(type)) return { code: 'invalid-entry', message: 'Unknown artifact action' };
+  const blobs = body.blobs as BlobDescriptor[] | undefined;
+  if (blobs?.some(b => b.journey !== state.journey || b.epoch > state.currentEpoch)) return { code: 'invalid-entry', message: 'Invalid artifact blob journey or epoch' };
+  const previousBlobs = Object.values(state.artifacts?.items ?? {}).flatMap(item => item.versions.flatMap(v => v.blobs));
+  if (blobs?.some(b => previousBlobs.some(old => old.id === b.id && canonical(old) !== canonical(b)))) return { code: 'invalid-entry', message: 'Blob descriptor changed' };
+  const result = replayArtifact(state, type, body, actor, at === undefined ? undefined : Date.parse(at));
+  if (result.transition.$ !== 'ArtifactAccepted') return { code: result.transition.$ === 'ArtifactDenied' ? 'unauthorized' : 'invalid-entry', message: result.transition.$ === 'ArtifactDenied' ? 'Artifact action requires current write access and Stage 1 minimum' : 'Artifact predecessor, attribution or reference conflict' };
+  state.artifacts ??= emptyArtifactHistory();
+  projectArtifact(state.artifacts, type, body, actor, state.lastSeq + 1);
+  return null;
+}
 const ok: Validation = { ok: true };
 const fail = (reason: string): Validation => ({ ok: false, reason });
 const object = (value: unknown): value is JsonObject => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -90,6 +104,7 @@ function validMember(value: unknown): value is Member {
 }
 const grants = (value: unknown): value is Grant[] => Array.isArray(value) && value.every(v => v === 'members.manage') && new Set(value).size === value.length;
 const memberBody = (body: JsonObject): Validation => shape(body, ['member', 'grants', 'kind']) && validMember(body.member) && body.kind === body.member.kind && grants(body.grants) ? ok : fail('Invalid member.add');
+export const artifactDefinitions: readonly LogDefinition[] = (['artifact.create', 'artifact.version', 'artifact.comment', 'artifact.delete'] as const).map(name => ({ name, fields: ['format', 'artifact', 'author', 'actor', 'version', 'predecessor', 'typeHash', 'blobs', 'comment', 'onVersion'], validate: (body: JsonObject) => validateArtifactPublic(name, body), apply: (state: LogState, body: JsonObject, actor: string, at?: string) => artifactEffect(state, name, body, actor, at) }));
 export const logDefinitions: readonly LogDefinition[] = [
   { name: 'genesis', fields: ['journey', 'name', 'creator', 'grants', 'mode', 'visibility', 'minClientVersion', 'description', 'journeyKind'], validate: b => shape(b, ['journey', 'name', 'creator', 'grants', 'mode', 'visibility', 'minClientVersion'], ['journey', 'name', 'creator', 'grants', 'mode', 'visibility', 'minClientVersion', 'description', 'journeyKind']) && isId(b.journey) && str(b.name) && validMember(b.creator) && b.creator.kind === 'person' && grants(b.grants) && b.grants.includes('members.manage') && b.mode === 'sealed' && b.visibility === 'private' && validVersion(b.minClientVersion) && (b.description === undefined || typeof b.description === 'string' && b.description.length <= 2000) && (b.journeyKind === undefined || b.journeyKind === 'individual' || b.journeyKind === 'team') ? ok : fail('Invalid genesis') },
   { name: 'journey.settings', fields: ['name', 'description', 'defaultRole', 'visibility', 'joiningPolicy'], validate: b => shape(b, ['name', 'description', 'defaultRole', 'visibility', 'joiningPolicy']) && str(b.name) && typeof b.description === 'string' && b.description.length <= 2000 && (b.defaultRole === 'read-only' || b.defaultRole === 'read-write') && (b.visibility === 'private' || b.visibility === 'public') && validJoiningPolicy(b.joiningPolicy) ? ok : fail('Invalid journey.settings'), apply: configure },
@@ -109,6 +124,8 @@ export const logDefinitions: readonly LogDefinition[] = [
   { name: 'key.rotate', fields: ['epoch', 'recipientsHash'], validate: b => shape(b, ['epoch', 'recipientsHash']) && Number.isSafeInteger(b.epoch) && str(b.recipientsHash) ? ok : fail('Invalid key.rotate'), apply: rotate },
   { name: 'client.minVersion', fields: ['version'], validate: b => shape(b, ['version']) && validVersion(b.version) ? ok : fail('Invalid client.minVersion'), apply: setMinimum },
 ];
+/** Public-proof definitions are additive; legacy signed logs remain a separate format. */
+export const controlDefinitions: readonly LogDefinition[] = [...logDefinitions, ...artifactDefinitions];
 /** Canonical JSON: lexicographically sorted object keys, array order retained, UTF-8 for signing. */
 export function canonical(value: unknown): string {
   if (value === null || typeof value === 'string' || typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) return JSON.stringify(value);
@@ -130,6 +147,7 @@ function copyMember(member: JsonObject): JsonObject {
 }
 export async function signEntry(unsigned: Omit<LogEntry, 'sig'>, privateKey: CryptoKey): Promise<LogEntry> {
   const definition = logDefinitions.find(d => d.name === unsigned.type);
+  if (isArtifactAction(unsigned.type)) throw new Error('Artifact actions require a public ControlProof');
   if (!definition) throw new Error('Cannot sign an unknown membership entry');
   const body: JsonObject = {};
   for (const field of definition.fields) if (Object.hasOwn(unsigned.body, field)) {
@@ -146,7 +164,7 @@ function error(code: LogError['code'], seq: number, message: string): LogResult 
 export function initialLogState(entry: LogEntry): LogState {
   const member = entry.body.creator as Member;
   const settings = stage0Rules.legacy_settings(entry.body.name as string, entry.body.description as string ?? '');
-  return { settings: { name: settings.name, description: settings.description, defaultRole: 'read-write', visibility: 'private', joiningPolicy: 'invitation-only' }, pendingRotation: false, journey: entry.body.journey as string, members: { [member.id]: { member, grants: ['members.manage'] } }, grants: { [member.id]: ['members.manage'] }, currentEpoch: 1, minClientVersion: entry.body.minClientVersion as string, lastSeq: 0, lastHash: null };
+  return { artifacts: emptyArtifactHistory(), settings: { name: settings.name, description: settings.description, defaultRole: 'read-write', visibility: 'private', joiningPolicy: 'invitation-only' }, pendingRotation: false, journey: entry.body.journey as string, members: { [member.id]: { member, grants: ['members.manage'] } }, grants: { [member.id]: ['members.manage'] }, currentEpoch: 1, minClientVersion: entry.body.minClientVersion as string, lastSeq: 0, lastHash: null };
 }
 export async function verifyLog(entries: readonly LogEntry[]): Promise<LogResult> {
   if (!entries.length) return error('invalid-entry', 0, 'Missing genesis');
@@ -169,6 +187,7 @@ export async function verifyLog(entries: readonly LogEntry[]): Promise<LogResult
       if (!await crypto.subtle.verify('Ed25519', publicKey, asBuffer(decode(sig)), asBuffer(utf8(canonical(unsigned))))) return error('invalid-signature', index, 'Entry signature mismatch');
     } catch { return error('invalid-signature', index, 'Invalid signature or signing key'); }
     if (!definition) return error('client-too-old', index, 'Unknown membership entry type: ' + entry.type);
+    if (isArtifactAction(entry.type)) return error('invalid-entry', index, 'Artifact actions require a public ControlProof');
     if (index !== 0) {
       const validation = definition.validate(entry.body);
       if (!validation.ok) return error('invalid-entry', index, validation.reason);

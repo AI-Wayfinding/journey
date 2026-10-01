@@ -6,7 +6,7 @@ A **journey** is an encrypted team space. Its technical name in the package is *
 
 Each person and agent has an X25519 age recipient. Agents can use non-extractable Web Crypto private keys; a person's exportable identity and Ed25519 signing key are encrypted with a key from one passkey outside this package. The passkey is also used for sign-in. A random 256-bit journey key belongs to a numbered **epoch** (one generation of the key). It is age-wrapped separately for every current member and agent. Removal creates the next epoch and gives wraps only to those who remain. Existing records stay under their old keys.
 
-Every item is an append-only encrypted version. The plain envelope is `{ outside: { v:1, id, journey, seq?, epoch, size, createdAt }, nonce, ciphertext }`, with base64 nonce and ciphertext. The outside has no record type. The nonce is 96 random bits; AES-GCM authenticates the ciphertext and all outside fields. The service must allocate `seq` before sealing if it wants a sequence there. `size` is the unencrypted UTF-8 JSON byte length, not the ciphertext length. The inside is `{ type, typeVersion, body }`, including optional unknown fields. Unknown types and unknown values remain intact when records are read and saved; known breaking versions can upgrade on read through registered converters. A client too old to meet the journey's signed minimum version may read but must not write.
+Every item is an append-only encrypted version. The plain envelope is `{ outside: { v:1, id, journey, seq?, epoch, size, createdAt }, nonce, ciphertext }`, with base64 nonce and ciphertext. The outside has no record type. The nonce is 96 random bits; AES-GCM authenticates the ciphertext and all outside fields. The service must allocate `seq` before sealing if it wants a sequence there. `size` is the unencrypted UTF-8 JSON byte length, not the ciphertext length. The inside is `{ type, typeVersion, body }`, including optional unknown fields. Unknown types and unknown values remain intact when records are read and saved; known breaking versions can upgrade on read through registered converters. This paragraph describes legacy records. Active signed-proof journeys refuse unsupported clients before reading or writing content.
 
 Known inside types in version 1:
 
@@ -61,9 +61,83 @@ Keyed readers reconstruct display fields with `readControlProof` only after proo
 
 Existing journeys were test data and are purged on the schema upgrade, not migrated. Enclave schema version 2 deletes legacy logs, record envelopes, key and recovery wraps, access rows, reservations and journey metadata. Registry journey metadata, account-to-journey links, invitations, pending admissions and agent links are also deleted. Accounts, credentials, sessions and agent registrations are kept. No migration checkpoint is built, and the server refuses creator-submitted legacy history and the old opaque log write format.
 
-New journeys begin with a signed creation proof and a `client.minVersion` greater than `0.1.3` (currently `0.1.4`). The minimum cannot decrease. Clients at `0.1.3` or older, or callers lacking `control-proof-v1` capability, are refused before reading content or submitting controls. The authenticated `/v1/journeys/:id/protocol` route returns the required version and format without content. Capability claims never replace signatures or current authority checks.
+New journeys begin with a signed creation proof and minimum client version `0.1.5` for Stage 1. Stage 0 regression histories may still use `0.1.4`. The minimum cannot decrease. Clients at `0.1.3` or older, or callers lacking `control-proof-v1` capability, are refused before reading content or submitting controls. The authenticated `/v1/journeys/:id/protocol` route returns the required version and format without content. Capability claims never replace signatures or current authority checks.
 
 Visibility changes, projects, artifact migration, private interview access and public joining can add their own record/version boundaries in later stages; Stage 0 adds no unused implementations for them. Unknown membership controls must still stop verification, never be ignored.
+
+## Stage 1 artifacts
+
+Stage 1 contracts are in `packages/core/src/artifacts.ts`. Storage and interface nodes implement their delivery separately. These artifacts are journey-visible, not author-private. Reserved types `html`, `applet`, `interview`, `sensemaking-document` and internal `recovery` are not active artifact types.
+
+### Signed actions and identity
+
+Artifact actions continue the existing `ControlProof` chain. Control sequence numbers are separate from ordinary `/records` reservations. All public bodies have exactly `format:'artifact-v1'`, stable `artifact`, immutable `author` and actual signer `actor`. Each action adds only these fields:
+
+| Action | Additional public fields |
+| --- | --- |
+| `artifact.create` | fresh `version`, `typeHash`, `blobs` |
+| `artifact.version` | fresh `version`, current `predecessor`, original `typeHash`, `blobs` |
+| `artifact.comment` | fresh `comment`, optional `onVersion` |
+| `artifact.delete` | none |
+
+Artifact, version and comment IDs use the existing ULID format and cannot reuse an earlier artifact/version/comment ID. The stable artifact ID never changes. `typeHash` is base64 SHA-256 of canonical JSON for the active type string. It pins the type without a plaintext type field. It is a commitment, not secrecy: the small type vocabulary can be enumerated. `blobs` is an ordered array of complete descriptors defined below, not arbitrary bucket keys. Unknown fields and unsupported type commitments are refused.
+
+The first signer is the immutable author. Every version, comment and deletion names that author and separately names its real signer. Production Bend functions decide current inherited write access, the Stage 1 minimum, attribution, freshness, predecessors and references. Any current read-write person or agent may edit/comment/delete; guide authority adds no content permission. Agents still cannot sign person or guide controls. Replay checks access at the signed entry time; the server must also recheck current access at commit. A stale predecessor conflicts. Comments belong to the whole stable artifact, with an optional version ID for context, never a selected passage. Deletion is irreversible in Stage 1 and hides all versions/comments/attachments from ordinary views. Signed and encrypted metadata history stays for integrity and export, not secure erasure.
+
+A hostile caller must not forge an author/writer, gain content writes from guide authority, widen an agent's inherited limit, reuse IDs, resurrect deletion, reuse a different artifact's blob, or write after downgrade/removal/expiry/pending rotation. TypeScript validates signatures, formats, journey/epoch bindings and exact descriptors, then adapts named fields into Bend. Blob staging ownership/completion and current transport capability checks are storage-node responsibilities; a signed descriptor alone proves neither an upload nor read access.
+
+### Encrypted content
+
+Artifact ciphertext uses the existing AES-GCM envelope and exact `envelopeHash` binding. Its inside record is one of:
+
+- Create/version: `{type:'artifact.content',typeVersion:1,body:{title,tags,content,attachments}}`.
+- Comment: `{type:'artifact.comment-content',typeVersion:1,body:{text}}`.
+- Delete: `{type:'artifact.tombstone',typeVersion:1,body:{}}`.
+
+The complete decrypted record is at most 1,048,576 UTF-8 JSON bytes. Unknown fields are refused at every artifact level. `title` and comment `text` are strings. Tags are case-preserving strings, unique by exact value; suggested tags are not types or permissions. Content has exactly the fields in this table:
+
+| `content.kind` | Content fields |
+| --- | --- |
+| `skill` | required nonempty `skill` text representing `SKILL.md` |
+| `prompt` | required nonempty `text` |
+| `document` | `markdown` text |
+| `image`, `file` | `primary`, the ID of exactly one selected attachment |
+| `data` | `format:json\|csv\|toml\|yaml\|sqlite`, and exactly one of `text` or `primary`; SQLite requires an attachment |
+| `link` | absolute `http:` or `https:` `url`, supplied `summary` and `notes` |
+
+Attachments are `{blob,name,mime,path?}`. Each version allows at most eight distinct blob IDs. Names and MIME strings stay encrypted and do not authorize inline rendering. Package paths are relative display paths of at most 255 characters; empty components, `.`/`..`, backslashes, colons and control characters are refused. Skill attachments require paths, unique by exact value, and cannot replace `SKILL.md`. No archive extraction, dependency execution or remote fetching is part of the contract. URL credentials, whitespace/control characters, relative URLs and non-web schemes are refused. Validation never fetches a URL. Renderer nodes must keep links inert until deliberately opened and must not load remote images or execute Markdown HTML.
+
+Keyed readers verify the encrypted content's type commitment and attachment descriptor list against the public proof. Content is never interpreted as actions, actor or grants. Public replay cannot inspect private content; keyed replay rejects malformed artifact payloads. Existing controls still accept only `control.labels`; artifact content does not weaken that rule. `readArtifactPayload` is a content decoder and must be called only after verifying the proof chain.
+
+### Blob descriptor and next-node crypto contract
+
+A descriptor is exactly `{v:1,journey,id,epoch,size,ciphertextSize,nonce,digest}`. Epochs start at 1. Raw `size` is an integer from zero through 25,000,000 inclusive. `ciphertextSize` is exactly `size + 16`. `nonce` is canonical base64 for 12 random bytes; `digest` is canonical base64 SHA-256 of the binary ciphertext including the AES-GCM tag.
+
+Binary blob encryption uses the journey epoch's 256-bit AES-GCM key and a fresh nonce. Associated data is UTF-8 canonical JSON for `{v:1,journey,id,epoch,size}`. Nonce travels in the descriptor, not prepended to the stored bytes. The blob-crypto node implements binary encryption/decryption; R2 stores those binary bytes, not base64 or data URLs. Base64 is used only when embedding bytes in the encrypted JSON archive. Readers verify digest, lengths and authenticated metadata. The 25,000,000-byte binary limit does not widen the JSON cap.
+
+A later version may reuse an identical committed descriptor from an undeleted version of the same artifact. Descriptors cannot change after an ID is referenced. Cross-artifact references, including references previously used by a deleted artifact, conflict. All versions of an undeleted artifact retain live references, even attachments absent from the current head. Whole-artifact deletion ends those live references; cleanup must never remove a live reference. New staged blobs remain subject to uploader ownership, completion, current epoch and current-write checks in storage.
+
+### New-input mapping and compatibility
+
+`suggestedArtifact` maps `note`, `decision`, `question`, `learning`, `tension`, `practice`, `success`, `resource`, `position`, `interview` and `lesson` to `document` plus that same suggested tag. Other strings also map to `document` plus the original tag. Supplied tags are retained and exactly deduplicated. `recovery` returns no artifact and must not appear in artifact views/counts/searches/links. This helper handles only new create/import inputs. It performs no historical migration, rewrite or trust bootstrap.
+
+Stage 1 uses client/interface version `0.1.5` and both capabilities `control-proof-v1` and `artifact-v1` (`X-Control-Format` and `X-Artifact-Format` headers). `supportsArtifacts` refuses old/malformed versions, missing capabilities and a newer signed minimum. New journeys require Stage 1; Stage 0 fixtures can raise their signed minimum before the first artifact action. Consumers must fail with an update message before partial content, not skip unknown actions. Live agent links remain deliberately server-readable, read-only and limited to their existing overview; attachment access requires the member interface.
+
+### Versioned encrypted archives
+
+`exportArtifactJourney` and `importArtifactJourney` use one age-encrypted JSON object:
+
+```text
+{format:'artifact-v1', version:1, journey, creator,
+ controls:[{proof,envelope}], envelopes, wraps,
+ blobs:[{descriptor,ciphertext}], unavailableDeletedBlobs:[blobId]}
+```
+
+`controls` retains the exact signed public chain and encrypted payloads, including tombstoned metadata. `envelopes` carries separate internal/ordinary records, not a second action chain. `wraps` uses existing `{epoch,recipient,ciphertext}` key wraps. `blobs` contains canonical base64 ciphertext for every referenced blob in every undeleted version, exactly once. `unavailableDeletedBlobs` names the distinct historical references no longer live; deleted blob bytes are not exported.
+
+Import and export both verify the archive against separately pinned `{journey,creator}`, public signatures and the full chain before returning content. All control keys must be available, keyed payloads must match their public projections, and blob digests, lengths, AES-GCM metadata and surviving references must verify. Missing live bytes, unreferenced bytes, duplicate IDs and unexpected fields fail. Only named fields survive output. Archive format/version mismatches are refused; legacy `importJourney` is separate and is not a Stage 1 migration path. A complete valid earlier chain is still a possible rollback without an external checkpoint. Downloaded archives, keys and content cannot be recalled.
+
+The Bend proofs cover symbolic authority and reference transitions in production functions. They do not claim cryptographic certification, upload atomicity or future UI rendering safety.
 
 ## Removal and export
 

@@ -11,7 +11,21 @@ export interface Version { $: 'Version'; major: bigint; minor: bigint; patch: bi
 export interface JourneyState { $: 'JourneyState'; members: List<Member>; settings: JourneySettings; minimum: Version; pending: boolean }
 export type JourneyControl = { $: 'LegacyControl' | 'NewControl'; control: Control } | { $: 'Configure'; actor: bigint; settings: JourneySettings } | { $: 'Minimum'; actor: bigint; version: Version };
 export type JourneyTransition = { $: 'JourneyAccepted'; state: JourneyState } | { $: 'JourneyDenied' | 'JourneyInvalid' | 'JourneyLastGuide' | 'UpgradeRequired' };
+export interface ArtifactVersion { $: 'ArtifactVersion'; id: bigint; writer: bigint; blobs: List<bigint> }
+export interface Artifact { $: 'Artifact'; id: bigint; author: bigint; typeHash: bigint; head: bigint; deleted: boolean; versions: List<ArtifactVersion> }
+export interface ArtifactIndex { $: 'ArtifactIndex'; items: List<Artifact>; used: List<bigint> }
+export type ArtifactAction = { $: 'ArtifactCreate'; id: bigint; version: bigint; author: bigint; writer: bigint; typeHash: bigint; blobs: List<bigint> } | { $: 'ArtifactEdit'; id: bigint; version: bigint; predecessor: bigint; author: bigint; writer: bigint; typeHash: bigint; blobs: List<bigint> } | { $: 'ArtifactComment'; id: bigint; comment: bigint; onVersion: bigint; author: bigint; writer: bigint } | { $: 'ArtifactDelete'; id: bigint; author: bigint; writer: bigint };
+export type ArtifactTransition = { $: 'ArtifactAccepted'; index: ArtifactIndex } | { $: 'ArtifactDenied' | 'ArtifactConflict' };
 declare const rules: {
+  artifact_ready(version: Version): boolean;
+  artifact_client(client: Version, minimum: Version, control: boolean, artifact: boolean): boolean;
+  artifact_apply(members: List<Member>, actor: bigint, minimum: Version, pending: boolean, index: ArtifactIndex, action: ArtifactAction): ArtifactTransition;
+  artifact_action(index: ArtifactIndex, actor: bigint, action: ArtifactAction): ArtifactTransition;
+  artifact_live_blob(items: List<Artifact>, blob: bigint): boolean;
+  artifact_blob_has(versions: List<ArtifactVersion>, blob: bigint): boolean;
+  artifact_other_blob(items: List<Artifact>, target: bigint, blob: bigint): boolean;
+  artifact_references(blobs: List<bigint>, items: List<Artifact>, target: bigint): boolean;
+
   server_version(client: Version, minimum: Version, format: boolean): boolean;
   server_read(access: Maybe<Role>, identity: boolean, version: boolean): boolean;
   server_content(access: Maybe<Role>, identity: boolean, version: boolean, pending: boolean): boolean;

@@ -4,7 +4,7 @@ import type { ControlProof, Envelope, JourneyKey, KeyWrap, LogEntry, LogState, M
 import { getPersonKeys, rememberJourneyKey } from './keys.js';
 import type { PersonKeys } from './keys.js';
 
-export const INTERFACE_VERSION = '0.1.4';
+export const INTERFACE_VERSION = '0.1.5';
 export class ApiError extends Error { constructor(message: string, readonly status: number) { super(message); } }
 export type JourneyListing = { id: string; name: string; principal: string };
 export type SignedControl = { proof: ControlProof; envelope: Envelope };
@@ -12,7 +12,7 @@ export type EntryRow = SignedControl & { seq: number };
 export type JourneyContext = { id: string; principal: string; keys: PersonKeys; state: LogState; epochs: Map<number, JourneyKey>; log: LogEntry[]; controls: SignedControl[] };
 const historyError = 'Journey history could not be verified. Stop and ask a member for help.';
 export async function api<T>(path: string, method = 'GET', data?: unknown, principal?: string): Promise<T> {
-  const response = await fetch('/v1' + path, { method, credentials: 'same-origin', cache: 'no-store', headers: { 'X-Client-Version': INTERFACE_VERSION, 'X-Control-Format': 'control-proof-v1', ...(data === undefined ? {} : { 'Content-Type': 'application/json' }), ...(method === 'GET' ? {} : { 'X-Wayfinding': '1' }), ...(principal ? { 'X-Principal': principal } : {}) }, ...(data === undefined ? {} : { body: JSON.stringify(data) }) });
+  const response = await fetch('/v1' + path, { method, credentials: 'same-origin', cache: 'no-store', headers: { 'X-Client-Version': INTERFACE_VERSION, 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': 'artifact-v1', ...(data === undefined ? {} : { 'Content-Type': 'application/json' }), ...(method === 'GET' ? {} : { 'X-Wayfinding': '1' }), ...(principal ? { 'X-Principal': principal } : {}) }, ...(data === undefined ? {} : { body: JSON.stringify(data) }) });
   if (!response.ok) {
     const error = await response.json().catch(() => null) as { error?: { code?: string } } | null;
     throw new ApiError(plainError(error?.error?.code, response.status), response.status);

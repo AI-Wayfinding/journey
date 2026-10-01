@@ -1,11 +1,12 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { expect } from 'vitest';
 import { createAgeIdentity, createSigningIdentity, hashControlProof, importSigningKey, newId, sealControlLabels, signControlProof, wrapJourneyKey, verifyControlProofs, type JourneyKey, type JsonObject, type Member } from '@ai-wayfinding/core';
-import { as, person, journey, request } from './fixtures.js';
+import { as, person, journey, request as baseRequest } from './fixtures.js';
 import type { ControlInput } from '../src/types.js';
 import type { Env } from '../src/index.js';
 import { base64url, digest } from '../src/crypto.js';
-export { as, person, journey, request };
+export { as, person, journey };
+export const request: typeof baseRequest = (path, method, body, extra = {}, overrides = {}) => baseRequest(path, method, body, { 'X-Client-Version': '0.1.5', 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': 'artifact-v1', ...extra }, overrides);
 export type Person = Awaited<ReturnType<typeof person>>;
 export type Journey = Awaited<ReturnType<typeof journey>>;
 let serial = 0;

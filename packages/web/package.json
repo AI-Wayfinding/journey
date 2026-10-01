@@ -10,7 +10,7 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
-    "@ai-wayfinding/core": "0.1.4",
+    "@ai-wayfinding/core": "0.1.5",
     "@simplewebauthn/browser": "^14.0.0",
     "age-encryption": "^0.3.1",
     "@fontsource/ibm-plex-mono": "^5.2.8",

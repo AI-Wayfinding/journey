@@ -11,3 +11,4 @@ export * from './versions.js';
 export * from './link.js';
 export * from './rules.js';
 export * from './controlProof.js';
+export * from './artifacts.js';

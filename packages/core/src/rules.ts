@@ -109,3 +109,38 @@ export function replayJourneyControl(state: LogState, model: ReturnType<typeof n
     $: 'JourneyState', members: model.members, settings: ruleSettings(state), minimum: ruleVersion(state.minClientVersion), pending: state.pendingRotation === true,
   } });
 }
+
+/** Signed artifact history -> production Bend, with one ID namespace including type commitments. */
+export function normalizedArtifacts(state: LogState, body: import('./types.js').JsonObject = {}, actor = '', now?: number) {
+  const history = state.artifacts ?? { items: {}, used: [] };
+  const strings = [...history.used, actor];
+  for (const item of Object.values(history.items)) {
+    strings.push(item.id, item.author, item.typeHash, item.head);
+    for (const version of item.versions) strings.push(version.id, version.actor, ...version.blobs.map(b => b.id));
+    for (const comment of item.comments) strings.push(comment.id, comment.actor, ...(comment.onVersion ? [comment.onVersion] : []));
+  }
+  for (const field of ['artifact', 'author', 'actor', 'version', 'predecessor', 'typeHash', 'comment', 'onVersion']) if (typeof body[field] === 'string') strings.push(body[field]);
+  if (Array.isArray(body.blobs)) for (const blob of body.blobs as import('./artifacts.js').BlobDescriptor[]) strings.push(blob.id);
+  const model = normalizedMembers(state, strings, now);
+  const index: import('@ai-wayfinding/rules').ArtifactIndex = { $: 'ArtifactIndex', used: ruleList(history.used.map(model.id)), items: ruleList(Object.values(history.items).map(item => ({
+    $: 'Artifact' as const, id: model.id(item.id), author: model.id(item.author), typeHash: model.id(item.typeHash), head: model.id(item.head), deleted: item.deleted,
+    versions: ruleList(item.versions.map(v => ({ $: 'ArtifactVersion' as const, id: model.id(v.id), writer: model.id(v.actor), blobs: ruleList(v.blobs.map(b => model.id(b.id))) }))),
+  }))) };
+  return { model, index };
+}
+export function replayArtifact(state: LogState, type: import('./artifacts.js').ArtifactActionType, body: import('./types.js').JsonObject, actor: string, now?: number) {
+  const { model, index } = normalizedArtifacts(state, body, actor, now);
+  const common = { id: model.id(body.artifact as string), author: model.id(body.author as string), writer: model.id(body.actor as string) };
+  let action: import('@ai-wayfinding/rules').ArtifactAction;
+  if (type === 'artifact.create' || type === 'artifact.version') {
+    const version = { version: model.id(body.version as string), typeHash: model.id(body.typeHash as string), blobs: ruleList((body.blobs as import('./artifacts.js').BlobDescriptor[]).map(b => model.id(b.id))) };
+    action = type === 'artifact.create' ? { $: 'ArtifactCreate', ...common, ...version } : { $: 'ArtifactEdit', ...common, ...version, predecessor: model.id(body.predecessor as string) };
+  } else if (type === 'artifact.comment') action = { $: 'ArtifactComment', ...common, comment: model.id(body.comment as string), onVersion: model.id(body.onVersion as string | undefined) };
+  else action = { $: 'ArtifactDelete', ...common };
+  return { transition: rules.artifact_apply(model.members, model.id(actor), ruleVersion(state.minClientVersion), state.pendingRotation === true, index, action), model };
+}
+export function liveArtifactBlobIds(state: LogState): string[] {
+  const { model, index } = normalizedArtifacts(state);
+  const blobs = Object.values(state.artifacts?.items ?? {}).flatMap(a => a.versions.flatMap(v => v.blobs.map(b => b.id)));
+  return [...new Set(blobs)].filter(id => rules.artifact_live_blob(index.items, model.id(id)));
+}

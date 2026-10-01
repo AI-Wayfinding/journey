@@ -231,3 +231,134 @@ law server_agent_admission_requires_scope:
   for support: Bool
   for e: {R.admission_scope(scope, admitted) == False{} : Bool}
   {R.server_admission(R.Agent{}, scope, admitted, owner, actor, support) == False{} : Bool}
+
+# Stage 1: content access is current inherited access, never guide authority.
+law artifacts_require_current_write:
+  for +members: +List<R.Member>
+  for +actor: Nat
+  for +minimum: R.Version
+  for +pending: Bool
+  for index: R.ArtifactIndex
+  for action: R.ArtifactAction
+  for e: {R.content_write(R.member_access(R.find(members, actor), members), pending) == False{} : Bool}
+  {R.artifact_apply(members, actor, minimum, pending, index, action) == R.ArtifactDenied{} : R.ArtifactTransition}
+
+law artifact_pending_denies:
+  for +members: +List<R.Member>
+  for +actor: Nat
+  for minimum: R.Version
+  for index: R.ArtifactIndex
+  for action: R.ArtifactAction
+  {R.artifact_apply(members, actor, minimum, True{}, index, action) == R.ArtifactDenied{} : R.ArtifactTransition}
+
+# This exact production output states immutable creator/type, actual signer and
+# retention of ALL earlier version references (even attachments no longer at head).
+law artifact_edit_preserves_creator_actor_and_history:
+  for +xs: +List<R.Artifact>
+  for +used: +List<Nat>
+  for +actor: Nat
+  for +id: Nat
+  for +version: Nat
+  for +creator: Nat
+  for +kind: Nat
+  for +head: Nat
+  for +deleted: Bool
+  for +versions: +List<R.ArtifactVersion>
+  for +author: Nat
+  for +writer: Nat
+  for +typeHash: Nat
+  for +predecessor: Nat
+  for +blobs: +List<Nat>
+  {R.artifact_edit(Some{R.Artifact{id, creator, kind, head, deleted, versions}}, xs, used, actor, id, version, predecessor, author, writer, typeHash, blobs) == R.artifact_guard(Bool.not(deleted || R.nat_has(used, version)) && Nat.is_eq(predecessor, head) && Nat.is_eq(author, creator) && Nat.is_eq(writer, actor) && Nat.is_eq(typeHash, kind) && R.artifact_references(blobs, xs, id), R.ArtifactIndex{R.artifact_put(xs, R.Artifact{id, creator, kind, version, False{}, R.ArtifactVersion{version, actor, blobs} <> versions}), version <> used}) : R.ArtifactTransition}
+
+law artifact_create_pins_real_creator:
+  for +xs: +List<R.Artifact>
+  for +used: +List<Nat>
+  for +actor: Nat
+  for +id: Nat
+  for +version: Nat
+  for +author: Nat
+  for +writer: Nat
+  for +kind: Nat
+  for +blobs: +List<Nat>
+  {R.artifact_create(xs, used, actor, id, version, author, writer, kind, blobs) == R.artifact_guard(Bool.not(R.nat_has(used, id) || R.nat_has(used, version) || Nat.is_eq(id, version)) && Nat.is_eq(author, actor) && Nat.is_eq(writer, actor) && R.artifact_references(blobs, xs, id), R.ArtifactIndex{R.Artifact{id, actor, kind, version, False{}, R.ArtifactVersion{version, actor, blobs} <> Nil{}} <> xs, id <> version <> used}) : R.ArtifactTransition}
+
+law artifact_deleted_never_resurrects:
+  for +xs: +List<R.Artifact>
+  for +used: +List<Nat>
+  for +actor: Nat
+  for +id: Nat
+  for +version: Nat
+  for +creator: Nat
+  for +kind: Nat
+  for +head: Nat
+  for +versions: +List<R.ArtifactVersion>
+  for predecessor: Nat
+  for author: Nat
+  for writer: Nat
+  for typeHash: Nat
+  for blobs: +List<Nat>
+  {R.artifact_edit(Some{R.Artifact{id, creator, kind, head, True{}, versions}}, xs, used, actor, id, version, predecessor, author, writer, typeHash, blobs) == R.ArtifactConflict{} : R.ArtifactTransition}
+
+law artifact_stale_predecessor_conflicts:
+  for +xs: +List<R.Artifact>
+  for +used: +List<Nat>
+  for +actor: Nat
+  for +id: Nat
+  for +version: Nat
+  for +creator: Nat
+  for +kind: Nat
+  for +head: Nat
+  for +deleted: Bool
+  for +versions: +List<R.ArtifactVersion>
+  for +predecessor: Nat
+  for +author: Nat
+  for +writer: Nat
+  for +typeHash: Nat
+  for +blobs: +List<Nat>
+  for e: {Nat.is_eq(predecessor, head) == False{} : Bool}
+  {R.artifact_edit(Some{R.Artifact{id, creator, kind, head, deleted, versions}}, xs, used, actor, id, version, predecessor, author, writer, typeHash, blobs) == R.ArtifactConflict{} : R.ArtifactTransition}
+
+law artifact_cross_reference_denied:
+  for +xs: +List<R.Artifact>
+  for +id: Nat
+  for +blob: Nat
+  for tail: +List<Nat>
+  for e: {R.artifact_other_blob(xs, id, blob) == True{} : Bool}
+  {R.artifact_references(blob <> tail, xs, id) == False{} : Bool}
+
+law artifact_invalid_reference_conflicts:
+  for +index: R.ArtifactIndex
+  {R.artifact_guard(False{}, index) == R.ArtifactConflict{} : R.ArtifactTransition}
+
+law artifact_comment_references_same_artifact:
+  for +xs: +List<R.Artifact>
+  for +used: +List<Nat>
+  for +actor: Nat
+  for +comment: Nat
+  for +context: Nat
+  for +creator: Nat
+  for +author: Nat
+  for +writer: Nat
+  for +deleted: Bool
+  for +versions: +List<R.ArtifactVersion>
+  for id: Nat
+  for kind: Nat
+  for head: Nat
+  {R.artifact_comment(Some{R.Artifact{id, creator, kind, head, deleted, versions}}, xs, used, actor, comment, context, author, writer) == R.artifact_guard(Bool.not(deleted || R.nat_has(used, comment)) && Nat.is_eq(author, creator) && Nat.is_eq(writer, actor) && (Nat.is_eq(context, 0n) || R.artifact_version_has(versions, context)), R.ArtifactIndex{xs, comment <> used}) : R.ArtifactTransition}
+
+law artifact_deleted_references_not_live:
+  for id: Nat
+  for author: Nat
+  for kind: Nat
+  for head: Nat
+  for versions: +List<R.ArtifactVersion>
+  for +tail: +List<R.Artifact>
+  for +blob: Nat
+  {R.artifact_live_blob(R.Artifact{id, author, kind, head, True{}, versions} <> tail, blob) == R.artifact_live_blob(tail, blob) : Bool}
+
+law artifact_legacy_client_denied:
+  for client: R.Version
+  for minimum: R.Version
+  for control: Bool
+  {R.artifact_client(client, minimum, control, False{}) == False{} : Bool}

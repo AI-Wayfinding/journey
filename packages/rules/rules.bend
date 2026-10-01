@@ -510,3 +510,142 @@ def server_admission(kind: MemberKind, scope: Maybe<&2, Role>, admitted: Maybe<&
       Bool.not(support) || admission_scope(scope, Some{ReadOnly{}})
     case Agent{}:
       Nat.is_eq(owner, actor) && admission_scope(scope, admitted)
+
+# Stage 1 authority. Hosts normalize signed IDs and type commitments, never roles.
+def artifact_ready(v: Version) -> Bool:
+  version_ge(v, Version{0n, 1n, 5n})
+
+def artifact_client(+client: Version, minimum: Version, control: Bool, artifact: Bool) -> Bool:
+  control && artifact && artifact_ready(client) && version_ge(client, minimum)
+
+type ArtifactVersion is Data:
+  ArtifactVersion{id: Nat, writer: Nat, blobs: +List<Nat>}
+
+type Artifact is Data:
+  Artifact{id: Nat, author: Nat, typeHash: Nat, head: Nat, deleted: Bool, versions: +List<ArtifactVersion>}
+
+type ArtifactIndex is Data:
+  ArtifactIndex{items: +List<Artifact>, used: +List<Nat>}
+
+type ArtifactAction is Data:
+  ArtifactCreate{id: Nat, version: Nat, author: Nat, writer: Nat, typeHash: Nat, blobs: +List<Nat>}
+  ArtifactEdit{id: Nat, version: Nat, predecessor: Nat, author: Nat, writer: Nat, typeHash: Nat, blobs: +List<Nat>}
+  ArtifactComment{id: Nat, comment: Nat, onVersion: Nat, author: Nat, writer: Nat}
+  ArtifactDelete{id: Nat, author: Nat, writer: Nat}
+
+type ArtifactTransition is Data:
+  ArtifactAccepted{index: ArtifactIndex}
+  ArtifactDenied{}
+  ArtifactConflict{}
+
+def nat_has(xs: +List<Nat>, +id: Nat) -> Bool:
+  match xs:
+    case Nil{}:
+      False{}
+    case Con{h, t}:
+      Nat.is_eq(h, id) || nat_has(t, id)
+
+def artifact_find(xs: +List<Artifact>, +id: Nat) -> Maybe<&2, Artifact>:
+  match xs:
+    case Nil{}:
+      None{}
+    case Con{+h, t}:
+      Artifact{key, _, _, _, _, _} = h
+      Bool.pick(Maybe<&2, Artifact>, Nat.is_eq(key, id), Some{h}, artifact_find(t, id))
+
+def artifact_put(xs: +List<Artifact>, +value: Artifact) -> +List<Artifact>:
+  match xs:
+    case Nil{}:
+      value <> Nil{}
+    case Con{+h, +t}:
+      Artifact{+key, _, _, _, _, _} = h
+      Artifact{id, _, _, _, _, _} = value
+      Bool.pick(+List<Artifact>, Nat.is_eq(key, id), value <> t, h <> artifact_put(t, value))
+
+def artifact_version_has(xs: +List<ArtifactVersion>, +id: Nat) -> Bool:
+  match xs:
+    case Nil{}:
+      False{}
+    case Con{ArtifactVersion{key, _, _}, t}:
+      Nat.is_eq(key, id) || artifact_version_has(t, id)
+
+def artifact_blob_has(xs: +List<ArtifactVersion>, +id: Nat) -> Bool:
+  match xs:
+    case Nil{}:
+      False{}
+    case Con{ArtifactVersion{_, _, blobs}, t}:
+      nat_has(blobs, id) || artifact_blob_has(t, id)
+
+def artifact_other_blob(xs: +List<Artifact>, +target: Nat, +blob: Nat) -> Bool:
+  match xs:
+    case Nil{}:
+      False{}
+    case Con{Artifact{id, _, _, _, _, versions}, t}:
+      (Bool.not(Nat.is_eq(id, target)) && artifact_blob_has(versions, blob)) || artifact_other_blob(t, target, blob)
+
+def artifact_references(blobs: +List<Nat>, +xs: +List<Artifact>, +target: Nat) -> Bool:
+  match blobs:
+    case Nil{}:
+      True{}
+    case Con{h, t}:
+      Bool.not(artifact_other_blob(xs, target, h)) && artifact_references(t, xs, target)
+
+def artifact_live_blob(xs: +List<Artifact>, +blob: Nat) -> Bool:
+  match xs:
+    case Nil{}:
+      False{}
+    case Con{Artifact{_, _, _, _, deleted, versions}, t}:
+      (Bool.not(deleted) && artifact_blob_has(versions, blob)) || artifact_live_blob(t, blob)
+
+def artifact_guard(valid: Bool, index: ArtifactIndex) -> ArtifactTransition:
+  match valid:
+    case False{}:
+      ArtifactConflict{}
+    case True{}:
+      ArtifactAccepted{index}
+
+def artifact_create(+xs: +List<Artifact>, +used: +List<Nat>, +actor: Nat, +id: Nat, +version: Nat, author: Nat, writer: Nat, typeHash: Nat, +blobs: +List<Nat>) -> ArtifactTransition:
+  artifact_guard(Bool.not(nat_has(used, id) || nat_has(used, version) || Nat.is_eq(id, version)) && Nat.is_eq(author, actor) && Nat.is_eq(writer, actor) && artifact_references(blobs, xs, id), ArtifactIndex{Artifact{id, actor, typeHash, version, False{}, ArtifactVersion{version, actor, blobs} <> Nil{}} <> xs, id <> version <> used})
+
+def artifact_edit(target: Maybe<&2, Artifact>, +xs: +List<Artifact>, +used: +List<Nat>, +actor: Nat, +id: Nat, +version: Nat, predecessor: Nat, author: Nat, writer: Nat, typeHash: Nat, +blobs: +List<Nat>) -> ArtifactTransition:
+  match target:
+    case None{}:
+      ArtifactConflict{}
+    case Some{Artifact{_, +creator, +kind, head, deleted, +versions}}:
+      artifact_guard(Bool.not(deleted || nat_has(used, version)) && Nat.is_eq(predecessor, head) && Nat.is_eq(author, creator) && Nat.is_eq(writer, actor) && Nat.is_eq(typeHash, kind) && artifact_references(blobs, xs, id), ArtifactIndex{artifact_put(xs, Artifact{id, creator, kind, version, False{}, ArtifactVersion{version, actor, blobs} <> versions}), version <> used})
+
+def artifact_comment(target: Maybe<&2, Artifact>, xs: +List<Artifact>, +used: +List<Nat>, actor: Nat, +comment: Nat, +onVersion: Nat, author: Nat, writer: Nat) -> ArtifactTransition:
+  match target:
+    case None{}:
+      ArtifactConflict{}
+    case Some{Artifact{_, creator, _, _, deleted, versions}}:
+      artifact_guard(Bool.not(deleted || nat_has(used, comment)) && Nat.is_eq(author, creator) && Nat.is_eq(writer, actor) && (Nat.is_eq(onVersion, 0n) || artifact_version_has(versions, onVersion)), ArtifactIndex{xs, comment <> used})
+
+def artifact_delete(target: Maybe<&2, Artifact>, +xs: +List<Artifact>, used: +List<Nat>, +id: Nat, author: Nat, writer: Nat, actor: Nat) -> ArtifactTransition:
+  match target:
+    case None{}:
+      ArtifactConflict{}
+    case Some{Artifact{_, +creator, kind, head, deleted, versions}}:
+      artifact_guard(Bool.not(deleted) && Nat.is_eq(author, creator) && Nat.is_eq(writer, actor), ArtifactIndex{artifact_put(xs, Artifact{id, creator, kind, head, True{}, versions}), used})
+
+def artifact_action(index: ArtifactIndex, +actor: Nat, action: ArtifactAction) -> ArtifactTransition:
+  ArtifactIndex{+xs, used} = index
+  match action:
+    case ArtifactCreate{id, version, author, writer, typeHash, blobs}:
+      artifact_create(xs, used, actor, id, version, author, writer, typeHash, blobs)
+    case ArtifactEdit{+id, version, predecessor, author, writer, typeHash, blobs}:
+      artifact_edit(artifact_find(xs, id), xs, used, actor, id, version, predecessor, author, writer, typeHash, blobs)
+    case ArtifactComment{id, comment, onVersion, author, writer}:
+      artifact_comment(artifact_find(xs, id), xs, used, actor, comment, onVersion, author, writer)
+    case ArtifactDelete{+id, author, writer}:
+      artifact_delete(artifact_find(xs, id), xs, used, id, author, writer, actor)
+
+def artifact_authorized(allowed: Bool, index: ArtifactIndex, actor: Nat, action: ArtifactAction) -> ArtifactTransition:
+  match allowed:
+    case False{}:
+      ArtifactDenied{}
+    case True{}:
+      artifact_action(index, actor, action)
+
+def artifact_apply(+members: +List<Member>, +actor: Nat, minimum: Version, pending: Bool, index: ArtifactIndex, action: ArtifactAction) -> ArtifactTransition:
+  artifact_authorized(content_write(member_access(find(members, actor), members), pending) && artifact_ready(minimum), index, actor, action)

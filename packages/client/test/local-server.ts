@@ -10,7 +10,7 @@ import type { JourneyClient } from '../src/journey.js';
 export const root = resolve('../..'), server = 'http://localhost:18787';
 export const scratch = join(root, '.scratch', 'client-integration');
 let worker: ChildProcess, workerOutput = '';
-const headers = { Origin: server, 'X-Wayfinding': '1', 'Content-Type': 'application/json', 'X-Client-Version': '0.1.4', 'X-Control-Format': 'control-proof-v1' };
+const headers = { Origin: server, 'X-Wayfinding': '1', 'Content-Type': 'application/json', 'X-Client-Version': '0.1.5', 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': 'artifact-v1' };
 export async function request(path: string, method = 'GET', body?: object, extra: Record<string, string> = {}): Promise<Response> {
   return fetch(server + path, { method, headers: { ...headers, ...extra }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
 }
@@ -64,11 +64,11 @@ export async function signedControl(key: JourneyKey, id: string, entry: LogEntry
 }
 export async function journey(owner: Owner) {
   const id = newId(), key = generateJourneyKey();
-  const first = await signedControl(key, id, { v: 1, seq: 0, prev: null, at: new Date().toISOString(), actor: owner.principal, type: 'genesis', body: { journey: id, name: 'Journey test', creator: { id: owner.principal, kind: 'person', recipient: owner.age.recipient, signingKey: owner.signing.publicKey }, grants: ['members.manage'], mode: 'sealed', visibility: 'private', minClientVersion: '0.1.4' } }, owner.signing.privateKey);
+  const first = await signedControl(key, id, { v: 1, seq: 0, prev: null, at: new Date().toISOString(), actor: owner.principal, type: 'genesis', body: { journey: id, name: 'Journey test', creator: { id: owner.principal, kind: 'person', recipient: owner.age.recipient, signingKey: owner.signing.publicKey }, grants: ['members.manage'], mode: 'sealed', visibility: 'private', minClientVersion: '0.1.5' } }, owner.signing.privateKey);
   const recovery = await createAgeIdentity();
   const recoveryWrap = (await wrapJourneyKey(key, [{ id: 'recovery', recipient: recovery.recipient }]))[0]!.ciphertext;
   const wraps = (await wrapJourneyKey(key, [{ id: owner.principal, recipient: owner.age.recipient }])).map(wrap => ({ principal: wrap.recipient, epoch: wrap.epoch, wrap: wrap.ciphertext }));
-  const created = await request('/v1/journeys', 'POST', { id, name: 'Journey test', creator: { id: owner.principal, recipient: owner.age.recipient, signingKey: owner.signing.publicKey }, control: first, wraps, recoveryWrap, minClientVersion: '0.1.4' }, { Cookie: owner.cookie });
+  const created = await request('/v1/journeys', 'POST', { id, name: 'Journey test', creator: { id: owner.principal, recipient: owner.age.recipient, signingKey: owner.signing.publicKey }, control: first, wraps, recoveryWrap, minClientVersion: '0.1.5' }, { Cookie: owner.cookie });
   expect(created.status).toBe(201);
   return { id, key, entries: [first] };
 }
