@@ -301,7 +301,7 @@ work:
             output_includes: "Test Files"
           timeout_ms: 600000
       - id: interface-update-gates
-        statement: "When browser, CLI, MCP or live agent-link readers encounter an upgraded minimum or unsupported control type, they fail closed with a clear update message rather than rendering partial content, writing through a stale context or suggesting approval again; upgraded readers still read legacy history, and links remain read-only without adding Stage 7 parity features."
+        statement: "When browser, CLI, MCP or live agent-link readers encounter an upgraded minimum or unsupported control type, they fail closed with a clear update message rather than rendering partial content, writing through a stale context or suggesting approval again; legacy journeys are purged rather than read or migrated, and links remain read-only without adding Stage 7 parity features."
         evidence:
           kind: command
           run: !bash |
@@ -316,6 +316,13 @@ work:
             exit: 0
             output_includes: "Stage 0 browser CLI MCP link update assertions passed"
           timeout_ms: 600000
+        amendments:
+          - criterion_id: "interface-update-gates"
+            before: "When browser, CLI, MCP or live agent-link readers encounter an upgraded minimum or unsupported control type, they fail closed with a clear update message rather than rendering partial content, writing through a stale context or suggesting approval again; upgraded readers still read legacy history, and links remain read-only without adding Stage 7 parity features."
+            after: "When browser, CLI, MCP or live agent-link readers encounter an upgraded minimum or unsupported control type, they fail closed with a clear update message rather than rendering partial content, writing through a stale context or suggesting approval again; legacy journeys are purged rather than read or migrated, and links remain read-only without adding Stage 7 parity features."
+            reason: "All prior journeys are test data; server-authority purges them at schema v2 with no legacy migration, so readers have no legacy history to read."
+            authority: "Dan (operator), m01529"
+            at: "2026-10-01T15:09:10.809Z"
       - id: stage0-regression
         statement: "When the completed Stage 0 tree is built and tested from the repository root, all package typechecks and builds, core Node/workerd/browser tests, server tests, web unit/end-to-end tests and client unit/integration tests pass, including the new Stage 0 negative authority and migration cases."
         evidence:
