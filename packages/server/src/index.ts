@@ -130,7 +130,7 @@ function registrationResponse(value: unknown): value is RegistrationResponse {
 function authenticationResponse(value: unknown): value is AuthenticationResponse {
   return object(value) && validString(value.id, 1024) && value.rawId === value.id && value.type === 'public-key' && object(value.clientExtensionResults) && object(value.response) && validString(value.response.clientDataJSON, 100_000) && validString(value.response.authenticatorData, 100_000) && validString(value.response.signature, 100_000);
 }
-app.onError(e => { console.error(e); return failure('internal', 500); });
+app.onError(() => failure('internal', 500));
 app.use('/v1/*', async (c, next) => {
   if (!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method) && (!validString(c.env.ORIGIN) || c.req.header('x-wayfinding') !== '1' || c.req.header('origin') !== c.env.ORIGIN)) return failure('csrf', 403);
   await next();

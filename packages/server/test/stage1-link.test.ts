@@ -15,7 +15,7 @@ it('keeps the existing paged link overview read-only with artifact text/metadata
   const comment = { format: 'artifact-v1', artifact: b.artifact, author: owner.principal, actor: owner.principal, comment: newId() };
   expect((await submit(j, owner, await artifact(j, owner, 'artifact.comment', comment, { text: 'Whole artifact comment' }))).status).toBe(201);
   const reserved = await (await request(`/v1/journeys/${j.id}/seq`, 'POST', {}, as(owner))).json() as { seq: number; epoch: number };
-  const envelope = await seal({ type: 'item', typeVersion: 1, body: { itemType: 'recovery', title: 'HIDDEN RECOVERY', body: 'HIDDEN RECOVERY', tags: [], author: owner.principal, created: new Date().toISOString() } }, { id: newId(), journey: j.id, epoch: reserved.epoch, seq: reserved.seq, createdAt: new Date().toISOString() }, j.key);
+  const envelope = await seal({ type: 'item', typeVersion: 1, body: { id: newId(), authoredBy: 'human', itemType: 'recovery', title: 'HIDDEN RECOVERY', body: 'HIDDEN RECOVERY', tags: [], author: owner.principal, created: new Date().toISOString() } }, { id: newId(), journey: j.id, epoch: reserved.epoch, seq: reserved.seq, createdAt: new Date().toISOString() }, j.key);
   expect((await request(`/v1/journeys/${j.id}/records`, 'POST', { envelope }, as(owner))).status).toBe(201);
   let page = 1, all = '', reconstructed = '';
   for (;;) {
