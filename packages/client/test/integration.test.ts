@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { createSigningIdentity, hashControlProof, newId, verifyControlProofs, type Member } from '@ai-wayfinding/core';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { root, scratch, as, request, person, journey, signedControl, approve, connected, localServer } from './local-server.js';
+import { root, scratch, as, request, person, journey, signedControl, approve, connected, localServer, refresh } from './local-server.js';
 const exec = promisify(execFile), server = 'http://localhost:18787';
 localServer();
 describe('real journey server in workerd', () => {
@@ -22,6 +22,7 @@ describe('real journey server in workerd', () => {
     const reader = await connected(owner, trip, 'read');
     await expect(reader.add({ type: 'resource', title: 'Denied', body: 'no', tags: [] })).rejects.toThrow('read-only');
     reader.close();
+    await refresh(trip, owner);
     const last = trip.entries.at(-1)!;
     const removal = await signedControl(trip.key, trip.id, { v: 1, seq: trip.entries.length, prev: await hashControlProof(last.proof), at: new Date().toISOString(), actor: owner.principal, type: 'member.remove', body: { member: client.session.principal } }, owner.signing.privateKey);
     const removed = await request('/v1/journeys/' + trip.id + '/log', 'POST', { control: removal }, as(owner));
@@ -78,6 +79,7 @@ describe('real journey server in workerd', () => {
   }, 30_000);
   it('refuses to write when a forged last history entry was appended by a server-side member', async () => {
     const owner = await person(), trip = await journey(owner), client = await connected(owner, trip);
+    await refresh(trip, owner);
     const stranger = await createSigningIdentity();
     const forged = await signedControl(trip.key, trip.id, { v: 1, seq: trip.entries.length, prev: await hashControlProof(trip.entries.at(-1)!.proof), at: new Date().toISOString(), actor: owner.principal, type: 'member.remove', body: { member: client.session.principal } }, stranger.privateKey);
     expect((await verifyControlProofs([...trip.entries, forged].map(c => c.proof), [...trip.entries, forged].map(c => c.envelope), { journey: trip.id, creator: trip.entries[0]!.proof.body.creator as Member })).ok).toBe(false);

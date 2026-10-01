@@ -2,21 +2,45 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { importMarkdown } from './import.js';
-import type { JourneyClient, AddInput } from './journey.js';
+import type { ArtifactInput } from './artifacts.js';
+import type { JourneyClient } from './journey.js';
 
 const text = { type: 'string' as const };
 const schema = (properties: Record<string, object>, required: string[] = []) => ({ type: 'object' as const, properties, required, additionalProperties: false });
+const artifactFields = { type: text, title: text, body: text, tags: { type: 'array', items: text }, files: { type: 'array', maxItems: 8, items: schema({ path: text, packagePath: text, mime: text }, ['path']) }, format: { type: 'string', enum: ['json','csv','toml','yaml','sqlite'] }, url: text, summary: text, notes: text };
 const tools = [
-  { name: 'add', description: 'Add an item to the journey. The person must approve read-write access first; the agent cannot change membership or access.', inputSchema: schema({ type: text, title: text, body: text, tags: { type: 'array', items: text } }, ['type', 'title', 'body']) },
-  { name: 'import', description: 'Add Markdown files from this computer to the journey. The person must approve read-write access first.', inputSchema: schema({ path: text }, ['path']) },
-  { name: 'list', description: 'List decrypted journey items, optionally by type. The person must approve access first.', inputSchema: schema({ type: text }) },
-  { name: 'search', description: 'Find words in decrypted journey item titles, tags, and bodies. The person must approve access first.', inputSchema: schema({ text: text }) },
-  { name: 'show', description: 'Read one journey item by its ID. The person must approve access first.', inputSchema: schema({ id: text }, ['id']) },
-  { name: 'comment', description: 'Add a comment to a journey item. The person must approve read-write access first.', inputSchema: schema({ id: text, text: text }, ['id', 'text']) },
-  { name: 'comments', description: 'Read comments for a journey item. The person must approve access first.', inputSchema: schema({ id: text }, ['id']) },
-  { name: 'status', description: 'Check this journey and your approved scope.', inputSchema: schema({}) },
-  { name: 'connect_status', description: 'Check whether a person has approved this agent for a journey. No journey access is granted by this tool.', inputSchema: schema({}) }
+  { name: 'add', description: 'Create an artifact after read-write approval. Files are explicit local paths; URLs are never fetched. Attribution comes from signed controls.', inputSchema: schema(artifactFields, ['type', 'title']) },
+  { name: 'edit', description: 'Append a version using the observed predecessor. Omitting files retains attachments; supplying files replaces them. Bend checks current access and artifact authority.', inputSchema: schema({ ...artifactFields, id: text, predecessor: text }, ['id', 'predecessor', 'type', 'title']) },
+  { name: 'versions', description: 'Inspect signed artifact versions.', inputSchema: schema({ id: text }, ['id']) },
+  { name: 'delete', description: 'Hide the whole artifact. Retained metadata history is not secure erasure; downloaded copies cannot be recalled.', inputSchema: schema({ id: text }, ['id']) },
+  { name: 'download', description: 'Decrypt an attachment to an explicit new local output path. Never fetch remote URLs or use filenames as host paths.', inputSchema: schema({ id: text, blob: text, path: text, version: text }, ['id', 'blob', 'path']) },
+  { name: 'import_skill', description: 'Create a skill from an explicit local folder with SKILL.md and at most eight package files.', inputSchema: schema({ path: text, title: text, tags: { type: 'array', items: text } }, ['path', 'title']) },
+  { name: 'import', description: 'Create artifacts from explicit local Markdown files; categories become document tags.', inputSchema: schema({ path: text }, ['path']) },
+  { name: 'list', description: 'List decrypted artifacts, optionally by type and free tag, after approval.', inputSchema: schema({ type: text, tag: text }) },
+  { name: 'search', description: 'Search decrypted artifact titles, tags and text after approval.', inputSchema: schema({ text: text }, ['text']) },
+  { name: 'show', description: 'Read an artifact and its versions/comments after approval.', inputSchema: schema({ id: text }, ['id']) },
+  { name: 'comment', description: 'Comment on the whole artifact, optionally identifying an existing version.', inputSchema: schema({ id: text, text: text, onVersion: text }, ['id', 'text']) },
+  { name: 'comments', description: 'Read whole-artifact comments after approval.', inputSchema: schema({ id: text }, ['id']) },
+  { name: 'status', description: 'Check this journey and your current effective scope.', inputSchema: schema({}) },
+  { name: 'connect_status', description: 'Check approval status; never grants access.', inputSchema: schema({}) }
 ];
+function tags(args: Record<string, unknown>): string[] {
+  if (args.tags !== undefined && (!Array.isArray(args.tags) || !args.tags.every(tag => typeof tag === 'string'))) throw new Error('Journey tags must be text.');
+  return args.tags === undefined ? [] : [...args.tags as string[]];
+}
+/** Copy named input fields only, never caller attribution, grants or control actions. */
+function input(args: Record<string, unknown>): ArtifactInput {
+  if (args.files !== undefined && (!Array.isArray(args.files) || args.files.length > 8)) throw new Error('Files must be an array of at most eight local paths.');
+  const files = (args.files as unknown[] | undefined)?.map(value => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Choose an explicit local path.');
+    const row = value as Record<string, unknown>;
+    if (Object.keys(row).some(k => !['path','packagePath','mime'].includes(k))) throw new Error('Unknown attachment field.');
+    return { path: field(row, 'path'), ...(row.packagePath === undefined ? {} : { packagePath: field(row, 'packagePath') }), ...(row.mime === undefined ? {} : { mime: field(row, 'mime') }) };
+  });
+  if (args.format !== undefined && !['json','csv','toml','yaml','sqlite'].includes(String(args.format))) throw new Error('Unsupported data format.');
+  for (const name of ['body','url','summary','notes']) if (args[name] !== undefined && typeof args[name] !== 'string') throw new Error(name + ' must be text.');
+  return { type: field(args, 'type'), title: field(args, 'title'), tags: tags(args), files, format: args.format as ArtifactInput['format'], body: args.body as string | undefined, url: args.url as string | undefined, summary: args.summary as string | undefined, notes: args.notes as string | undefined };
+}
 function field(args: Record<string, unknown>, name: string): string {
   if (typeof args[name] !== 'string' || !args[name]) throw new Error(name + ' must be text.');
   return args[name];
@@ -34,15 +58,17 @@ export function createWayfindingServer(getClient: () => Promise<JourneyClient>):
       } else {
         const client = await getClient();
         switch (request.params.name) {
-          case 'add': {
-            if (args.tags !== undefined && (!Array.isArray(args.tags) || !args.tags.every(tag => typeof tag === 'string'))) throw new Error('Journey tags must be text.');
-            result = await client.add({ type: field(args, 'type'), title: field(args, 'title'), body: field(args, 'body'), tags: args.tags === undefined ? [] : [...args.tags] } satisfies AddInput); break;
-          }
+          case 'add': result = await client.add(input(args)); break;
+          case 'edit': result = await client.edit(field(args, 'id'), field(args, 'predecessor'), input(args)); break;
+          case 'versions': result = await client.versions(field(args, 'id')); break;
+          case 'delete': result = await client.delete(field(args, 'id')); break;
+          case 'download': result = await client.download(field(args, 'id'), field(args, 'blob'), field(args, 'path'), typeof args.version === 'string' ? args.version : undefined); break;
+          case 'import_skill': result = await client.importSkill(field(args, 'path'), field(args, 'title'), tags(args)); break;
           case 'import': result = await importMarkdown(client, field(args, 'path')); break;
-          case 'list': result = await client.list(typeof args.type === 'string' ? args.type : undefined); break;
+          case 'list': result = await client.list(typeof args.type === 'string' ? args.type : undefined, typeof args.tag === 'string' ? args.tag : undefined); break;
           case 'search': result = await client.search(field(args, 'text')); break;
           case 'show': result = await client.show(field(args, 'id')); break;
-          case 'comment': result = await client.comment(field(args, 'id'), field(args, 'text')); break;
+          case 'comment': result = await client.comment(field(args, 'id'), field(args, 'text'), typeof args.onVersion === 'string' ? args.onVersion : undefined); break;
           case 'comments': result = await client.comments(field(args, 'id')); break;
           case 'status': result = await client.status(); break;
           default: throw new Error('Unknown journey tool: ' + request.params.name);

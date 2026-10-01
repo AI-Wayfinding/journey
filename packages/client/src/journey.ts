@@ -1,15 +1,17 @@
 import { canWriteContent, canReadContent, effectiveScope } from '@ai-wayfinding/core';
-import { CLIENT_VERSION, meetsMinClientVersion, newId, open, parseRecord, seal, unwrapJourneyKey, verifyControlProofs, logDefinitions } from '@ai-wayfinding/core';
-import type { ControlProof, Member, CommentBody, Envelope, ItemBody, JourneyKey, LogState, ProtocolRecord } from '@ai-wayfinding/core';
+import { CLIENT_VERSION, meetsMinClientVersion, newId, unwrapJourneyKey, verifyControlProofs, controlDefinitions, ARTIFACT_FORMAT, artifactTypeHash, canonical, readArtifactPayload, sealArtifactPayload, sealBlob, openBlob, signControlProof, importSigningKey, replayArtifact } from '@ai-wayfinding/core';
+import type { ControlProof, Member, Envelope, JourneyKey, LogState, ArtifactActionType, ArtifactAttachment, ArtifactPayload, JsonObject } from '@ai-wayfinding/core';
+import { artifactPayload, artifactText, attachmentName, localBytes, saveDownload, skillPackage, validateLocalAttachment } from './artifacts.js';
+import type { ArtifactInput, ArtifactItem, ArtifactView, ArtifactComment, LocalAttachment } from './artifacts.js';
 import { readCache, writeCache } from './cache.js';
 import type { CipherRow } from './cache.js';
 import { signedHeaders } from './signing.js';
 import { networkFetch } from './network.js';
 import type { RememberedAgent } from './storage.js';
 
-export interface AddInput { type: string; title: string; body: string; tags: string[]; created?: string; resourceKind?: string; sharedFrom?: string }
+export type AddInput = ArtifactInput;
 export interface JourneyOptions { fetch?: typeof fetch; cacheRoot?: string }
-export interface ItemView { item: ItemBody; comments: CommentBody[] }
+export interface ItemView { item: ArtifactItem; comments: ArtifactComment[]; versions: ArtifactView['versions'] }
 interface Verified { state: LogState; epochs: Map<number, JourneyKey>; log: CipherRow[] }
 const historyError = 'This journey history could not be verified. Stop and ask a member for help.';
 const updateError = () => `This journey uses a newer format than this Wayfinding client (${CLIENT_VERSION}) understands. Nothing is wrong with the journey or your access. Update the client, then try again:\n  npm install -g @ai-wayfinding/client@latest\n(If you installed it with --prefix "$HOME/.npm-global", add that same --prefix.) Your connection stays valid, so you do not need to connect or be approved again.\nIf you cannot install software here, stop and tell your operator (the person you work for) that the Wayfinding client needs updating, show them the command above, and ask them to run it or allow the update.`;
@@ -18,24 +20,27 @@ export class JourneyClient {
   private readonly fetcher: typeof fetch;
   private readonly keys = new Map<number, JourneyKey>();
   constructor(readonly session: RememberedAgent, private readonly options: JourneyOptions = {}) { this.fetcher = options.fetch ?? networkFetch; }
-  private async request<T>(path: string, method = 'GET', data?: Record<string, unknown>): Promise<T> {
+  private async response(path: string, method = 'GET', data?: Record<string, unknown> | Uint8Array, extra: Record<string, string> = {}): Promise<Response> {
     if (this.session.expiresAt <= Date.now()) throw new Error('Your journey agent access has expired. Connect again.');
-    const body = data === undefined ? '' : JSON.stringify(data);
+    const binary = data instanceof Uint8Array;
+    const body = binary ? new Uint8Array(data) : data === undefined ? '' : JSON.stringify(data);
     const route = '/v1' + path;
     const headers = await signedHeaders(this.session.signingPrivateKey, method, route, body);
-    const result = await this.fetcher(this.session.server + route, { method, headers: { ...headers, 'X-Client-Version': CLIENT_VERSION, 'X-Control-Format': 'control-proof-v1', 'X-Agent-Session': this.session.sessionId, ...(data === undefined ? {} : { 'Content-Type': 'application/json', Origin: new URL(this.session.server).origin, 'X-Wayfinding': '1' }) }, ...(data === undefined ? {} : { body }) });
+    const result = await this.fetcher(this.session.server + route, { method, headers: { ...headers, 'X-Client-Version': CLIENT_VERSION, 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': ARTIFACT_FORMAT, 'X-Agent-Session': this.session.sessionId, ...(data === undefined ? {} : { 'Content-Type': binary ? 'application/octet-stream' : 'application/json', Origin: new URL(this.session.server).origin, 'X-Wayfinding': '1' }), ...extra }, ...(data === undefined ? {} : { body }) });
     if (!result.ok) {
-      const error: unknown = await result.json().catch(() => null);
-      const code = error && typeof error === 'object' && 'error' in error && error.error && typeof error.error === 'object' && 'code' in error.error ? String(error.error.code) : String(result.status);
+      const error = await result.json().catch(() => null) as { error?: { code?: string } } | null;
+      const code = error?.error?.code ?? String(result.status);
       if (code === 'client-too-old') throw new Error(updateError());
       if (result.status === 403 || result.status === 401) throw new Error('Access to this journey has ended');
+      if (result.status === 409) throw new Error('Artifact conflict: something changed. Reload and try again.');
       throw new Error('Journey request failed (' + code + ').');
     }
-    return result.json() as Promise<T>;
+    return result;
   }
+  private async request<T>(path: string, method = 'GET', data?: Record<string, unknown>): Promise<T> { return (await this.response(path, method, data)).json() as Promise<T>; }
   private async verified(): Promise<Verified> {
-    const protocol = await this.request<{ minClientVersion: string; controlFormat: string }>(`/journeys/${this.session.journeyId}/protocol`);
-    if (protocol.controlFormat !== 'control-proof-v1' || !meetsMinClientVersion(CLIENT_VERSION, protocol.minClientVersion)) throw new Error(updateError());
+    const protocol = await this.request<{ minClientVersion: string; controlFormat: string; artifactFormat?: string }>(`/journeys/${this.session.journeyId}/protocol`);
+    if (protocol.controlFormat !== 'control-proof-v1' || (protocol.artifactFormat !== undefined && protocol.artifactFormat !== ARTIFACT_FORMAT) || !meetsMinClientVersion(CLIENT_VERSION, protocol.minClientVersion)) throw new Error(updateError());
     const cached = this.options.cacheRoot ? await readCache(this.options.cacheRoot, this.session.journeyId).catch(() => null) : null;
     // Fetch all public proofs. A legacy cache is never a Stage 0 trust anchor.
     const rows: { seq: number; proof: ControlProof; envelope: Envelope }[] = [];
@@ -48,7 +53,7 @@ export class JourneyClient {
       if (page.length < 1000) break;
     }
     if (!rows.length || rows.some(row => !row.proof || !row.envelope || row.seq !== row.proof.seq)) throw new Error(historyError);
-    if (rows.some(row => row.proof.v !== 1 || !logDefinitions.some(d => d.name === row.proof.type))) throw new Error(updateError());
+    if (rows.some(row => row.proof.v !== 1 || !controlDefinitions.some(d => d.name === row.proof.type))) throw new Error(updateError());
     const log: CipherRow[] = rows.map(row => ({ seq: row.seq, entry: Buffer.from(JSON.stringify({ proof: row.proof, envelope: row.envelope })).toString('base64url') }));
     const response = await this.request<{ wraps: { epoch: number; wrap: string }[] }>(`/journeys/${this.session.journeyId}/wraps/me`);
     const epochs = new Map<number, JourneyKey>();
@@ -67,85 +72,106 @@ export class JourneyClient {
     if (this.options.cacheRoot && (!cached || cached.seq !== checked.state.lastSeq || cached.hash !== checked.state.lastHash)) await writeCache(this.options.cacheRoot, this.session.journeyId, { seq: checked.state.lastSeq, hash: checked.state.lastHash!, log, records: cached?.records ?? [] });
     return { state: checked.state, epochs, log };
   }
-  private async records(verified: Verified): Promise<ProtocolRecord[]> {
-    const cached = this.options.cacheRoot ? await readCache(this.options.cacheRoot, this.session.journeyId).catch(() => null) : null;
-    const envelopes: Envelope[] = cached?.records ? [...cached.records] : [];
-    let after = envelopes.at(-1)?.outside.seq ?? 0;
-    for (;;) {
-      const page = (await this.request<{ records: Envelope[] }>(`/journeys/${this.session.journeyId}/records?after=${after}&limit=100`)).records;
-      if (!Array.isArray(page)) throw new Error('Invalid journey records.');
-      for (const envelope of page) {
-        if (envelope.outside?.seq !== after + 1 || envelope.outside.journey !== this.session.journeyId) throw new Error('Invalid journey records.');
-        after = envelope.outside.seq;
-        envelopes.push(envelope);
-      }
-      if (envelopes.length > 100_000) throw new Error('Too many journey records.');
-      if (page.length < 100) break;
-    }
-    const records: ProtocolRecord[] = [];
-    for (const envelope of envelopes) {
-      const key = verified.epochs.get(envelope.outside.epoch);
-      if (!key || envelope.outside.epoch > verified.state.currentEpoch) throw new Error('Missing a key for the journey records.');
-      const record = await open(envelope, key);
-      parseRecord(record);
-      records.push(record);
-    }
-    if (this.options.cacheRoot) await writeCache(this.options.cacheRoot, this.session.journeyId, { seq: verified.state.lastSeq, hash: verified.state.lastHash!, log: verified.log, records: envelopes });
-    return records;
-  }
   private async writable(): Promise<Verified> {
     const verified = await this.verified();
-    if (!canWriteContent(verified.state, this.session.principal)) throw new Error('This journey is read-only for this agent. Its access follows the adding person’s current role and its original approval limit.');
+    if (!canWriteContent(verified.state, this.session.principal)) throw new Error('This journey is read-only for this agent, or a key update is pending. Its access follows the adding person’s current role and its original approval limit.');
     return verified;
   }
-  private async write(record: ProtocolRecord, verified: Verified): Promise<void> {
-    if (parseRecord(record).kind !== 'known') throw new Error('Unknown journey record type.');
-    const { seq, epoch } = await this.request<{ seq: number; epoch: number }>(`/journeys/${this.session.journeyId}/seq`, 'POST', {});
-    if (epoch !== verified.state.currentEpoch) throw new Error('The journey key changed. Reload before writing.');
-    const key = verified.epochs.get(epoch)!;
-    const envelope = await seal(record, { id: newId(), journey: this.session.journeyId, seq, epoch, createdAt: new Date().toISOString() }, key);
-    await this.request(`/journeys/${this.session.journeyId}/records`, 'POST', { envelope });
-  }
-  async add(input: AddInput): Promise<ItemBody> {
-    const verified = await this.writable();
-    const item: ItemBody = { id: newId(), itemType: input.type, title: input.title, body: input.body, tags: [...input.tags], author: this.session.principal, authoredBy: 'agent', created: input.created ?? new Date().toISOString(), ...(input.resourceKind ? { resourceKind: input.resourceKind } : {}), ...(input.sharedFrom ? { sharedFrom: input.sharedFrom } : {}) };
-    await this.write({ type: 'item', typeVersion: 1, body: item }, verified);
-    return item;
-  }
-  async list(type?: string): Promise<ItemBody[]> {
-    const records = await this.records(await this.verified());
-    const roots = new Map<string, string>(), items = new Map<string, ItemBody>(), deleted = new Set<string>();
-    for (const record of records) {
-      if (record.type === 'item') {
-        const item = record.body as ItemBody;
-        const root = item.replaces ? roots.get(item.replaces) : item.id;
-        if (root) { roots.set(item.id, root); items.set(root, item); }
-      } else if (record.type === 'delete') deleted.add(String(record.body.target));
+  private async views(verified: Verified): Promise<ArtifactView[]> {
+    const views: ArtifactView[] = [];
+    for (const state of Object.values(verified.state.artifacts?.items ?? {})) {
+      if (state.deleted) continue;
+      const versions: ArtifactView['versions'] = [], comments: ArtifactComment[] = [];
+      for (const row of verified.log) {
+        const { proof, envelope } = JSON.parse(Buffer.from(row.entry, 'base64url').toString()) as { proof: ControlProof; envelope: Envelope };
+        if (proof.body.artifact !== state.id || proof.type === 'artifact.delete') continue;
+        const key = verified.epochs.get(envelope.outside.epoch);
+        if (!key) throw new Error('An earlier artifact key is unavailable.');
+        const record = await readArtifactPayload(proof, envelope, key);
+        const authoredBy = verified.state.members[proof.actor]?.member.kind === 'agent' ? 'agent' as const : 'human' as const;
+        if (proof.type === 'artifact.comment') comments.push({ id: String(proof.body.comment), item: state.id, actor: proof.actor, author: proof.actor, authoredBy, at: proof.at, body: String(record.body.text), text: String(record.body.text), ...(proof.body.onVersion === undefined ? {} : { onVersion: String(proof.body.onVersion) }) });
+        else versions.push({ id: String(proof.body.version), actor: proof.actor, authoredBy, at: proof.at, payload: record.body as ArtifactPayload });
+      }
+      views.push({ state, versions, comments });
     }
-    return [...items.entries()].filter(([id, item]) => !deleted.has(id) && (!type || type === item.itemType)).map(([, item]) => item);
+    return views;
   }
-  async search(text: string): Promise<ItemBody[]> { const needle = text.toLocaleLowerCase(); return (await this.list()).filter(item => [item.title, item.body, item.itemType, ...item.tags].some(value => value.toLocaleLowerCase().includes(needle))); }
-  async show(id: string): Promise<ItemView> {
-    const records = await this.records(await this.verified());
-    const roots = new Map<string, string>(), items = new Map<string, ItemBody>(), comments: CommentBody[] = [], deleted = new Set<string>();
-    for (const record of records) {
-      if (record.type === 'item') { const item = record.body as ItemBody, root = item.replaces ? roots.get(item.replaces) : item.id; if (root) { roots.set(item.id, root); items.set(root, item); } }
-      if (record.type === 'comment') comments.push(record.body as CommentBody);
-      if (record.type === 'delete') deleted.add(String(record.body.target));
-    }
-    const root = roots.get(id), item = root && !deleted.has(root) ? items.get(root) : undefined;
-    if (!item) throw new Error('No journey item has that ID.');
-    return { item, comments: comments.filter(comment => roots.get(comment.item) === root) };
+  private item(view: ArtifactView): ArtifactItem {
+    const first = view.versions[0]!, head = view.versions.at(-1)!;
+    return { id: view.state.id, version: head.id, itemType: head.payload.content.kind, title: head.payload.title, body: artifactText(head.payload), tags: head.payload.tags, author: view.state.author, authoredBy: first.authoredBy, writer: head.actor, created: first.at, payload: head.payload };
   }
-  async comments(id: string): Promise<CommentBody[]> { return (await this.show(id)).comments; }
-  async comment(id: string, text: string): Promise<CommentBody> {
-    const verified = await this.writable();
-    const records = await this.records(verified);
-    const root = records.find(record => record.type === 'item' && record.body.id === id);
-    if (!root) throw new Error('No journey item has that ID.');
-    const comment: CommentBody = { id: newId(), item: id, onVersion: id, author: this.session.principal, authoredBy: 'agent', at: new Date().toISOString(), body: text };
-    await this.write({ type: 'comment', typeVersion: 1, body: comment }, verified);
-    return comment;
+  private async view(id: string, verified: Verified): Promise<ArtifactView> {
+    const view = (await this.views(verified)).find(v => v.state.id === id);
+    if (!view) throw new Error('No journey artifact has that ID.');
+    return view;
+  }
+  private async commit(type: ArtifactActionType, body: JsonObject, payload: JsonObject): Promise<void> {
+    const latest = await this.writable();
+    const transition = replayArtifact(latest.state, type, body, this.session.principal, Date.now()).transition;
+    if (transition.$ !== 'ArtifactAccepted') throw new Error(transition.$ === 'ArtifactDenied' ? 'Artifact action requires current write access and Stage 1 minimum.' : 'Artifact conflict: predecessor, attribution or reference changed. Reload and try again.');
+    const key = latest.epochs.get(latest.state.currentEpoch)!;
+    const at = new Date().toISOString(), seq = latest.state.lastSeq + 1;
+    const envelope = await sealArtifactPayload(type, body, payload, { id: newId(), journey: this.session.journeyId, seq, epoch: key.epoch, createdAt: at }, key);
+    const proof = await signControlProof({ v: 1, seq, prev: latest.state.lastHash, at, actor: this.session.principal, type, body }, envelope, this.session.journeyId, await importSigningKey(this.session.signingPrivateKey));
+    await this.request(`/journeys/${this.session.journeyId}/log`, 'POST', { control: { proof, envelope } });
+  }
+  async upload(file: LocalAttachment): Promise<ArtifactAttachment> {
+    validateLocalAttachment(file);
+    const bytes = await localBytes(file.path), latest = await this.writable();
+    const stage = await this.request<{ id: string; journey: string; epoch: number; size: number }>(`/journeys/${this.session.journeyId}/blobs`, 'POST', { size: bytes.length });
+    if (stage.journey !== this.session.journeyId || stage.epoch !== latest.state.currentEpoch || stage.size !== bytes.length) throw new Error('Journey key changed. Reload before uploading.');
+    const encrypted = await sealBlob(bytes, { journey: stage.journey, id: stage.id, epoch: stage.epoch }, latest.epochs.get(stage.epoch)!);
+    await this.response(`/journeys/${this.session.journeyId}/blobs/${stage.id}`, 'PUT', encrypted.ciphertext, { 'X-Blob-Descriptor': JSON.stringify(encrypted.descriptor) });
+    return { blob: encrypted.descriptor, name: attachmentName(file), mime: file.mime ?? 'application/octet-stream', ...(file.packagePath === undefined ? {} : { path: file.packagePath }) };
+  }
+  private async payload(input: ArtifactInput, attachments: ArtifactAttachment[] = []): Promise<ArtifactPayload> {
+    if ((input.files?.length ?? 0) + attachments.length > 8) throw new Error('A version can have at most eight attachments.');
+    const uploaded = [...attachments];
+    for (const file of input.files ?? []) uploaded.push(await this.upload({ path: file.path, ...(file.packagePath === undefined ? {} : { packagePath: file.packagePath }), ...(file.mime === undefined ? {} : { mime: file.mime }) }));
+    return artifactPayload(input, uploaded);
+  }
+  async add(input: AddInput): Promise<ArtifactItem> {
+    await this.writable();
+    const payload = await this.payload(input), id = newId();
+    await this.commit('artifact.create', { format: ARTIFACT_FORMAT, artifact: id, author: this.session.principal, actor: this.session.principal, version: newId(), typeHash: await artifactTypeHash(payload.content.kind), blobs: payload.attachments.map(a => a.blob) }, payload);
+    return (await this.show(id)).item;
+  }
+  async importSkill(path: string, title: string, tags: string[] = []): Promise<ArtifactItem> { const pkg = await skillPackage(path); return this.add({ type: 'skill', title, body: pkg.body, files: pkg.files, tags }); }
+  async list(type?: string, tag?: string): Promise<ArtifactItem[]> {
+    return (await this.views(await this.verified())).map(view => this.item(view)).filter(item => (!type || item.itemType === type) && (!tag || item.tags.includes(tag)));
+  }
+  async search(text: string): Promise<ArtifactItem[]> { const needle = text.toLocaleLowerCase(); return (await this.list()).filter(item => [item.title, item.body, item.itemType, ...item.tags].some(value => value.toLocaleLowerCase().includes(needle))); }
+  async show(id: string): Promise<ItemView> { const view = await this.view(id, await this.verified()); return { item: this.item(view), comments: view.comments, versions: view.versions }; }
+  async versions(id: string): Promise<ArtifactView['versions']> { return (await this.show(id)).versions; }
+  async comments(id: string): Promise<ArtifactComment[]> { return (await this.show(id)).comments; }
+  async comment(id: string, text: string, onVersion?: string): Promise<ArtifactComment> {
+    const view = await this.view(id, await this.writable()), comment = newId();
+    await this.commit('artifact.comment', { format: ARTIFACT_FORMAT, artifact: id, author: view.state.author, actor: this.session.principal, comment, ...(onVersion === undefined ? {} : { onVersion }) }, { text });
+    return (await this.comments(id)).find(c => c.id === comment)!;
+  }
+  async edit(id: string, predecessor: string, input: ArtifactInput): Promise<ArtifactItem> {
+    const view = await this.view(id, await this.writable());
+    // No author comparisons here: production Bend decides edit authority and stale predecessors.
+    const payload = await this.payload(input, input.files === undefined ? view.versions.at(-1)!.payload.attachments : []);
+    await this.commit('artifact.version', { format: ARTIFACT_FORMAT, artifact: id, author: view.state.author, actor: this.session.principal, version: newId(), predecessor, typeHash: await artifactTypeHash(payload.content.kind), blobs: payload.attachments.map(a => a.blob) }, payload);
+    return (await this.show(id)).item;
+  }
+  async delete(id: string): Promise<{ id: string; warning: string }> {
+    const view = await this.view(id, await this.writable());
+    await this.commit('artifact.delete', { format: ARTIFACT_FORMAT, artifact: id, author: view.state.author, actor: this.session.principal }, {});
+    return { id, warning: 'Deleted from ordinary views. Signed and encrypted metadata history is retained, not securely erased. Previously downloaded copies cannot be recalled.' };
+  }
+  async download(id: string, blob: string, path: string, version?: string): Promise<{ path: string; bytes: number }> {
+    const verified = await this.verified(), view = await this.view(id, verified);
+    const selected = version ? view.versions.find(v => v.id === version) : view.versions.at(-1);
+    const attachment = selected?.payload.attachments.find(a => a.blob.id === blob);
+    if (!attachment || attachment.blob.journey !== this.session.journeyId) throw new Error('No attachment has that ID in this artifact version.');
+    const response = await this.response(`/journeys/${this.session.journeyId}/blobs/${blob}`);
+    if (canonical(JSON.parse(response.headers.get('X-Blob-Descriptor') ?? 'null')) !== canonical(attachment.blob)) throw new Error('Attachment descriptor mismatch.');
+    const key = verified.epochs.get(attachment.blob.epoch); if (!key) throw new Error('Attachment key unavailable.');
+    const bytes = await openBlob(new Uint8Array(await response.arrayBuffer()), attachment.blob, key);
+    await saveDownload(path, bytes);
+    return { path, bytes: bytes.length };
   }
   async status(): Promise<{ journeyId: string; principal: string; scope: 'read' | 'readwrite'; expiresAt: number; seq: number }> {
     const { state } = await this.verified();

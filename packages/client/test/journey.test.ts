@@ -33,26 +33,26 @@ async function fixture(scope: 'read' | 'readwrite' = 'readwrite') {
 }
 
 describe('journey client guard', () => {
-  it('refuses a forged control before requesting a content sequence', async () => {
+  it('refuses a forged control before making a write request', async () => {
     const f = await fixture(); f.controls[1]!.proof.body.kind = 'person';
     await expect(new JourneyClient(f.session, { fetch: f.fetcher }).add({ type: 'note', title: 'No', body: 'No', tags: [] })).rejects.toThrow(/verified|history/i);
-    expect(f.requests.some(value => value.includes('/seq'))).toBe(false);
+    expect(f.requests.some(value => value.startsWith('POST '))).toBe(false);
   });
   it('refuses removed agents despite remembered scope and old wraps', async () => {
     const f = await fixture(); await f.append('member.remove', { member: f.session.principal });
     await expect(new JourneyClient(f.session, { fetch: f.fetcher }).add({ type: 'note', title: 'No', body: 'No', tags: [] })).rejects.toThrow('Access to this journey has ended');
-    expect(f.requests.some(value => value.includes('/seq'))).toBe(false);
+    expect(f.requests.some(value => value.startsWith('POST '))).toBe(false);
   });
   it('fails closed with an update message for unsupported controls and newer signed minimum', async () => {
     const f = await fixture(); f.controls[1]!.proof.type = 'future.control';
     await expect(new JourneyClient(f.session, { fetch: f.fetcher }).list()).rejects.toThrow('npm install -g @ai-wayfinding/client@latest');
-    const newer = await fixture(); await newer.append('client.minVersion', { version: '999.0.0' });
+    const newer = await fixture(); await newer.append('client.minVersion', { version: '0.1.6' });
     await expect(new JourneyClient(newer.session, { fetch: newer.fetcher }).add({ type: 'note', title: 'No', body: 'No', tags: [] })).rejects.toThrow('newer format');
-    expect(newer.requests.some(value => value.includes('/seq'))).toBe(false);
+    expect(newer.requests.some(value => value.startsWith('POST '))).toBe(false);
   });
   it('refuses read-only writes before reservation', async () => {
     const f = await fixture('read');
     await expect(new JourneyClient(f.session, { fetch: f.fetcher }).add({ type: 'note', title: 'No', body: 'No', tags: [] })).rejects.toThrow('read-only');
-    expect(f.requests.some(value => value.includes('/seq'))).toBe(false);
+    expect(f.requests.some(value => value.startsWith('POST '))).toBe(false);
   });
 });

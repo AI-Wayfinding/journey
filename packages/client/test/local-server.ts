@@ -63,14 +63,13 @@ export async function signedControl(key: JourneyKey, id: string, entry: LogEntry
   return { envelope, proof: await signControlProof(entry, envelope, id, await importSigningKey(privateKey)) };
 }
 export async function journey(owner: Owner) {
-  // This helper exercises Stage 0 record workflows until the client artifact node replaces them.
-  // Storage tests separately use a signed Stage 1 minimum and require artifact-v1.
+  // Stage 0 access scenarios now create Stage 1 artifacts under the signed minimum.
   const id = newId(), key = generateJourneyKey();
-  const first = await signedControl(key, id, { v: 1, seq: 0, prev: null, at: new Date().toISOString(), actor: owner.principal, type: 'genesis', body: { journey: id, name: 'Journey test', creator: { id: owner.principal, kind: 'person', recipient: owner.age.recipient, signingKey: owner.signing.publicKey }, grants: ['members.manage'], mode: 'sealed', visibility: 'private', minClientVersion: '0.1.4' } }, owner.signing.privateKey);
+  const first = await signedControl(key, id, { v: 1, seq: 0, prev: null, at: new Date().toISOString(), actor: owner.principal, type: 'genesis', body: { journey: id, name: 'Journey test', creator: { id: owner.principal, kind: 'person', recipient: owner.age.recipient, signingKey: owner.signing.publicKey }, grants: ['members.manage'], mode: 'sealed', visibility: 'private', minClientVersion: '0.1.5' } }, owner.signing.privateKey);
   const recovery = await createAgeIdentity();
   const recoveryWrap = (await wrapJourneyKey(key, [{ id: 'recovery', recipient: recovery.recipient }]))[0]!.ciphertext;
   const wraps = (await wrapJourneyKey(key, [{ id: owner.principal, recipient: owner.age.recipient }])).map(wrap => ({ principal: wrap.recipient, epoch: wrap.epoch, wrap: wrap.ciphertext }));
-  const created = await request('/v1/journeys', 'POST', { id, name: 'Journey test', creator: { id: owner.principal, recipient: owner.age.recipient, signingKey: owner.signing.publicKey }, control: first, wraps, recoveryWrap, minClientVersion: '0.1.4' }, { Cookie: owner.cookie });
+  const created = await request('/v1/journeys', 'POST', { id, name: 'Journey test', creator: { id: owner.principal, recipient: owner.age.recipient, signingKey: owner.signing.publicKey }, control: first, wraps, recoveryWrap, minClientVersion: '0.1.5' }, { Cookie: owner.cookie });
   expect(created.status).toBe(201);
   return { id, key, entries: [first] };
 }
@@ -81,6 +80,7 @@ export async function approve(owner: Owner, trip: Fixture, url: string, code: st
   if (name !== undefined) expect(info.name).toBe(name);
   const expiresAt = Date.now() + 3_600_000;
   const member = { id: info.principal, kind: 'agent', recipient: info.recipient, signingKey: info.signingKey, addedBy: owner.principal, scope, expiresAt: new Date(expiresAt).toISOString() };
+  await refresh(trip, owner);
   const previous = trip.entries.at(-1)!;
   const entry = await signedControl(trip.key, trip.id, { v: 1, seq: trip.entries.length, prev: await hashControlProof(previous.proof), at: new Date().toISOString(), actor: owner.principal, type: 'member.add', body: { member, grants: [], kind: 'agent' } }, owner.signing.privateKey);
   expect((await verifyControlProofs([...trip.entries, entry].map(c => c.proof), [...trip.entries, entry].map(c => c.envelope), { journey: trip.id, creator: trip.entries[0]!.proof.body.creator as Member })).ok).toBe(true);
@@ -96,7 +96,13 @@ export async function connected(owner: Owner, trip: Fixture, scope: 'read' | 're
   return connection.client;
 }
 
+export async function refresh(trip: Fixture, actor: Owner): Promise<void> {
+  const response = await request(`/v1/journeys/${trip.id}/log`, 'GET', undefined, as(actor));
+  expect(response.status).toBe(200);
+  trip.entries = (await response.json() as { log: Control[] }).log.map(row => ({ proof: row.proof, envelope: row.envelope }));
+}
 export async function control(trip: Fixture, actor: Owner, type: string, body: LogEntry['body']) {
+  await refresh(trip, actor);
   return signedControl(trip.key, trip.id, { v: 1, seq: trip.entries.length, prev: await hashControlProof(trip.entries.at(-1)!.proof), at: new Date().toISOString(), actor: actor.principal, type, body }, actor.signing.privateKey);
 }
 export async function change(trip: Fixture, actor: Owner, type: string, body: LogEntry['body'], extra: object = {}) {

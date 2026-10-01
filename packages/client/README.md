@@ -1,6 +1,6 @@
 # Journey agent client
 
-The `wayfinding` command gives an agent access to one encrypted journey after a person approves it. It also runs a Model Context Protocol (MCP) server over standard input and output. Agents can read, add items, and comment; **they cannot change journey membership or access**. Read-only agents cannot write.
+The `wayfinding` command gives an agent access to one encrypted journey after a person approves it. It also runs a Model Context Protocol (MCP) server over standard input and output. Agents can create, read, edit, delete and comment on artifacts; **they cannot change journey membership or access**. Read-only agents cannot write.
 
 ## Install
 
@@ -69,29 +69,43 @@ With `--remember`, agent keys go to macOS Keychain (`security`) or Linux Secret 
 
 ```sh
 wayfinding status
-wayfinding list --type resource
+wayfinding list --type document --tag resource
 wayfinding search "journey words"
 wayfinding show <item-id>
-wayfinding add --type resource --title "A useful link" --body "Notes" --tags reading,guide
+wayfinding add --type link --title "A useful link" --url https://example.org --summary "Supplied summary" --notes "Notes" --tags reading,guide
+wayfinding add --type file --title "Local file" --file ./report.pdf
+wayfinding import-skill ./my-skill --title "Local skill"
+wayfinding versions <item-id>
+wayfinding edit <item-id> --predecessor <version-id> --type document --title "Updated" --body "New Markdown"
+wayfinding download <item-id> --blob <blob-id> --output ./downloaded.pdf [--version <version-id>]
+wayfinding delete <item-id>
 wayfinding import ./notes.md
 wayfinding import ./markdown-folder
 wayfinding comment <item-id> "A follow-up"
 wayfinding comments <item-id>
 ```
 
-Markdown imports retain simple front matter fields `title`, `type` (or `itemType`), `tags` (comma-separated or inline array), `created`, `resourceKind`, and `sharedFrom`; the remaining Markdown is the body. Files must have `.md` extensions. The agent is always marked as the author, regardless of input front matter. For a directory, Markdown files are read recursively.
+Active types are `skill`, `prompt`, `document` (Markdown), `image`, `file`, `data` and `link`. Data requires `--format json|csv|toml|yaml|sqlite`; use `--body` for text or `--file` for original bytes (SQLite requires a file). Links require an absolute HTTP(S) URL; supplied summaries and notes are not fetched. HTML, applets and sensemaking documents are reserved for later stages.
+
+Text aliases such as `note`, `decision`, `resource`, `position`, `interview` and `lesson`, and other category strings, create a document with that suggested tag. `interview` is only this text alias, not an interview relationship. `recovery` is never a user artifact. Tags preserve case and remove exact duplicates.
+
+Markdown imports read `title`, `type` (or `itemType`) and `tags` (comma-separated or inline array). The remaining Markdown is the body. Caller attribution, dates, grants and other front matter are ignored. Files must have `.md` extensions; directories are read recursively. A skill folder requires `SKILL.md`, stored as text, with up to eight local attachment files. Package paths are relative display names, never download destinations. No ZIP extraction or dependency execution occurs.
+
+Files are explicit regular local paths, not symlinks or remote URLs. Each version supports up to eight attachments, each at most **25,000,000 raw bytes**, including empty files. Binary bytes are encrypted before upload to private storage. MCP `files` entries accept only `path`, optional `packagePath` and optional `mime`. Downloads require an explicit new output path, refuse overwrites and use private file permissions. File and image artifacts need a primary attachment; CLI uses the supplied `--file`.
+
+Artifact IDs stay stable. Every edit requires the observed predecessor version; stale edits fail with a conflict. Title, content, tags and attachments form a complete version. Omit files to retain existing attachments; MCP can supply a replacement `files` list (including `[]`). Any currently read-write member can edit or delete, not only the creator. Signed controls fix the original author and record the actual version writer. `show` includes versions and whole-artifact comments; comments optionally cite a version (`comment --version VERSION` or MCP `onVersion`). Deletion hides all versions/comments/downloads but retains signed and encrypted metadata history. This is not secure erasure; downloaded copies cannot be recalled.
 
 Each read checks the full signed journey controls and their encrypted labels. Before a write, the client checks them again and uses the compiled Bend access rules. An agent's effective access follows the adding person's current role, limited by its original approval: a read-write agent loses writes while its person is read-only, and a read-only agent never gains writes. `status` reports that current effective access. Removing the person ends their agents' access. The client also checks the required version before encrypting an item or comment locally. Server requests are signed with the method, path and query, body digest, timestamp, and fresh nonce. If access ends, the client says so and stops. Decrypted items remain in memory for the process lifetime; keys are also stored in a file only when you explicitly use `--state`.
 
-Clients at 0.1.3 or older must update. If the required minimum rises or an unsupported control appears, CLI and MCP stop before returning content or writing. Run `npm install -g @ai-wayfinding/client@latest`, then retry with the same connection; do not request approval again. Legacy journeys were purged by server schema v2, not migrated. A live agent link shows current signed journey settings and remains read-only; its server must be updated if it cannot understand the controls.
+Stage 1 requires client 0.1.5 and the `artifact-v1` capability. Older clients must update. If the required minimum rises or an unsupported control appears, CLI and MCP stop before returning content or writing. Run `npm install -g @ai-wayfinding/client@latest`, then retry with the same connection; do not request approval again. Legacy journeys were purged by server schema v2, not migrated. A live agent link shows current signed journey settings and remains read-only; its server must be updated if it cannot understand the controls.
 
 ### Optional encrypted-data cache
 
-A remembered session uses a local cache by default. An in-memory connection uses no cache by default. Pass `--cache` to enable it for a one-shot command or `--no-cache` to disable it. Under the OS cache directory (macOS: `~/Library/Caches`; Linux: `$XDG_CACHE_HOME` or `~/.cache`; Windows: `%LOCALAPPDATA%`), the client stores **only ciphertext envelopes and the head of a freshly verified signed log**. The journey key, secret signing key, item titles, and item bodies never go to this cache. A `--state` file, when requested, is separate from this encrypted-data cache. On Unix, cache folders are 0700 and files 0600. The client refreshes records by sequence number but verifies the full signed log again before every use. Disable the cache on a shared device.
+A remembered session uses a local cache by default. An in-memory connection uses no cache by default. Pass `--cache` to enable it for a one-shot command or `--no-cache` to disable it. Under the OS cache directory (macOS: `~/Library/Caches`; Linux: `$XDG_CACHE_HOME` or `~/.cache`; Windows: `%LOCALAPPDATA%`), the client stores **only ciphertext envelopes and the head of a freshly verified signed log**. The journey key, secret signing key, item titles, and item bodies never go to this cache. A `--state` file, when requested, is separate from this encrypted-data cache. On Unix, cache folders are 0700 and files 0600. The client verifies the full signed log again before every use. Disable the cache on a shared device.
 
 ## Connect an MCP tool host
 
-The MCP server exposes `add`, `import`, `list`, `search`, `show`, `comment`, `comments`, `status`, and `connect_status`. Tool descriptions explain that the person approves access. Standard output is reserved for MCP messages; approval instructions go to standard error. With a remembered connection, use this command without `--connect`. With an in-memory connection, give the journey ID:
+The MCP server exposes `add`, `edit`, `versions`, `delete`, `download`, `import_skill`, `import`, `list`, `search`, `show`, `comment`, `comments`, `status`, and `connect_status`. Tool descriptions explain that the person approves access. Standard output is reserved for MCP messages; approval instructions go to standard error. With a remembered connection, use this command without `--connect`. With an in-memory connection, give the journey ID:
 
 ```json
 {
