@@ -128,7 +128,7 @@ describe('Stage 1 real CLI and stdio MCP artifacts', () => {
       const item = await command(file, 'add', '--type', 'file', '--title', 'Exact limit', '--file', binary);
       expect(item.payload.attachments[0].blob).toMatchObject({ size: MAX_BLOB_BYTES, ciphertextSize: MAX_BLOB_BYTES + 16 });
       await command(file, 'download', item.id, '--blob', item.payload.attachments[0].blob.id, '--output', output);
-      expect(await readFile(output)).toEqual(bytes);
+      expect((await readFile(output)).equals(bytes)).toBe(true);
     } finally { agent.close(); }
   }, 90_000);
 
