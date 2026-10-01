@@ -1,4 +1,5 @@
-import rules, { type Maybe, type Role } from '@ai-wayfinding/rules';
+import rules from '@ai-wayfinding/rules';
+import type { Maybe, Role } from '@ai-wayfinding/rules';
 import { copyBlobDescriptor, isArtifactAction, liveArtifactBlobIds, MAX_BLOB_BYTES, newId, normalizedArtifacts, replayArtifact, verifyBlob, type ArtifactArchive, type BlobDescriptor, canonical, contentRole, isPersonGuide, readControlProof, replayControl, normalizedMembers, ruleVersion, verifyControlProofs, type LogState, type Member } from '@ai-wayfinding/core';
 import type { Env } from './index.js';
 import { failure } from './types.js';
