@@ -191,3 +191,40 @@ def Laws.artifact_legacy_client_denied(client, minimum, control):
       {==}
     case True{}:
       {==}
+
+def Laws.blob_stage_pending_denied(access, identity, version, epoch, current):
+  Equal.cong(Bool, Bool, b => b && Nat.is_eq(epoch, current), R.server_content(access, identity, version, True{}), False{}, Laws.server_pending_blocks_content(access, identity, version))
+
+def Laws.blob_upload_requires_live_stage(allowed, exists, owner, actor, available):
+  match allowed exists:
+    case False{} _:
+      {==}
+    case True{} False{}:
+      {==}
+    case True{} True{}:
+      Equal.cong(Bool, Bool, b => b && available, Nat.is_eq(owner, actor) && False{}, False{}, and_false(Nat.is_eq(owner, actor)))
+
+def Laws.blob_reference_requires_completion(exists, matches, committed, owner, actor, unexpired, epoch, current, sameArtifact):
+  match exists matches:
+    case False{} _:
+      {==}
+    case True{} False{}:
+      {==}
+    case True{} True{}:
+      {==}
+
+def Laws.blob_reference_requires_uploader_or_same_artifact(exists, matches, complete, committed, owner, actor, unexpired, epoch, current, sameArtifact):
+  {==}
+
+def Laws.blob_unreferenced_not_readable(allowed, complete):
+  match allowed:
+    case False{}:
+      {==}
+    case True{}:
+      {==}
+
+def Laws.blob_live_never_collected(expired, committed):
+  {==}
+
+def Laws.blob_deleted_not_reusable(id, author, kind, head, versions, blob):
+  {==}

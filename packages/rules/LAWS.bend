@@ -362,3 +362,64 @@ law artifact_legacy_client_denied:
   for minimum: R.Version
   for control: Bool
   {R.artifact_client(client, minimum, control, False{}) == False{} : Bool}
+
+# Real storage gates: no authority, unfinished upload or live-reference deletion.
+law blob_stage_pending_denied:
+  for access: Maybe<&2, R.Role>
+  for identity: Bool
+  for version: Bool
+  for epoch: Nat
+  for current: Nat
+  {R.blob_stage(access, identity, version, True{}, epoch, current) == False{} : Bool}
+
+law blob_upload_requires_live_stage:
+  for allowed: Bool
+  for exists: Bool
+  for owner: Nat
+  for actor: Nat
+  for available: Bool
+  {R.blob_upload(allowed, exists, owner, actor, False{}, available) == False{} : Bool}
+
+law blob_reference_requires_completion:
+  for exists: Bool
+  for matches: Bool
+  for committed: Bool
+  for owner: Nat
+  for actor: Nat
+  for unexpired: Bool
+  for epoch: Nat
+  for current: Nat
+  for sameArtifact: Bool
+  {R.blob_reference(exists, matches, False{}, committed, owner, actor, unexpired, epoch, current, sameArtifact) == False{} : Bool}
+
+law blob_reference_requires_uploader_or_same_artifact:
+  for exists: Bool
+  for matches: Bool
+  for complete: Bool
+  for +committed: Bool
+  for +owner: Nat
+  for +actor: Nat
+  for +unexpired: Bool
+  for +epoch: Nat
+  for +current: Nat
+  for +sameArtifact: Bool
+  {R.blob_reference(exists, matches, complete, committed, owner, actor, unexpired, epoch, current, sameArtifact) == (exists && matches && complete && Bool.pick(Bool, committed, sameArtifact, Nat.is_eq(owner, actor) && unexpired && Nat.is_eq(epoch, current))) : Bool}
+
+law blob_unreferenced_not_readable:
+  for allowed: Bool
+  for complete: Bool
+  {R.blob_read(allowed, False{}, complete) == False{} : Bool}
+
+law blob_live_never_collected:
+  for expired: Bool
+  for committed: Bool
+  {R.blob_collect(True{}, expired, committed) == False{} : Bool}
+
+law blob_deleted_not_reusable:
+  for id: Nat
+  for author: Nat
+  for kind: Nat
+  for head: Nat
+  for versions: +List<R.ArtifactVersion>
+  for blob: Nat
+  {R.blob_reuse(Some{R.Artifact{id, author, kind, head, True{}, versions}}, blob) == False{} : Bool}

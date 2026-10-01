@@ -1,5 +1,6 @@
 import rules, { type Maybe, type Role } from '@ai-wayfinding/rules';
-import { canonical, contentRole, isPersonGuide, readControlProof, replayControl, normalizedMembers, ruleVersion, verifyControlProofs, type LogState, type Member } from '@ai-wayfinding/core';
+import { copyBlobDescriptor, isArtifactAction, liveArtifactBlobIds, MAX_BLOB_BYTES, newId, normalizedArtifacts, replayArtifact, verifyBlob, type ArtifactArchive, type BlobDescriptor, canonical, contentRole, isPersonGuide, readControlProof, replayControl, normalizedMembers, ruleVersion, verifyControlProofs, type LogState, type Member } from '@ai-wayfinding/core';
+import type { Env } from './index.js';
 import { failure } from './types.js';
 import type { Admission, ControlInput, EnclaveMessage, Subject } from './types.js';
 
@@ -8,7 +9,8 @@ export class EnclaveObject {
   private sql: SqlStorage;
   // Crypto verification yields. Serialize complete operations, not just their SQL effects.
   private queue: Promise<void> = Promise.resolve();
-  constructor(private state: DurableObjectState) {
+  private uploading = new Set<string>();
+  constructor(private state: DurableObjectState, private env: Env) {
     this.sql = state.storage.sql;
     this.sql.exec('CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)');
     this.sql.exec('INSERT INTO schema_version(version) SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM schema_version)');
@@ -19,6 +21,7 @@ export class EnclaveObject {
     this.sql.exec('CREATE TABLE IF NOT EXISTS wraps (principal TEXT NOT NULL, epoch INTEGER NOT NULL, wrap BLOB NOT NULL, PRIMARY KEY(principal,epoch))');
     this.sql.exec('CREATE TABLE IF NOT EXISTS recovery_wraps (epoch INTEGER PRIMARY KEY, wrap BLOB NOT NULL)');
     this.sql.exec('CREATE TABLE IF NOT EXISTS reservations (seq INTEGER PRIMARY KEY, principal TEXT NOT NULL, expires INTEGER NOT NULL)');
+    this.sql.exec('CREATE TABLE IF NOT EXISTS blobs (id TEXT PRIMARY KEY, owner TEXT NOT NULL, epoch INTEGER NOT NULL, size INTEGER NOT NULL, expires INTEGER NOT NULL, complete INTEGER NOT NULL, artifact TEXT, descriptor TEXT)');
     this.sql.exec('CREATE TABLE IF NOT EXISTS authority (id TEXT PRIMARY KEY, creator TEXT NOT NULL, state TEXT NOT NULL)');
     if (Number(this.one('SELECT version FROM schema_version')?.version) < 2) this.state.storage.transactionSync(() => {
       // Operator-approved destruction of test journeys. Account storage lives in Registry.
@@ -33,7 +36,7 @@ export class EnclaveObject {
     return !!member && (subject.agent ? member.kind === 'agent' : member.kind === 'person' && !!subject.accountHash && row?.accountHash === subject.accountHash);
   }
   private version(state: LogState, subject: Subject): boolean {
-    try { return rules.server_version(ruleVersion(subject.clientVersion ?? ''), ruleVersion(state.minClientVersion), subject.controlFormat === 'control-proof-v1'); } catch { return false; }
+    try { return rules.artifact_ready(ruleVersion(state.minClientVersion)) ? rules.artifact_client(ruleVersion(subject.clientVersion ?? ''), ruleVersion(state.minClientVersion), subject.controlFormat === 'control-proof-v1', subject.artifactFormat === 'artifact-v1') : rules.server_version(ruleVersion(subject.clientVersion ?? ''), ruleVersion(state.minClientVersion), subject.controlFormat === 'control-proof-v1'); } catch { return false; }
   }
   private access(state: LogState, subject: Subject, write = false, checkVersion = true): boolean {
     const model = normalizedMembers(state, [subject.principal], Date.now());
@@ -41,14 +44,88 @@ export class EnclaveObject {
     return write ? rules.server_content(access, this.identity(state, subject), this.version(state, subject), state.pendingRotation === true)
       : rules.server_read(access, this.identity(state, subject), !checkVersion || this.version(state, subject));
   }
-  async fetch(request: Request): Promise<Response> {
+  private async serialized<T>(work: () => Promise<T>): Promise<T> {
     const previous = this.queue;
     let release!: () => void;
     this.queue = new Promise(resolve => { release = resolve; });
     await previous;
-    try { return await this.handle(await request.json() as EnclaveMessage); }
-    catch { return failure('invalid-request', 400); }
-    finally { release(); }
+    try { return await work(); } finally { release(); }
+  }
+  async fetch(request: Request): Promise<Response> {
+    try {
+      if (request.method === 'PUT' && new URL(request.url).pathname === '/blob') return await this.upload(request);
+      const input = await request.json() as EnclaveMessage;
+      return await this.serialized(() => this.handle(input));
+    } catch { return failure('invalid-request', 400); }
+  }
+  private current(): LogState { return JSON.parse(String(this.one('SELECT state FROM authority LIMIT 1')!.state)); }
+  private artifactVersion(state: LogState, subject: Subject): boolean {
+    try { return rules.artifact_client(ruleVersion(subject.clientVersion ?? ''), ruleVersion(state.minClientVersion), subject.controlFormat === 'control-proof-v1', subject.artifactFormat === 'artifact-v1'); } catch { return false; }
+  }
+  private stageAccess(state: LogState, subject: Subject, epoch: number): boolean {
+    const model = normalizedMembers(state, [subject.principal], Date.now());
+    return rules.blob_stage(rules.member_access(rules.find(model.members, model.id(subject.principal)), model.members), this.identity(state, subject), this.artifactVersion(state, subject), state.pendingRotation === true, BigInt(epoch), BigInt(state.currentEpoch));
+  }
+  private uploadAccess(state: LogState, input: Extract<EnclaveMessage, { op: 'blobUpload' }>): boolean {
+    const row = this.one('SELECT * FROM blobs WHERE id=?', input.descriptor.id);
+    const model = normalizedMembers(state, [input.subject.principal, String(row?.owner ?? '')]);
+    return rules.blob_upload(this.stageAccess(state, input.subject, input.descriptor.epoch), !!row && row.epoch === input.descriptor.epoch && row.size === input.descriptor.size, model.id(String(row?.owner ?? '')), model.id(input.subject.principal), Number(row?.expires) > Date.now(), row?.complete === 0 && row.artifact === null && !this.uploading.has(input.descriptor.id));
+  }
+  private key(journey: string, id: string): string { return `journeys/${journey}/blobs/${id}`; }
+  private async schedule(): Promise<void> { await this.state.storage.setAlarm(Date.now() + 60_000); }
+  private async upload(request: Request): Promise<Response> {
+    const input = JSON.parse(request.headers.get('x-blob-message') ?? '') as Extract<EnclaveMessage, { op: 'blobUpload' }>;
+    const admitted = await this.serialized(async () => {
+      const meta = this.one('SELECT id FROM meta LIMIT 1');
+      if (!meta || meta.id !== input.journeyId) return failure('not-found', 404);
+      const state = this.current();
+      if (!this.access(state, input.subject, false, false)) return failure('forbidden', 403);
+      if (!this.artifactVersion(state, input.subject)) return this.upgrade(state);
+      if (!this.uploadAccess(state, input)) return failure('forbidden', 403);
+      this.uploading.add(input.descriptor.id); return null;
+    });
+    if (admitted) return admitted;
+    const reader = request.body?.getReader();
+    try {
+      // Bound allocation and every streamed byte; never trust Content-Length.
+      const bytes = new Uint8Array(input.descriptor.ciphertextSize); let count = 0;
+      if (reader) for (;;) {
+        const part = await reader.read(); if (part.done) break;
+        count += part.value.byteLength;
+        if (count > MAX_BLOB_BYTES + 16 || count > bytes.length) return failure('too-large', 413);
+        bytes.set(part.value, count - part.value.byteLength);
+      }
+      if (count !== bytes.length) return failure('invalid-request', 400);
+      const descriptor = await verifyBlob(bytes, input.descriptor);
+      await this.env.ARTIFACT_BLOBS.put(this.key(input.journeyId, descriptor.id), bytes);
+      return await this.serialized(async () => {
+        this.uploading.delete(descriptor.id);
+        const state = this.current();
+        if (!this.uploadAccess(state, input)) { await this.schedule(); return failure('forbidden', 403); }
+        this.sql.exec('UPDATE blobs SET complete=1,descriptor=? WHERE id=?', JSON.stringify(copyBlobDescriptor(descriptor)), descriptor.id);
+        await this.schedule(); return Response.json({ descriptor }, { status: 201 });
+      });
+    } catch { return failure('invalid-request', 400); }
+    finally { await reader?.cancel().catch(() => {}); this.uploading.delete(input.descriptor.id); }
+  }
+  async alarm(): Promise<void> {
+    await this.serialized(async () => {
+      const meta = this.one('SELECT id FROM meta LIMIT 1'); if (!meta) return;
+      const live = liveArtifactBlobIds(this.current());
+      for (const row of this.sql.exec('SELECT * FROM blobs').toArray()) {
+        const id = String(row.id);
+        if (this.uploading.has(id) || !rules.blob_collect(live.includes(id), Number(row.expires) <= Date.now(), row.artifact !== null)) continue;
+        try { await this.env.ARTIFACT_BLOBS.delete(this.key(String(meta.id), id)); this.sql.exec('DELETE FROM blobs WHERE id=?', id); } catch { /* Next alarm retries the same unreferenced object. */ }
+      }
+      if (this.one('SELECT id FROM blobs WHERE artifact IS NULL LIMIT 1') || this.sql.exec('SELECT id FROM blobs').toArray().some(row => !live.includes(String(row.id)))) await this.schedule();
+    });
+  }
+  private async download(state: LogState, subject: Subject, id: string): Promise<Response> {
+    const row = this.one('SELECT * FROM blobs WHERE id=?', id);
+    if (!rules.blob_read(this.access(state, subject), liveArtifactBlobIds(state).includes(id), row?.complete === 1)) return failure('not-found', 404);
+    const stored = await this.env.ARTIFACT_BLOBS.get(this.key(state.journey, id));
+    if (!stored) return failure('not-found', 404);
+    return new Response(stored.body, { headers: { 'Content-Type': 'application/octet-stream', 'Content-Disposition': `attachment; filename="${id}.encrypted"`, 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store', 'X-Blob-Descriptor': String(row!.descriptor) } });
   }
   private async handle(input: EnclaveMessage): Promise<Response> {
     const now = Date.now();
@@ -60,7 +137,7 @@ export class EnclaveObject {
       if (!result.ok || creator.kind !== 'person' || creator.id !== data.creator.id || !data.creatorHash) return failure('invalid-request', 400);
       const state = result.state;
       if (data.control.envelope.outside.epoch !== 1 || data.wraps.length !== 1 || data.wraps[0]?.principal !== creator.id || data.wraps[0]?.epoch !== 1) return failure('invalid-request', 400);
-      const s: Subject = { principal: creator.id, accountHash: data.creatorHash, clientVersion: data.clientVersion, controlFormat: data.controlFormat };
+      const s: Subject = { principal: creator.id, accountHash: data.creatorHash, clientVersion: data.clientVersion, controlFormat: data.controlFormat, artifactFormat: data.artifactFormat };
       if (!this.version(state, s)) return this.upgrade(state);
       this.state.storage.transactionSync(() => {
         this.sql.exec('INSERT INTO meta VALUES(?,?,?,?,?)', data.id, 1, 1, 1, 0);
@@ -78,10 +155,19 @@ export class EnclaveObject {
     const state: LogState = JSON.parse(String(authority.state));
     const subject = input.subject;
     if (!subject || !this.access(state, subject, false, false)) return failure('forbidden', 403);
-    if (input.op === 'protocol') return Response.json({ minClientVersion: state.minClientVersion, controlFormat: 'control-proof-v1' });
+    if (input.op === 'protocol') return Response.json({ minClientVersion: state.minClientVersion, controlFormat: 'control-proof-v1', ...(rules.artifact_ready(ruleVersion(state.minClientVersion)) ? { artifactFormat: 'artifact-v1' } : {}) });
     if (!this.version(state, subject)) return this.upgrade(state);
     if (!this.access(state, subject)) return failure('forbidden', 403);
     switch (input.op) {
+      case 'blobBegin': {
+        if (!this.artifactVersion(state, subject)) return this.upgrade(state);
+        if (!this.stageAccess(state, subject, state.currentEpoch)) return failure('forbidden', 403);
+        const id = newId(), expiresAt = now + 3_600_000;
+        this.sql.exec('INSERT INTO blobs VALUES(?,?,?,?,?,0,NULL,NULL)', id, subject.principal, state.currentEpoch, input.size, expiresAt);
+        await this.schedule();
+        return Response.json({ id, journey: state.journey, epoch: state.currentEpoch, size: input.size, expiresAt }, { status: 201 });
+      }
+      case 'blobRead': return this.download(state, subject, input.id);
       case 'access': return Response.json({ allowed: true, epoch: state.currentEpoch });
       case 'inviteAccess': return isPersonGuide(state, subject.principal) && !subject.agent ? Response.json({ allowed: true }) : failure('forbidden', 403);
       case 'linkAccess': return replayControl(state, subject.principal, 'Renew', input.member, undefined, false, undefined, now).transition.$ === 'Accepted' && !subject.agent ? Response.json({ allowed: true }) : failure('forbidden', 403);
@@ -106,15 +192,66 @@ export class EnclaveObject {
         });
         return Response.json({ seq: envelope.outside.seq }, { status: 201 });
       }
-      case 'controlWrite': return this.control(state, JSON.parse(String(authority.creator)) as Member, subject, input, now);
+      case 'controlWrite': return isArtifactAction(input.control.proof.type) ? this.artifact(state, JSON.parse(String(authority.creator)) as Member, subject, input) : this.control(state, JSON.parse(String(authority.creator)) as Member, subject, input, now);
       case 'records': return Response.json({ records: this.sql.exec('SELECT envelope FROM records WHERE seq>? ORDER BY seq LIMIT ?', input.after, input.limit).toArray().map(row => JSON.parse(String(row.envelope))) });
       case 'log': return Response.json({ log: this.sql.exec('SELECT seq,entry FROM log WHERE seq>? ORDER BY seq LIMIT 1000', input.after).toArray().map(row => ({ seq: row.seq, ...JSON.parse(String(row.entry)) as ControlInput })) });
       case 'wraps': return Response.json({ wraps: this.sql.exec('SELECT epoch,wrap FROM wraps WHERE principal=? ORDER BY epoch', subject.principal).toArray() });
-      case 'export': return Response.json({ log: this.sql.exec('SELECT seq,entry FROM log ORDER BY seq').toArray().map(row => ({ seq: row.seq, ...JSON.parse(String(row.entry)) as ControlInput })), envelopes: this.sql.exec('SELECT envelope FROM records ORDER BY seq').toArray().map(row => JSON.parse(String(row.envelope))), wraps: this.sql.exec('SELECT epoch,wrap FROM wraps WHERE principal=? ORDER BY epoch', subject.principal).toArray() }, { headers: { 'Cache-Control': 'no-store' } });
+      case 'export': if (rules.artifact_ready(ruleVersion(state.minClientVersion))) return this.exportArtifacts(state, subject, JSON.parse(String(authority.creator)) as Member); return Response.json({ log: this.sql.exec('SELECT seq,entry FROM log ORDER BY seq').toArray().map(row => ({ seq: row.seq, ...JSON.parse(String(row.entry)) as ControlInput })), envelopes: this.sql.exec('SELECT envelope FROM records ORDER BY seq').toArray().map(row => JSON.parse(String(row.envelope))), wraps: this.sql.exec('SELECT epoch,wrap FROM wraps WHERE principal=? ORDER BY epoch', subject.principal).toArray() }, { headers: { 'Cache-Control': 'no-store' } });
       default: return failure('invalid-request', 400); // No opaque legacy writes or remove/re-add renewal.
     }
   }
-  private upgrade(state: LogState): Response { return Response.json({ error: { code: 'client-too-old' }, minClientVersion: state.minClientVersion, controlFormat: 'control-proof-v1' }, { status: 426 }); }
+  private upgrade(state: LogState): Response { return Response.json({ error: { code: 'client-too-old' }, minClientVersion: state.minClientVersion, controlFormat: 'control-proof-v1', ...(rules.artifact_ready(ruleVersion(state.minClientVersion)) ? { artifactFormat: 'artifact-v1' } : {}) }, { status: 426 }); }
+  private async exportArtifacts(state: LogState, subject: Subject, creator: Member): Promise<Response> {
+    const live = liveArtifactBlobIds(state), blobs: ArtifactArchive['blobs'] = [];
+    for (const id of live) {
+      const row = this.one('SELECT descriptor FROM blobs WHERE id=?', id);
+      const stored = await this.env.ARTIFACT_BLOBS.get(this.key(state.journey, id)); if (!row || !stored) return failure('internal', 500);
+      const bytes = new Uint8Array(await stored.arrayBuffer());
+      // Archive encodes binary once for JSON export; bucket storage remains raw bytes.
+      let encoded = ''; for (let offset = 0; offset < bytes.length; offset += 24_576) encoded += btoa(String.fromCharCode(...bytes.subarray(offset, offset + 24_576)));
+      blobs.push({ descriptor: JSON.parse(String(row.descriptor)), ciphertext: encoded });
+    }
+    const history = Object.values(state.artifacts?.items ?? {}).flatMap(a => a.versions.flatMap(v => v.blobs.map(b => b.id)));
+    const archive: ArtifactArchive = { format: 'artifact-v1', version: 1, journey: state.journey, creator,
+      controls: this.sql.exec('SELECT entry FROM log ORDER BY seq').toArray().map(row => JSON.parse(String(row.entry))),
+      envelopes: this.sql.exec('SELECT envelope FROM records ORDER BY seq').toArray().map(row => JSON.parse(String(row.envelope))),
+      wraps: this.sql.exec('SELECT epoch,wrap FROM wraps WHERE principal=? ORDER BY epoch', subject.principal).toArray().map(row => ({ epoch: Number(row.epoch), recipient: subject.principal, ciphertext: String(row.wrap) })),
+      blobs, unavailableDeletedBlobs: [...new Set(history.filter(id => !live.includes(id)))].sort() };
+    return Response.json(archive, { headers: { 'Cache-Control': 'no-store' } });
+  }
+  private async artifact(state: LogState, creator: Member, subject: Subject, input: Extract<EnclaveMessage, { op: 'controlWrite' }>): Promise<Response> {
+    const control = input.control, proof = control.proof;
+    if (!isArtifactAction(proof.type)) return failure('invalid-request', 400);
+    if (!this.artifactVersion(state, subject)) return this.upgrade(state);
+    if (!this.stageAccess(state, subject, control.envelope.outside.epoch)) return failure('forbidden', 403);
+    if (proof.actor !== subject.principal || input.wraps !== undefined || input.admission !== undefined) return failure('forbidden', 403);
+    const prior = this.one('SELECT entry FROM log WHERE seq=?', proof.seq);
+    if (prior) return canonical(JSON.parse(String(prior.entry))) === canonical(control) ? Response.json({ seq: proof.seq, memberDelta: 0, removed: [], minClientVersion: state.minClientVersion, retry: true }) : failure('conflict', 409);
+    if (proof.seq !== state.lastSeq + 1 || proof.prev !== state.lastHash) return failure('conflict', 409);
+    if (Math.abs(Date.parse(proof.at) - Date.now()) > 60_000) return failure('invalid-request', 400);
+    const live = replayArtifact(state, proof.type, proof.body, subject.principal, Date.now());
+    if (live.transition.$ !== 'ArtifactAccepted') return failure(live.transition.$ === 'ArtifactDenied' ? 'forbidden' : 'conflict', live.transition.$ === 'ArtifactDenied' ? 403 : 409);
+    const controls = this.sql.exec('SELECT entry FROM log ORDER BY seq').toArray().map(row => JSON.parse(String(row.entry)) as ControlInput);
+    const verified = await verifyControlProofs([...controls.map(c => c.proof), proof], [...controls.map(c => c.envelope), control.envelope], { journey: state.journey, creator });
+    if (!verified.ok) return failure('invalid-request', 400);
+    const descriptors = (proof.body.blobs ?? []) as BlobDescriptor[];
+    for (const descriptor of descriptors) {
+      const row = this.one('SELECT * FROM blobs WHERE id=?', descriptor.id);
+      const model = normalizedMembers(state, [subject.principal, String(row?.owner ?? '')]);
+      const normalized = normalizedArtifacts(state, proof.body, subject.principal);
+      const sameArtifact = rules.blob_reuse(rules.artifact_find(normalized.index.items, normalized.model.id(String(proof.body.artifact))), normalized.model.id(descriptor.id));
+      if (!rules.blob_reference(!!row && descriptor.journey === state.journey, !!row?.descriptor && canonical(JSON.parse(String(row.descriptor))) === canonical(descriptor), row?.complete === 1, row?.artifact !== null && row?.artifact !== undefined, model.id(String(row?.owner ?? '')), model.id(subject.principal), Number(row?.expires) > Date.now(), BigInt(descriptor.epoch), BigInt(state.currentEpoch), sameArtifact)) return failure('conflict', 409);
+    }
+    if (!this.stageAccess(state, subject, control.envelope.outside.epoch) || replayArtifact(state, proof.type, proof.body, subject.principal, Date.now()).transition.$ !== 'ArtifactAccepted') return failure('forbidden', 403);
+    this.state.storage.transactionSync(() => {
+      this.sql.exec('INSERT INTO log VALUES(?,?,?)', proof.seq, JSON.stringify(control), Date.now());
+      this.sql.exec('UPDATE authority SET state=?', JSON.stringify(verified.state));
+      this.sql.exec('UPDATE meta SET nextLog=?', proof.seq + 1);
+      for (const b of descriptors) this.sql.exec('UPDATE blobs SET artifact=? WHERE id=?', String(proof.body.artifact), b.id);
+    });
+    await this.schedule();
+    return Response.json({ seq: proof.seq, memberDelta: 0, removed: [], minClientVersion: verified.state.minClientVersion }, { status: 201 });
+  }
   private async control(state: LogState, creator: Member, subject: Subject, input: Extract<EnclaveMessage, { op: 'controlWrite' }>, now: number): Promise<Response> {
     const proof = input.control.proof;
     if (proof.actor !== subject.principal) return failure('forbidden', 403);

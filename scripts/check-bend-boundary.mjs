@@ -56,6 +56,7 @@ function violations(source, path) {
       const expression = text(node);
       const roleTest = /(?:\.scope|\[['"]scope['"]\])\s*(?:===|!==|==|!=)\s*['"]read(?:write)?['"]/.test(expression);
       const ownedTest = /(?:\.addedBy|\[['"]addedBy['"]\])\s*(?:===|!==|==|!=)/.test(expression);
+      const artifactOwnership = /(?:\.(?:author|writer|owner)|\[['"](?:author|writer|owner)['"]\])\s*(?:===|!==|==|!=)/.test(expression);
       // Stored transport inputs are intentionally not verified replay; server
       // identity matching and kind/scope constructor mapping stay host-owned.
       const mapping = ts.isConditionalExpression(node.parent)
@@ -69,7 +70,7 @@ function violations(source, path) {
         && ts.isBinaryExpression(node.parent) && node.parent.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken
         && /^(approved|row|session)\.scope !== 'read' && \1\.scope !== 'readwrite'$/.test(text(node.parent));
       const parser = scopeSchema || path === 'packages/server/src/index.ts' && ["change.scope !== 'read'", "b.scope !== 'read'", "row.scope !== 'read'"].includes(expression);
-      if ((roleTest || ownedTest) && !mapping && !bendInput && !parser) findings.push('role/owner decision must call Bend');
+      if ((roleTest || ownedTest || artifactOwnership) && !mapping && !bendInput && !parser) findings.push('role/owner decision must call Bend');
     }
     if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && ['filter', 'some'].includes(node.expression.name.text)) {
       if (/members\.manage|\.addedBy/.test(text(node))) findings.push('removal/last-guide decision must call Bend');
@@ -95,7 +96,7 @@ async function rules() {
     'packages/web/src/main.ts': ['canWriteContent', 'isPersonGuide', 'canControl', 'canRenameAgent'],
     'packages/web/src/journey.ts': ['canWriteContent', 'isPersonGuide'],
     'packages/client/src/journey.ts': ['canWriteContent', 'effectiveScope'],
-    'packages/server/src/enclave.ts': ['rules.server_version', 'rules.member_access', 'rules.server_content', 'rules.server_read', 'rules.server_admission', 'replayControl', 'normalizedMembers'],
+    'packages/server/src/enclave.ts': ['rules.server_version', 'rules.member_access', 'rules.server_content', 'rules.server_read', 'rules.server_admission', 'replayControl', 'normalizedMembers', 'rules.blob_stage', 'rules.blob_upload', 'rules.blob_reference', 'rules.blob_read', 'rules.blob_collect', 'rules.blob_reuse', 'replayArtifact', 'liveArtifactBlobIds'],
   };
   for (const [path, calls] of Object.entries(required)) for (const call of calls) assert(read(path).includes(`${call}(`), `${path} must use ${call}`);
   // Negative controls: deleting a guard or restoring representative legacy
@@ -109,6 +110,9 @@ async function rules() {
     "if (member['addedBy'] === actor) return true;",
     "function normalizedMembers() { return member.scope === 'read'; }",
     "const grants = state.grants[actor].includes('members.manage');",
+    "if (artifact.author !== actor) return false;",
+    "if (row.owner === subject.principal) return true;",
+    "if (version['writer'] == actor) return true;",
   ]) for (const path of ['packages/core/src/removal.ts', 'packages/server/src/enclave.ts', 'packages/server/src/index.ts', 'packages/web/src/main.ts', 'packages/client/src/journey.ts']) {
     assert(violations(fixture, path).length > 0, `Boundary negative control: ${path}: ${fixture}`);
   }

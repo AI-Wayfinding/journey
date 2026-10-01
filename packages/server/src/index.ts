@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { LINK_SECRET_PATTERN, isId, linkLookupHash, newId, validAgentName, logDefinitions, type ControlProof, type JsonObject, type Envelope } from '@ai-wayfinding/core';
+import { CLIENT_VERSION, copyArtifactPublic, isArtifactAction, validateArtifactPublic, validateBlobDescriptor, MAX_BLOB_BYTES, LINK_SECRET_PATTERN, isId, linkLookupHash, newId, validAgentName, logDefinitions, type ControlProof, type JsonObject, type Envelope } from '@ai-wayfinding/core';
 import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse } from '@simplewebauthn/server';
 import { appPrfSalt, base64url, digest, emailHash, equalSecret, randomToken, unbase64url, verifyAgentSignature } from './crypto.js';
 import { ENDED_MESSAGE, LINK_RATE_LIMIT, LinkEnded, LinkExpired, expiredBody, linkResponse, readLink } from './agentLink.js';
@@ -17,6 +17,7 @@ export interface Env {
   REGISTRY: DurableObjectNamespace;
   ENCLAVES: DurableObjectNamespace;
   ASSETS: Fetcher;
+  ARTIFACT_BLOBS: R2Bucket;
   MAGIC_EMAIL: SendEmail;
   EMAIL_HASH_KEY: string;
   ADMIN_TOKEN: string;
@@ -65,11 +66,11 @@ async function agent(c: AppContext): Promise<Subject | null> {
   if (!id || !timestamp || !nonce || !signature || !validString(nonce, 128) || !/^\d{13}$/.test(timestamp) || Math.abs(Date.now() - Number(timestamp)) > 60_000) return null;
   const row = await registry(c.env, { op: 'agentGet', id });
   if (!row || row.status !== 'approved' || Number(row.expires) <= Date.now()) return null;
-  let path: string, body: string;
+  let path: string, body: string | Uint8Array;
   try {
     const url = new URL(c.req.url);
     path = url.pathname + url.search;
-    body = await c.req.raw.clone().text();
+    body = c.req.method === 'PUT' && /\/blobs\//.test(url.pathname) ? await boundedBytes(c.req.raw.clone().body, MAX_BLOB_BYTES + 16) : await c.req.raw.clone().text();
   } catch { return null; }
   if (!await verifyAgentSignature(row.signingKey, c.req.method, path, body, timestamp, nonce, signature)) return null;
   if (!await registry(c.env, { op: 'nonce', id, nonce })) return null;
@@ -81,15 +82,16 @@ async function subject(c: AppContext): Promise<Subject | null> {
   const principal = c.req.header('x-principal');
   return auth !== null && auth.verifiedAt !== null && validString(principal, 128) ? { principal, accountHash: auth.accountHash, ...capability(c) } : null;
 }
-function capability(c: AppContext): Pick<Subject, 'clientVersion' | 'controlFormat'> { return { clientVersion: c.req.header('x-client-version'), controlFormat: c.req.header('x-control-format') }; }
+function capability(c: AppContext): Pick<Subject, 'clientVersion' | 'controlFormat' | 'artifactFormat'> { return { clientVersion: c.req.header('x-client-version'), controlFormat: c.req.header('x-control-format'), artifactFormat: c.req.header('x-artifact-format') }; }
 function control(value: unknown, journey: string): ControlInput | null {
   if (!object(value) || Object.keys(value).some(k => !['proof', 'envelope'].includes(k)) || !object(value.proof) || !object(value.envelope) || !object(value.envelope.outside)) return null;
   const p = value.proof, e = value.envelope;
   if (!object(e.outside)) return null;
   const o = e.outside;
+  if (Object.keys(e).some(k => !['outside', 'nonce', 'ciphertext'].includes(k)) || Object.keys(o).some(k => !['v', 'id', 'journey', 'seq', 'epoch', 'size', 'createdAt'].includes(k))) return null;
   if (Object.keys(p).sort().join(',') !== 'actor,at,body,envelopeHash,journey,prev,seq,sig,type,v' || p.v !== 1 || p.journey !== journey || !validSeq(p.seq) || !(p.prev === null || validString(p.prev, 64)) || !validString(p.at, 64) || !validString(p.actor, 128) || !validString(p.type, 64) || !object(p.body) || !validString(p.sig, 128) || !validString(p.envelopeHash, 64)) return null;
   const definition = logDefinitions.find(d => d.name === p.type);
-  if (!definition || Object.keys(p.body).some(k => !definition.fields.includes(k))) return null;
+  if (!definition || Object.keys(p.body).some(k => !definition.fields.includes(k)) || isArtifactAction(p.type) && !validateArtifactPublic(p.type, p.body as JsonObject).ok) return null;
   const body: JsonObject = {};
   for (const field of definition.fields) if (Object.hasOwn(p.body, field)) {
     const v = p.body[field];
@@ -103,7 +105,7 @@ function control(value: unknown, journey: string): ControlInput | null {
   }
   if (o.v !== 1 || !validString(o.id, 128) || o.journey !== journey || o.seq !== p.seq || !validEpoch(o.epoch) || !validSeq(o.size) || o.size > 1_048_576 || !validString(o.createdAt, 64) || !validString(e.nonce, 64) || !encrypted(e.ciphertext, 1_400_000)) return null;
   try { if (unbase64url(e.nonce).length !== 12 || unbase64url(e.ciphertext).length !== o.size + 16) return null; } catch { return null; }
-  const proof: ControlProof = { v: 1, journey, seq: p.seq, prev: p.prev, at: p.at, actor: p.actor, type: p.type, body, envelopeHash: p.envelopeHash, sig: p.sig };
+  const proof: ControlProof = { v: 1, journey, seq: p.seq, prev: p.prev, at: p.at, actor: p.actor, type: p.type, body: isArtifactAction(p.type) ? copyArtifactPublic(p.type, body) : body, envelopeHash: p.envelopeHash, sig: p.sig };
   return { proof, envelope: { outside: { v: 1, id: o.id, journey, seq: p.seq, epoch: o.epoch, size: o.size, createdAt: o.createdAt }, nonce: e.nonce, ciphertext: e.ciphertext } };
 }
 function wraps(value: unknown, epoch: number, historical = false): EpochWrap[] | null {
@@ -375,6 +377,27 @@ app.use('/v1/journeys/:id/*', async (c, next) => {
 });
 function journeySubject(c: AppContext): Subject { return c.get('subject'); }
 app.get('/v1/journeys/:id/protocol', async c => enclave(c.env, c.req.param('id'), { op: 'protocol', journeyId: c.req.param('id'), subject: journeySubject(c) }));
+// Byte counter is independent of Content-Length, including signed binary requests.
+async function boundedBytes(body: ReadableStream<Uint8Array> | null, max: number): Promise<Uint8Array> {
+  const reader = body?.getReader(), chunks: Uint8Array[] = []; let size = 0;
+  if (reader) try { for (;;) { const part = await reader.read(); if (part.done) break; size += part.value.byteLength; if (size > max) throw new Error('too large'); chunks.push(part.value); } } finally { await reader.cancel().catch(() => {}); }
+  const result = new Uint8Array(size); let offset = 0; for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.length; } return result;
+}
+app.post('/v1/journeys/:id/blobs', async c => {
+  const b = await payload(c).catch(() => null);
+  if (!b || Object.keys(b).join(',') !== 'size' || !validSeq(b.size) || b.size > MAX_BLOB_BYTES) return failure('invalid-request', 400);
+  return enclave(c.env, c.req.param('id'), { op: 'blobBegin', journeyId: c.req.param('id'), subject: journeySubject(c), size: b.size });
+});
+app.put('/v1/journeys/:id/blobs/:blob', async c => {
+  let descriptor: unknown; try { descriptor = JSON.parse(c.req.header('x-blob-descriptor') ?? ''); } catch { return failure('invalid-request', 400); }
+  if (!validateBlobDescriptor(descriptor) || descriptor.journey !== c.req.param('id') || descriptor.id !== c.req.param('blob')) return failure('invalid-request', 400);
+  const message: EnclaveMessage = { op: 'blobUpload', journeyId: descriptor.journey, subject: journeySubject(c), descriptor: { v: 1, journey: descriptor.journey, id: descriptor.id, epoch: descriptor.epoch, size: descriptor.size, ciphertextSize: descriptor.ciphertextSize, nonce: descriptor.nonce, digest: descriptor.digest } };
+  return c.env.ENCLAVES.get(c.env.ENCLAVES.idFromName(descriptor.journey)).fetch('https://internal/blob', { method: 'PUT', headers: { 'x-blob-message': JSON.stringify(message) }, body: c.req.raw.body });
+});
+app.get('/v1/journeys/:id/blobs/:blob', async c => {
+  if (!isId(c.req.param('blob'))) return failure('invalid-request', 400);
+  return enclave(c.env, c.req.param('id'), { op: 'blobRead', journeyId: c.req.param('id'), subject: journeySubject(c), id: c.req.param('blob') });
+});
 app.post('/v1/journeys/:id/seq', async c => enclave(c.env, c.req.param('id'), { op: 'reserve', journeyId: c.req.param('id'), subject: journeySubject(c) }));
 app.post('/v1/journeys/:id/records', async c => {
   const b = await payload(c).catch(() => null), id = c.req.param('id');
@@ -398,7 +421,7 @@ app.post('/v1/journeys/:id/log', async c => {
   const b = await payload(c).catch(() => null), id = c.req.param('id'), s = journeySubject(c);
   if (!b || b.entry !== undefined || b.accessChanges !== undefined || b.epoch !== undefined || b.memberWraps !== undefined) return failure('invalid-request', 400);
   const signed = control(b.control, id);
-  if (!signed) return failure('invalid-request', 400);
+  if (!signed || isArtifactAction(signed.proof.type) && Object.keys(b).some(k => !['control', 'wraps'].includes(k))) return failure('invalid-request', 400);
   let admission: Admission | undefined;
   if (signed.proof.type === 'member.add') {
     const member = signed.proof.body.member;
@@ -560,7 +583,7 @@ app.get('/a/:secret', async c => {
   if (!row) return ended();
   if (row.limited) return linkResponse({ error: 'rate-limited', message: 'This link has been read too often. Try again later.', retryAfterSeconds: row.retryAfter }, 429, { 'Retry-After': String(row.retryAfter) });
   if (Number(row.expires) <= Date.now()) return linkResponse(expiredBody(c.env.ORIGIN, row.journeyId, row.memberId, Number(row.expires)), 410);
-  const subject: Subject = { principal: row.memberId, agent: true, clientVersion: '0.1.4', controlFormat: 'control-proof-v1' };
+  const subject: Subject = { principal: row.memberId, agent: true, clientVersion: CLIENT_VERSION, controlFormat: 'control-proof-v1', artifactFormat: 'artifact-v1' };
   const call: Enclave = message => enclave(c.env, row.journeyId, { ...message, journeyId: row.journeyId, subject });
   try {
     const pages = await readLink({ journeyId: row.journeyId, memberId: row.memberId, blob: row.blob, expires: Number(row.expires), since: Number(row.since) }, secret, c.env.ORIGIN, call);

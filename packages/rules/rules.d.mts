@@ -17,6 +17,13 @@ export interface ArtifactIndex { $: 'ArtifactIndex'; items: List<Artifact>; used
 export type ArtifactAction = { $: 'ArtifactCreate'; id: bigint; version: bigint; author: bigint; writer: bigint; typeHash: bigint; blobs: List<bigint> } | { $: 'ArtifactEdit'; id: bigint; version: bigint; predecessor: bigint; author: bigint; writer: bigint; typeHash: bigint; blobs: List<bigint> } | { $: 'ArtifactComment'; id: bigint; comment: bigint; onVersion: bigint; author: bigint; writer: bigint } | { $: 'ArtifactDelete'; id: bigint; author: bigint; writer: bigint };
 export type ArtifactTransition = { $: 'ArtifactAccepted'; index: ArtifactIndex } | { $: 'ArtifactDenied' | 'ArtifactConflict' };
 declare const rules: {
+  blob_reuse(target: Maybe<Artifact>, blob: bigint): boolean;
+  artifact_find(items: List<Artifact>, id: bigint): Maybe<Artifact>;
+  blob_stage(access: Maybe<Role>, identity: boolean, version: boolean, pending: boolean, epoch: bigint, current: bigint): boolean;
+  blob_upload(allowed: boolean, exists: boolean, owner: bigint, actor: bigint, unexpired: boolean, available: boolean): boolean;
+  blob_reference(exists: boolean, matches: boolean, complete: boolean, committed: boolean, owner: bigint, actor: bigint, unexpired: boolean, epoch: bigint, current: bigint, sameArtifact: boolean): boolean;
+  blob_read(allowed: boolean, live: boolean, complete: boolean): boolean;
+  blob_collect(live: boolean, expired: boolean, committed: boolean): boolean;
   artifact_ready(version: Version): boolean;
   artifact_client(client: Version, minimum: Version, control: boolean, artifact: boolean): boolean;
   artifact_apply(members: List<Member>, actor: bigint, minimum: Version, pending: boolean, index: ArtifactIndex, action: ArtifactAction): ArtifactTransition;

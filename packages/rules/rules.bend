@@ -649,3 +649,26 @@ def artifact_authorized(allowed: Bool, index: ArtifactIndex, actor: Nat, action:
 
 def artifact_apply(+members: +List<Member>, +actor: Nat, minimum: Version, pending: Bool, index: ArtifactIndex, action: ArtifactAction) -> ArtifactTransition:
   artifact_authorized(content_write(member_access(find(members, actor), members), pending) && artifact_ready(minimum), index, actor, action)
+
+# Storage lifecycle inputs are verified facts; these predicates own every decision.
+def blob_stage(access: Maybe<&2, Role>, identity: Bool, version: Bool, pending: Bool, epoch: Nat, current: Nat) -> Bool:
+  server_content(access, identity, version, pending) && Nat.is_eq(epoch, current)
+
+def blob_upload(allowed: Bool, exists: Bool, owner: Nat, actor: Nat, unexpired: Bool, available: Bool) -> Bool:
+  allowed && exists && Nat.is_eq(owner, actor) && unexpired && available
+
+def blob_reference(exists: Bool, matches: Bool, complete: Bool, committed: Bool, owner: Nat, actor: Nat, unexpired: Bool, epoch: Nat, current: Nat, sameArtifact: Bool) -> Bool:
+  exists && matches && complete && Bool.pick(Bool, committed, sameArtifact, Nat.is_eq(owner, actor) && unexpired && Nat.is_eq(epoch, current))
+
+def blob_read(allowed: Bool, live: Bool, complete: Bool) -> Bool:
+  allowed && live && complete
+
+def blob_collect(live: Bool, expired: Bool, committed: Bool) -> Bool:
+  Bool.not(live) && (expired || committed)
+
+def blob_reuse(target: Maybe<&2, Artifact>, blob: Nat) -> Bool:
+  match target:
+    case None{}:
+      False{}
+    case Some{Artifact{_, _, _, _, deleted, versions}}:
+      Bool.not(deleted) && artifact_blob_has(versions, blob)

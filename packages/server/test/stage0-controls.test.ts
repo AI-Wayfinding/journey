@@ -1,4 +1,5 @@
-import { runInDurableObject } from 'cloudflare:test';
+import type { Env } from '../src/index.js';
+import { env, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import { effectiveScope, generateJourneyKey, importSigningKey, newId, recipientsHash, sealControlLabels, signControlProof, unwrapJourneyKey, type Member } from '@ai-wayfinding/core';
 import { EnclaveObject, Registry } from '../src/index.js';
@@ -150,7 +151,7 @@ describe('verified Stage 0 controls (Worker and SQLite seam)', () => {
       s.storage.sql.exec("INSERT INTO records VALUES(99,'legacy',1,0,'legacy','legacy')");
       for (const table of ['meta','records','log','principals','wraps','recovery_wraps','reservations','authority']) expect(s.storage.sql.exec(`SELECT * FROM ${table}`).toArray().length).toBeGreaterThan(0);
       s.storage.sql.exec('UPDATE schema_version SET version=1');
-      new EnclaveObject(s);
+      new EnclaveObject(s, env as unknown as Env);
       expect(s.storage.sql.exec('SELECT version FROM schema_version').toArray()).toEqual([{ version: 2 }]);
       for (const table of ['meta','records','log','principals','wraps','recovery_wraps','reservations','authority']) expect(s.storage.sql.exec(`SELECT * FROM ${table}`).toArray()).toEqual([]);
     });

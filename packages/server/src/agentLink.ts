@@ -1,4 +1,4 @@
-import { CLIENT_VERSION, canReadContent, logDefinitions, deriveRecipient, itemVersions, meetsMinClientVersion, open, openLinkIdentity, parseRecord, unwrapJourneyKey, verifyControlProofs, readControlProof } from '@ai-wayfinding/core';
+import { isArtifactAction, readArtifactPayload, type ArtifactPayload, CLIENT_VERSION, canReadContent, logDefinitions, deriveRecipient, itemVersions, meetsMinClientVersion, open, openLinkIdentity, parseRecord, unwrapJourneyKey, verifyControlProofs, readControlProof } from '@ai-wayfinding/core';
 import type { ControlProof, Member, Envelope, JourneyKey, LogEntry, LogState, ProtocolRecord } from '@ai-wayfinding/core';
 
 /**
@@ -41,7 +41,7 @@ async function json<T>(response: Response): Promise<T> {
 }
 
 /** Verifies the whole signed log as the client does, then returns its state and the decrypted records. */
-async function readJourney(identity: string, memberId: string, journeyId: string, call: Enclave): Promise<{ state: LogState; genesis: LogEntry; records: ProtocolRecord[] }> {
+async function readJourney(identity: string, memberId: string, journeyId: string, call: Enclave): Promise<{ state: LogState; genesis: LogEntry; records: ProtocolRecord[]; artifacts: Fields[] }> {
   const rows: { seq: number; proof: ControlProof; envelope: Envelope }[] = [];
   for (;;) {
     const page = (await json<{ log: { seq: number; proof: ControlProof; envelope: Envelope }[] }>(await call({ op: 'log', after: rows.length ? rows.at(-1)!.seq : -1 }))).log;
@@ -80,11 +80,30 @@ async function readJourney(identity: string, memberId: string, journeyId: string
     records.push(record);
   }
   const genesis = (await readControlProof(rows[0]!.proof, rows[0]!.envelope, epochs.get(rows[0]!.envelope.outside.epoch))).entry;
-  return { state, genesis, records };
+  const artifacts: Fields[] = [];
+  for (const item of Object.values(state.artifacts?.items ?? {})) {
+    if (item.deleted) continue;
+    const version = item.versions.at(-1)!;
+    const row = rows[version.seq]!, key = epochs.get(row.envelope.outside.epoch);
+    if (!key || !isArtifactAction(row.proof.type)) throw new Error(historyError);
+    const payload = (await readArtifactPayload(row.proof, row.envelope, key)).body as ArtifactPayload;
+    const c = payload.content;
+    const body = c.kind === 'skill' ? c.skill : c.kind === 'prompt' ? c.text : c.kind === 'document' ? c.markdown : c.kind === 'link' ? `${c.url}\n${c.summary}\n${c.notes}` : c.kind === 'data' ? c.text ?? `[${c.format} attachment]` : '[Binary attachment]';
+    const comments: string[] = [];
+    for (const comment of item.comments) {
+      const row = rows[comment.seq]!, key = epochs.get(row.envelope.outside.epoch);
+      if (!key) throw new Error(historyError);
+      comments.push(`${comment.actor}: ${(await readArtifactPayload(row.proof, row.envelope, key)).body.text}`);
+    }
+    const attachments = payload.attachments.map(a => `${a.name} (${a.mime}, ${a.blob.size} bytes)`);
+    // Unbounded private metadata joins the paged text, not page-header fields.
+    artifacts.push({ id: item.id, type: c.kind, title: payload.title.slice(0, 256), tags: payload.tags.slice(0, 8).map(t => t.slice(0, 64)), body: [payload.title, payload.tags.join(', '), body, ...attachments, ...comments].join('\n'), createdAt: rows[item.versions[0]!.seq]!.proof.at, updatedAt: row.proof.at, author: { name: item.author, kind: 'person' }, writer: { name: version.actor, kind: 'person' }, version: version.id });
+  }
+  return { state, genesis, records, artifacts };
 }
 
 interface Person { name: string; kind: 'person' | 'agent'; email?: string }
-interface Fields { id: string; type: string; title: string; body: string; tags: string[]; createdAt: string; updatedAt: string; author: Person }
+interface Fields { id: string; type: string; title: string; body: string; tags: string[]; createdAt: string; updatedAt: string; author: Person; writer?: Person; version?: string }
 const bytes = (value: unknown): number => new TextEncoder().encode(JSON.stringify(value, null, 2)).length;
 
 /** Longest prefix of text (never splitting a character) for which fits(prefix) holds. */
@@ -102,7 +121,7 @@ export interface Page { number: number; of: number; body: Record<string, unknown
 /** Builds every page of the journey, each under PAGE_LIMIT bytes. Long bodies continue across pages with a `part` marker. */
 export async function readLink(row: LinkRow, secret: string, origin: string, call: Enclave, now = Date.now()): Promise<Page[]> {
   const identity = await openLinkIdentity(secret, row.blob, row.journeyId, row.memberId);
-  const { state, genesis, records } = await readJourney(identity, row.memberId, row.journeyId, call);
+  const { state, genesis, records, artifacts } = await readJourney(identity, row.memberId, row.journeyId, call);
   const mine = state.members[row.memberId]!.member;
   const expires = Math.min(row.expires, mine.expiresAt ? Date.parse(mine.expiresAt) : row.expires);
   if (expires <= now) throw new LinkExpired(expires, row.journeyId, row.memberId);
@@ -114,6 +133,7 @@ export async function readLink(row: LinkRow, secret: string, origin: string, cal
   };
   const shown = itemVersions(records).filter(view => !view.deleted && view.item.itemType !== 'recovery');
   const entries: Fields[] = shown.map(view => ({ id: view.root, type: view.item.itemType, title: view.item.title, body: view.item.body, tags: view.item.tags, createdAt: view.versions[0]!.created, updatedAt: view.item.created, author: who(view.versions[0]!.author) }));
+  entries.push(...artifacts.map(a => ({ ...a, author: who(a.author.name), writer: who(a.writer!.name) })));
   const people = Object.values(state.members).filter(({ member }) => member.id !== row.memberId).map(({ member }) => who(member.id));
   const genesisBody = genesis.body as { name?: string; description?: string; journeyKind?: string };
   const remaining = expires - now;
@@ -125,6 +145,7 @@ export async function readLink(row: LinkRow, secret: string, origin: string, cal
     access: { agentName: mine.name ?? 'Agent', scope: 'read', expiresAt: new Date(expires).toISOString(), expiresInHours: Math.max(0, Math.floor(remaining / 3_600_000)), expiringSoon: remaining < 86_400_000 || remaining < total * 0.2, renewUrl: url, renewHint: `Access ends ${utc(expires)}. To continue, ask the person to open ${url} and extend it with their passkey; the link stays the same.` },
     page: { number, of, next },
     howToWrite: HOW_TO_WRITE,
+    ...(artifacts.length ? { attachments: 'Attachments require the member interface. This link does not offer downloads.' } : {}),
   });
   const next = (n: number): string => `${origin}/a/${secret}?page=${n}`;
   // Measure with the widest page markers so a later `of` or `next` cannot push a page over the limit.

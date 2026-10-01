@@ -9,6 +9,7 @@
   },
   "compatibility_date": "2026-08-22",
   "account_id": "16c42d94e589cc74c99aed7d51687cbc",
+  "r2_buckets": [{ "binding": "ARTIFACT_BLOBS", "bucket_name": "wayfinding-artifact-blobs" }],
   "durable_objects": {
     "bindings": [
       {
