@@ -29,6 +29,12 @@ describe('Stage 1 real CLI and stdio MCP artifacts', () => {
           await failedCommand(file, 'EEXIST', 'download', item.id, '--blob', item.payload.attachments[0].blob.id, '--output', output);
         }
       }
+      const limitBytes = Buffer.alloc(MAX_BLOB_BYTES, 163), limitFile = join(scratch, 'limit.bin'), limitOutput = join(scratch, 'limit-download.bin');
+      await writeFile(limitFile, limitBytes);
+      const limitItem = await command(file, 'add', '--type', 'file', '--title', 'Exact limit', '--file', limitFile);
+      expect(limitItem.payload.attachments[0].blob).toMatchObject({ size: MAX_BLOB_BYTES, ciphertextSize: MAX_BLOB_BYTES + 16 });
+      await command(file, 'download', limitItem.id, '--blob', limitItem.payload.attachments[0].blob.id, '--output', limitOutput);
+      expect((await readFile(limitOutput)).equals(limitBytes)).toBe(true);
       for (const category of ['note','decision','question','learning','tension','practice','success','resource','position','interview','lesson','custom-category']) {
         const item = await command(file, 'create', '--type', category, '--title', category, '--body', 'Alias', '--tags', category + ',custom');
         expect(item.itemType).toBe('document'); expect(item.tags).toEqual([category, 'custom']);
@@ -118,18 +124,6 @@ describe('Stage 1 real CLI and stdio MCP artifacts', () => {
       await failedTool(sdk, 'add', 'explicit local', { type: 'file', title: 'No remote', url: 'https://example.org/file' });
       expect((await tool(sdk, 'list')).length).toBe(9);
     } finally { await sdk.close(); agent.close(); }
-  }, 90_000);
-
-  it('exact decimal 25 MB uploads and downloads through CLI with binary encryption', async () => {
-    const owner = await person(), trip = await journey(owner), agent = await connected(owner, trip), file = await state(agent);
-    try {
-      const bytes = Buffer.alloc(MAX_BLOB_BYTES, 163), binary = join(scratch, 'limit.bin'), output = join(scratch, 'limit-download.bin');
-      await writeFile(binary, bytes);
-      const item = await command(file, 'add', '--type', 'file', '--title', 'Exact limit', '--file', binary);
-      expect(item.payload.attachments[0].blob).toMatchObject({ size: MAX_BLOB_BYTES, ciphertextSize: MAX_BLOB_BYTES + 16 });
-      await command(file, 'download', item.id, '--blob', item.payload.attachments[0].blob.id, '--output', output);
-      expect((await readFile(output)).equals(bytes)).toBe(true);
-    } finally { agent.close(); }
   }, 90_000);
 
   it('interrupted uploads create no artifacts; incomplete and foreign staged references cannot commit', async () => {
