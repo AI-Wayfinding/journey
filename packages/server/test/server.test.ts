@@ -198,8 +198,8 @@ describe('HTTP boundary', () => {
     const assets: Fetcher = { fetch: async () => new Response('<h1>Journey</h1>', { headers: { 'content-type': 'text/html; charset=utf-8' } }), connect: () => { throw new Error('not used'); } };
     const page = await request('/journeys', 'GET', undefined, {}, { ASSETS: assets });
     expect(page.status).toBe(200);
-    expect(page.headers.get('content-security-policy')).toContain("default-src 'self'");
-    expect(page.headers.get('content-security-policy')).toContain("frame-ancestors 'none'");
+    // Exact equality prevents adding unsafe-eval, inline scripts, remote sources or any other permission.
+    expect(page.headers.get('content-security-policy')).toBe("default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     expect(page.headers.get('referrer-policy')).toBe('no-referrer');
     expect(page.headers.get('x-content-type-options')).toBe('nosniff');
     expect(page.headers.get('cross-origin-opener-policy')).toBe('same-origin');

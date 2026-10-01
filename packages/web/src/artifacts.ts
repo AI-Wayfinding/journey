@@ -34,7 +34,7 @@ export function artifactText(payload: ArtifactPayload): string {
     case 'prompt': return c.text;
     case 'document': return c.markdown;
     case 'link': return `${c.url}\n${c.summary}\n${c.notes}`;
-    case 'data': return c.text ?? 'Data view is not available yet. Download the original file.';
+    case 'data': return c.text ?? 'Download the original data file.';
     default: return 'Download the original file.';
   }
 }
@@ -63,11 +63,11 @@ export async function uploadAttachment(ctx: JourneyContext, file: File, path?: s
   await binaryResponse(await fetch(`/v1/journeys/${ctx.id}/blobs/${stage.id}`, { method: 'PUT', credentials: 'same-origin', headers: { ...blobHeaders(ctx), 'X-Wayfinding': '1', 'Content-Type': 'application/octet-stream', 'X-Blob-Descriptor': JSON.stringify(encrypted.descriptor) }, body: new Uint8Array(encrypted.ciphertext).buffer }));
   return { blob: encrypted.descriptor, name: file.name, mime: file.type || 'application/octet-stream', ...(path === undefined ? {} : { path }) };
 }
-export async function attachmentBytes(ctx: JourneyContext, attachment: ArtifactAttachment): Promise<Uint8Array> {
+export async function attachmentBytes(ctx: JourneyContext, attachment: ArtifactAttachment, signal?: AbortSignal): Promise<Uint8Array> {
   const latest = await verifiedJourney(ctx.id, ctx.principal, ctx.keys);
   const descriptor: BlobDescriptor = attachment.blob;
   if (descriptor.journey !== ctx.id) throw new Error('Wrong attachment journey.');
-  const response = await binaryResponse(await fetch(`/v1/journeys/${ctx.id}/blobs/${descriptor.id}`, { credentials: 'same-origin', cache: 'no-store', headers: blobHeaders(ctx) }));
+  const response = await binaryResponse(await fetch(`/v1/journeys/${ctx.id}/blobs/${descriptor.id}`, { credentials: 'same-origin', cache: 'no-store', signal, headers: blobHeaders(ctx) }));
   if (canonical(JSON.parse(response.headers.get('X-Blob-Descriptor') ?? 'null')) !== canonical(descriptor)) throw new Error('Attachment descriptor mismatch.');
   const key = latest.epochs.get(descriptor.epoch);
   currentKey(latest);
