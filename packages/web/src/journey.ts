@@ -1,4 +1,4 @@
-import { canWriteContent, isPersonGuide, createAgeIdentity, generateJourneyKey, newId, open, parseRecord, recipientsHash, seal, sealIdentity, sealControlLabels, signControlProof, unwrapJourneyKey, verifyControlProofs, wrapJourneyKey, meetsMinClientVersion, logDefinitions, readControlProof } from '@ai-wayfinding/core';
+import { canWriteContent, canReadContent, isPersonGuide, createAgeIdentity, generateJourneyKey, newId, open, parseRecord, recipientsHash, seal, sealIdentity, sealControlLabels, signControlProof, unwrapJourneyKey, verifyControlProofs, wrapJourneyKey, meetsMinClientVersion, logDefinitions, readControlProof } from '@ai-wayfinding/core';
 import { plainError, UPDATE_REQUIRED } from './messages.js';
 import type { ControlProof, Envelope, JourneyKey, KeyWrap, LogEntry, LogState, Member, ProtocolRecord } from '@ai-wayfinding/core';
 import { getPersonKeys, rememberJourneyKey } from './keys.js';
@@ -56,15 +56,14 @@ export async function verifiedJourney(id: string, principal: string, keys: Perso
   assertSupported(result.state.minClientVersion);
   const mine = result.state.members[principal]?.member;
   if (!mine || mine.kind !== 'person' || mine.recipient !== keys.recipient || mine.signingKey !== keys.signingKey) throw new Error('You are not a member of this journey.');
-  if (mine.expiresAt && Date.parse(mine.expiresAt) <= Date.now()) throw new Error('Your journey access has expired.');
+  if (!canReadContent(result.state, principal)) throw new Error('Your journey access has expired.');
   if (!epochs.has(result.state.currentEpoch)) throw new Error('Key update pending. A guide needs to finish it.');
   const log = await Promise.all(rows.map(async row => (await readControlProof(row.proof, row.envelope, epochs.get(row.envelope.outside.epoch))).entry));
   return { id, principal, keys, state: result.state, epochs, log, controls: rows.map(row => ({ proof: row.proof, envelope: row.envelope })) };
 }
 export function currentKey(ctx: JourneyContext): JourneyKey {
   if (getPersonKeys() !== ctx.keys) throw new Error('Your keys are locked. Sign in again.');
-  const mine = ctx.state.members[ctx.principal]?.member;
-  if (!mine || mine.expiresAt && Date.parse(mine.expiresAt) <= Date.now()) throw new Error('Your journey access has expired.');
+  if (!canReadContent(ctx.state, ctx.principal)) throw new Error('Your journey access has expired.');
   assertSupported(ctx.state.minClientVersion);
   const key = ctx.epochs.get(ctx.state.currentEpoch);
   if (!key) throw new Error('Key update pending');

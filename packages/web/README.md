@@ -16,6 +16,14 @@ Usable private and journey keys stay in memory. They are cleared on sign-out, ta
 
 The recovery identity appears once when a journey starts. Save both lines shown on the recovery screen; the second line is the encrypted recovery wrap. The server cannot retrieve the identity. The journey recovery identity and wrap are separate from the account backup codes; keep both for restoring the journey's encrypted history.
 
+## Journey settings and access
+
+A guide manages people independently of their read-only or read-write content role. Either kind of guide can edit the journey name, description and default role for new people. Journeys remain private and invitation-only; visibility changes and other joining policies are not available.
+
+Read-only people can change their own name and email choice, approve and manage their own agents, create and renew read-only agent links, and leave. The last guide cannot leave or give up guide authority. Removal revokes the removed person's agents too. A remaining guide completes key rotation before further content writes.
+
+The browser verifies signed controls bound to their encrypted labels before showing settings or access. Unknown controls or a newer required version clear the view and show an update message; approval is not needed again. Server schema v2 purges legacy journeys rather than reading or migrating them. Clients at 0.1.3 or older cannot read new journeys.
+
 ## Local tests
 
 From the repository root, run:

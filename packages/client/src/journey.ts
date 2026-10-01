@@ -18,7 +18,7 @@ export class JourneyClient {
   private readonly fetcher: typeof fetch;
   private readonly keys = new Map<number, JourneyKey>();
   constructor(readonly session: RememberedAgent, private readonly options: JourneyOptions = {}) { this.fetcher = options.fetch ?? networkFetch; }
-  private async request<T>(path: string, method = 'GET', data?: object): Promise<T> {
+  private async request<T>(path: string, method = 'GET', data?: Record<string, unknown>): Promise<T> {
     if (this.session.expiresAt <= Date.now()) throw new Error('Your journey agent access has expired. Connect again.');
     const body = data === undefined ? '' : JSON.stringify(data);
     const route = '/v1' + path;
@@ -60,7 +60,7 @@ export class JourneyClient {
     const checked = await verifyControlProofs(rows.map(row => row.proof), rows.map(row => row.envelope), { journey: this.session.journeyId, creator: rows[0]!.proof.body.creator as Member }, [...epochs.values()]);
     if (!checked.ok || checked.state.journey !== this.session.journeyId) throw new Error(historyError);
     const mine = checked.state.members[this.session.principal]?.member;
-    if (!mine || mine.kind !== 'agent' || mine.signingKey !== this.session.signingKey || mine.recipient !== this.session.recipient || mine.expiresAt && Date.parse(mine.expiresAt) <= Date.now()) throw new Error('Access to this journey has ended');
+    if (!mine || mine.kind !== 'agent' || mine.signingKey !== this.session.signingKey || mine.recipient !== this.session.recipient) throw new Error('Access to this journey has ended');
     if (!canReadContent(checked.state, this.session.principal)) throw new Error('Access to this journey has ended');
     if (!meetsMinClientVersion(CLIENT_VERSION, checked.state.minClientVersion)) throw new Error(updateError());
     if (!epochs.has(checked.state.currentEpoch)) throw new Error('The journey key changed. Ask a member to reconnect this agent.');
