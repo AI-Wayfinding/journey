@@ -14,6 +14,7 @@ test('signed settings, separate role and guide authority, and read-only personal
     await guide.page.getByRole('button', { name: 'Create journey' }).click();
     await guide.page.getByLabel('I have saved my recovery key somewhere safe.').check();
     await guide.page.getByRole('button', { name: 'Continue to journey' }).click();
+    await expect(guide.page).toHaveURL(/\/journeys\/[^/]+$/);
     await expect(guide.page.getByRole('heading', { name: 'Stage zero', exact: true })).toBeVisible();
     const path = new URL(guide.page.url()).pathname, id = path.split('/').at(-1)!, guideId = await principal(guide.page, id);
     await guide.page.goto(path + '/members');

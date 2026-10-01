@@ -289,7 +289,7 @@ async function home(): Promise<void> {
   const keys = await requireKeys(); if (!keys) return;
   const rows = await listings();
   const checked: JourneyListing[] = [];
-  for (const row of rows) { const ctx = await verifiedJourney(row.id, row.principal, keys); checked.push({ id: row.id, principal: row.principal, name: String(ctx.log[0]?.body.name ?? row.name) }); }
+  for (const row of rows) { const ctx = await verifiedJourney(row.id, row.principal, keys); checked.push({ id: row.id, principal: row.principal, name: ctx.state.settings!.name }); }
   render(`<section class="panel"><p class="eyebrow">YOUR JOURNEYS</p><h1>A place to find your way</h1><p>Only people you invite can read what's inside.</p><div class="actions"><a class="button" href="/new">Start a journey</a></div></section><section class="panel"><h2>Journeys</h2>${checked.length ? `<ul class="list">${checked.map(row => `<li><a href="/journeys/${escape(row.id)}">${escape(row.name)}</a></li>`).join('')}</ul>` : '<p>No journeys yet. Start one when you are ready.</p>'}</section><section class="panel"><h2>Have an invitation?</h2><p>If you signed in from an invitation, paste the link here after you confirm your passkey.</p><form id="join-link"><label for="invite-link">Invitation link</label><input id="invite-link" name="invite-link" type="url" placeholder="https://app.wayfinding.support/invite#…" required /><div class="actions"><button type="submit">Open invitation</button></div></form></section>`);
   form('join-link', async f => { const url = new URL(input(f, 'invite-link')); if (url.origin !== location.origin || url.pathname !== '/invite' || !/^[A-Za-z0-9_-]{43,}$/.test(url.hash.slice(1))) throw new Error('This is not a Wayfinding invitation link.'); navigate('/invite' + url.hash); });
 }

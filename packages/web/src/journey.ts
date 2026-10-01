@@ -1,4 +1,4 @@
-import { canWriteContent, canControl, createAgeIdentity, generateJourneyKey, newId, open, parseRecord, recipientsHash, seal, sealIdentity, sealControlLabels, signControlProof, unwrapJourneyKey, verifyControlProofs, wrapJourneyKey, meetsMinClientVersion, logDefinitions, readControlProof } from '@ai-wayfinding/core';
+import { canWriteContent, isPersonGuide, createAgeIdentity, generateJourneyKey, newId, open, parseRecord, recipientsHash, seal, sealIdentity, sealControlLabels, signControlProof, unwrapJourneyKey, verifyControlProofs, wrapJourneyKey, meetsMinClientVersion, logDefinitions, readControlProof } from '@ai-wayfinding/core';
 import { plainError, UPDATE_REQUIRED } from './messages.js';
 import type { ControlProof, Envelope, JourneyKey, KeyWrap, LogEntry, LogState, Member, ProtocolRecord } from '@ai-wayfinding/core';
 import { getPersonKeys, rememberJourneyKey } from './keys.js';
@@ -123,7 +123,7 @@ export async function letIn(ctx: JourneyContext, pending: { principal: string; r
   await appendEntry(ctx, 'member.add', { member, grants: [], kind: 'person' }, wraps.map(w => ({ principal: w.recipient, epoch: w.epoch, wrap: w.ciphertext })));
 }
 export async function rotatePending(ctx: JourneyContext): Promise<boolean> {
-  if (!ctx.state.pendingRotation || !canControl(ctx.state, ctx.principal, 'Rotate')) return false;
+  if (!ctx.state.pendingRotation || !isPersonGuide(ctx.state, ctx.principal)) return false;
   const key = generateJourneyKey(ctx.state.currentEpoch + 1);
   const wraps = await wrapJourneyKey(key, Object.values(ctx.state.members).map(({ member }) => ({ id: member.id, recipient: member.recipient })));
   const control = await makeControl(ctx, 'key.rotate', { epoch: key.epoch, recipientsHash: await recipientsHash(ctx.state.members) }, key);
