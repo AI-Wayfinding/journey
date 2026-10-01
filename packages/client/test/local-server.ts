@@ -26,7 +26,10 @@ export function localServer() {
 beforeAll(async () => {
   await rm(scratch, { recursive: true, force: true });
   await mkdir(scratch, { recursive: true });
-  worker = spawn(process.execPath, [join(root, 'node_modules/wrangler/bin/wrangler.js'), 'dev', '--config', join(root, 'packages/server/test/wrangler.jsonc'), '--port', '18787', '--local', '--persist-to', scratch], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'] });
+  // API-only suites must not depend on a previous browser build creating assets.
+  const assets = join(scratch, 'assets');
+  await mkdir(assets, { recursive: true });
+  worker = spawn(process.execPath, [join(root, 'node_modules/wrangler/bin/wrangler.js'), 'dev', '--config', join(root, 'packages/server/test/wrangler.jsonc'), '--assets', assets, '--port', '18787', '--local', '--persist-to', scratch], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'] });
   worker.stdout!.on('data', (value: Buffer) => { workerOutput = (workerOutput + value.toString()).slice(-8000); });
   worker.stderr!.on('data', (value: Buffer) => { workerOutput = (workerOutput + value.toString()).slice(-8000); });
   await ready();
