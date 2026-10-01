@@ -25,8 +25,9 @@ test('stored supported types, tags, signed attribution, versions, whole-artifact
     const trip = await createTrip(owner.page), ownerId = await principal(owner.page, trip.id);
     const secret = Buffer.from('PRIVATE attachment bytes\0\xff');
     const paths = new Map<string, string>();
+    const hostile = '<script>window.__artifactExecuted = true</script><img src="https://example.org/should-not-fetch" onerror="window.__artifactExecuted = true">';
     for (const type of ['skill','prompt','document','image','file','data','link']) {
-      const title = `Stored ${type}`; await add(owner.page, trip.path, type, title);
+      const title = `Stored ${type}`; await add(owner.page, trip.path, type, title, ['document','data'].includes(type) ? hostile : 'Private artifact text');
       await expect(owner.page.locator('#artifact-type option')).toHaveCount(7);
       await expect(owner.page.locator('#authored-by')).toHaveCount(0);
       await owner.page.getByLabel('Tags (comma-separated)').fill('Custom, Custom, custom');
@@ -36,6 +37,11 @@ test('stored supported types, tags, signed attribution, versions, whole-artifact
       if (type !== 'link' && type !== 'data') await owner.page.getByLabel('Add attachments').setInputFiles({ name: 'private.bin', mimeType: 'application/octet-stream', buffer: secret });
       if (type === 'skill') await owner.page.getByLabel('Package paths').fill('scripts/private.bin');
       const path = await saveReload(owner.page, title); paths.set(type, path);
+      if (['document','data'].includes(type)) {
+        await expect(owner.page.locator('main pre').first()).toHaveText(hostile);
+        await expect(owner.page.locator('main script, main img')).toHaveCount(0);
+        expect(await owner.page.evaluate(() => Object.hasOwn(window, '__artifactExecuted'))).toBe(false);
+      }
       await expect(owner.page.locator('#artifact-author')).toContainText(ownerId);
       await expect(owner.page.locator('#versions')).toContainText('Writer: Person · ' + ownerId);
       await expect(owner.page.getByText('Tags: Custom, custom, decision', { exact: true }).first()).toBeVisible();
