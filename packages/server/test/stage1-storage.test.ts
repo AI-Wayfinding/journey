@@ -67,6 +67,16 @@ describe('Stage 1 authenticated local R2 lifecycle', () => {
     expect(await stored(j)).not.toContain('CALLER EXTRA');
   });
 
+  it('requires the completion flag even when interrupted upload bytes and a descriptor exist', async () => {
+    const { owner, j } = await fixture(), blob = await staged(j, owner);
+    expect((await upload(j, owner, blob)).status).toBe(201);
+    await runInDurableObject(enclaveStub(j.id), (_o, s) => { s.storage.sql.exec('UPDATE blobs SET complete=0 WHERE id=?', blob.descriptor.id); });
+    const before = await stored(j);
+    expect((await submit(j, owner, await artifact(j, owner, 'artifact.create', await body(owner, [blob]), payload([blob])))).status).toBe(409);
+    expect(await stored(j)).toBe(before);
+    expect((await request(`/v1/journeys/${j.id}/blobs/${blob.descriptor.id}`, 'GET', undefined, as(owner))).status).toBe(404);
+  });
+
   it('holds a stage exclusively during upload and commits attachment batches all-or-nothing', async () => {
     const { owner, j } = await fixture(), first = await staged(j, owner), second = await staged(j, owner);
     let entered!: () => void, release!: () => void;
