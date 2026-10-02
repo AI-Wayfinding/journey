@@ -5,7 +5,7 @@ import { agentWritesItem, requestAgent } from './agent.js';
 
 import { browserPerson, signUp } from './person.js';
 const calls = (page: Page) => page.evaluate(() => window.__passkeyCalls);
-const journeyHeaders = { 'X-Client-Version': '0.1.5', 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': 'artifact-v1' };
+const journeyHeaders = { 'X-Client-Version': '0.1.6', 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': 'artifact-v1', 'X-Project-Format': 'project-v1' };
 test('account name and per-journey email visibility are shared only when chosen', async ({ browser }) => {
   const owner = await browserPerson(browser), guest = await browserPerson(browser);
   try {
@@ -285,7 +285,7 @@ test('two people share a journey with PRF passkeys and same-origin assets', asyn
     console.log('Sign-in taps: 1 get');
     await bob.page.getByRole('link', { name: 'Our shared path' }).click();
     await bob.page.getByRole('link', { name: 'First observation' }).click();
-    const bobWrapsResponse = await bob.page.request.get('/v1' + journeyPath + '/wraps/me', { headers: { 'X-Client-Version': '0.1.5', 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': 'artifact-v1', 'X-Principal': bobPrincipal } });
+    const bobWrapsResponse = await bob.page.request.get('/v1' + journeyPath + '/wraps/me', { headers: { ...journeyHeaders, 'X-Principal': bobPrincipal } });
     const bobWraps = (await bobWrapsResponse.json()) as { wraps: { epoch: number; wrap: string }[] };
     expect(bobWraps.wraps.map(w => w.epoch)).toContain(1);
     const agent = await requestAgent(request, journeyPath.split('/').at(-1)!, 'Proposed <guide>');
@@ -307,12 +307,12 @@ test('two people share a journey with PRF passkeys and same-origin assets', asyn
     await agentWritesItem(request, agent, journeyPath.split('/').at(-1)!);
     await alice.page.getByRole('link', { name: 'People & agents' }).click();
     await expect(alice.page.getByText('Alice’s guide', { exact: false })).toBeVisible();
-    const beforeRenameWraps = await (await alice.page.request.get('/v1' + journeyPath + '/wraps/me', { headers: { 'X-Client-Version': '0.1.5', 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': 'artifact-v1', 'X-Principal': alicePrincipal } })).json() as { wraps: { epoch: number }[] };
+    const beforeRenameWraps = await (await alice.page.request.get('/v1' + journeyPath + '/wraps/me', { headers: { ...journeyHeaders, 'X-Principal': alicePrincipal } })).json() as { wraps: { epoch: number }[] };
     alice.page.once('dialog', dialog => void dialog.accept('<renamed guide>'));
     await alice.page.locator(`[data-rename="${agent.principal}"]`).click();
     await expect(alice.page.getByText('<renamed guide>', { exact: false })).toBeVisible();
     expect(await alice.page.locator('strong').filter({ hasText: '<renamed guide>' }).count()).toBe(1);
-    const afterRenameWraps = await (await alice.page.request.get('/v1' + journeyPath + '/wraps/me', { headers: { 'X-Client-Version': '0.1.5', 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': 'artifact-v1', 'X-Principal': alicePrincipal } })).json() as { wraps: { epoch: number }[] };
+    const afterRenameWraps = await (await alice.page.request.get('/v1' + journeyPath + '/wraps/me', { headers: { ...journeyHeaders, 'X-Principal': alicePrincipal } })).json() as { wraps: { epoch: number }[] };
     expect(afterRenameWraps.wraps.map(w => w.epoch)).toEqual(beforeRenameWraps.wraps.map(w => w.epoch));
     await expect(alice.page.locator('[data-rename]')).toHaveCount(1);
     await alice.page.getByRole('link', { name: 'Back to journey' }).click();
@@ -332,9 +332,9 @@ test('two people share a journey with PRF passkeys and same-origin assets', asyn
     await expect(alice.page.getByRole('heading', { name: 'Only after Bob left', level: 1 })).toBeVisible();
     await bob.page.getByRole('link', { name: 'Back to journey' }).click();
     await expect(bob.page.getByText('You no longer have access to this journey.')).toBeVisible();
-    const denied = await bob.page.request.get('/v1' + journeyPath + '/records', { headers: { 'X-Client-Version': '0.1.5', 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': 'artifact-v1', 'X-Principal': bobPrincipal } });
+    const denied = await bob.page.request.get('/v1' + journeyPath + '/records', { headers: { ...journeyHeaders, 'X-Principal': bobPrincipal } });
     expect(denied.status()).toBe(403);
-    const afterRemoval = await alice.page.request.get('/v1' + journeyPath + '/log', { headers: { 'X-Client-Version': '0.1.5', 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': 'artifact-v1', 'X-Principal': (await alice.page.request.get('/v1/journeys', { headers: journeyHeaders }).then(r => r.json()) as { journeys: { principal: string; id: string }[] }).journeys.find(j => journeyPath.endsWith(j.id))!.principal } });
+    const afterRemoval = await alice.page.request.get('/v1' + journeyPath + '/log', { headers: { ...journeyHeaders, 'X-Principal': (await alice.page.request.get('/v1/journeys', { headers: journeyHeaders }).then(r => r.json()) as { journeys: { principal: string; id: string }[] }).journeys.find(j => journeyPath.endsWith(j.id))!.principal } });
     const envelopes = (await afterRemoval.json()) as { log: { envelope: Envelope }[] };
     const newest = envelopes.log.at(-1)!.envelope;
     expect(newest.outside.epoch).toBeGreaterThan(Math.max(...bobWraps.wraps.map(w => w.epoch)));
@@ -372,7 +372,7 @@ test('two people share a journey with PRF passkeys and same-origin assets', asyn
     const supportPrincipal = ((await supportLists.json()) as { journeys: { id: string; principal: string }[] }).journeys.find(j => journeyPath.endsWith(j.id))!.principal;
     const supportWraps = await (await support.page.request.get(`/v1${journeyPath}/wraps/me`, { headers: { ...journeyHeaders, 'X-Principal': supportPrincipal } })).json() as { wraps: { epoch: number }[] };
     expect(supportWraps.wraps.map(w => w.epoch)).toEqual([1, newest.outside.epoch]);
-    expect((await support.page.request.post(`/v1${journeyPath}/seq`, { data: {}, headers: { 'X-Client-Version': '0.1.5', 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': 'artifact-v1', 'X-Wayfinding': '1', Origin: 'http://localhost:18787', 'X-Principal': supportPrincipal } })).status()).toBe(403);
+    expect((await support.page.request.post(`/v1${journeyPath}/seq`, { data: {}, headers: { ...journeyHeaders, 'X-Wayfinding': '1', Origin: 'http://localhost:18787', 'X-Principal': supportPrincipal } })).status()).toBe(403);
     expect(support.requests.every(url => new URL(url).hostname === 'localhost')).toBeTruthy();
   } finally { await alice.context.close(); await bob.context.close(); await support.context.close(); }
 });
