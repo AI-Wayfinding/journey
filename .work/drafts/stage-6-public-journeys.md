@@ -1,0 +1,344 @@
+# Stage 6: public journeys, listing, joining and sharing
+
+## Summary <!-- work:summary -->
+Deliver private or public journey creation, fixed visibility for this release, listing to the permitted audiences, all three joining policies for public journeys and invitation-only or join-on-approval for private journeys, guide-controlled invitations/cancellation/refusal, and author-controlled cross-journey copies. An existing member delivers required keys when admission is committed; no instant private joining or extra key holder is introduced. Public non-private content is readable without membership, including in unlisted public journeys, and labelled **Public: not encrypted** and **Verified**. Content writes still require membership and the current content role. Apply member-controlled public attribution without publishing private source journeys or account details. Deliver browser and CLI/MCP workflows and preserve existing read-only agent links. Agents get exactly their member's current access, with no special agent access rules. This is a draft implementation plan, not approval, shipped functionality or passing evidence.
+
+## Why <!-- work:rationale -->
+Ontology section 9 Stage 6, sections 5–7's access/boundary rows, section 10's built-code gaps, and decision 0001 D1–D5, D7, D11–D14, D18–D19, D27–D28, D30–D41 and D43–D44 define the outcome, as amended by the recorded operator decisions below and the current direction that agents get exactly their member's access and applets are powerful by design. That direction replaces this draft's former original-agent-limit/person-only-control restrictions and applet-only shared-store ban; approval bindings, member authority and unauthorized-data boundaries remain. The no-instant-private-joining decision supersedes D41 for private journeys: only invitation or approval admits a person, and an existing member supplies keys. D36 replaces named-recipient sharing and visible private-artifact metadata. D43 settles public attribution: public shows display name and picture; journeys only shows "a member"; a private source journey is never named publicly. D44's interview-subject exception remains within its exact audience. The operator accepted every remaining recommendation and chose the server-verified/TLS public projection labelled simply "Verified". No recorded product question remains unanswered.
+
+Main at **889b218** is the source baseline. Stage 0 and Stage 1 are present; Stage 2 projects (client 0.1.6) are being built. Stage 3 private artifacts (planned 0.1.7) is on hold while Dan chooses device-only storage or one padded encrypted vault per member on the server. Stage 4 is sensemaking rounds; Stage 5 supplies the HTML/applet runtime. Stage 6 depends on the accepted and delivered preceding stages, including Stage 3's private-copy/identity contract and Stage 4's interview-subject/contribution rules. Stage 3's hold blocks Stage 6 implementation readiness; it does not permit publishing private content or existence. Re-read the accepted preceding specs and integrated tree before decomposition. Use **next client version after the preceding stage**, with capability **public-v1**, not a guessed numeric release. Ontology approval and delivery of preceding-stage contracts remain prerequisites; all Stage 6 questions below are closed by recorded decisions, and promotion grants no implementation approval.
+
+All access, listing-audience, admission, agent-inheritance, copy-authority, privacy-projection, lifecycle, revision and version decisions belong in production Bend functions in packages/rules, stated in LAWS.bend and proved by PROOF.bend. TypeScript validates exact formats, signatures, commitments, lengths, identities, times and bindings; copies named fields; encrypts/decrypts; stores/transports; and projects verified Bend results. Extend scripts/check-bend-boundary.mjs without weakening existing checks. The verified signed ControlProof chain is the only journey authority. Registry indexes, directory rows, ciphertext labels, unsigned request bodies and cached roles cannot grant access. Newly admitted people's self-signed acceptance must be authorized by a current guide-signed admission policy or invitation; it is not an arbitrary self-signed member.add.
+
+A hostile or careless caller must not convert visibility; turn listing into private-content access; read an unlisted private name through a public join landing; join under a stale/cancelled/refused policy or invitation; obtain keys before committed admission or after removal/expiry; obtain a role or guide grant they chose themselves; impersonate an applicant; give agents independent membership or access different from their member's current access; race approval, cancellation, policy changes or rotation; use public reads to mutate content; gain writes from guide status; copy another author's artifact; expose private-artifact content or existence through any public/member/link projection, count, search, blob, origin, archive or unauthorized applet responses/stores; publicly reveal a journeys-only person's name/picture/email/key-linked identity or a private source journey; smuggle extra fields; or omit versions/capabilities to receive partial content. Public non-private content is deliberately readable by anyone. Already received public content, identities, keys and copies cannot be recalled.
+
+Out of scope: visibility conversion; direct member-to-member grants; automatic copy synchronization; account deletion; recovery/PRF/key-persistence changes; a general rollback checkpoint; general Stage 7 shared-read refactoring/full client-link parity or drops; unrelated hardening; provisioning/deployment/package publication and live-service evidence. Preserve Stage 0 personal controls and last person guide, with agent access equal to the member's current access, Stage 1 byte limits/viewer safety, Stage 2 placement/filtering, Stage 3 invisible private storage, Stage 4 private interviews and confirmed contributions, Stage 5 frame/network boundaries and viewer-authorized applet access, and the app header/footer. Live agent-link decryption remains D31's explicit read-only exception, never a precedent for ordinary private-joining escrow.
+
+## Decisions taken
+
+These choices incorporate both recorded operator-decision sections. The former Questions for Dan are closed below; recommendations are now accepted rules, not dispatch blockers. All stages remain in MVP scope, while this draft owns only Stage 6.
+
+1. **Separate storage from visibility.** Add strict `public-v1` discriminants to public payloads and descriptors rather than pretending plaintext is an AES-GCM envelope. Keep the existing signed chain/position/content digest binding and stable journey/artifact/version/comment IDs. A readable public JSON payload is exactly `{format:'public-v1', outside:{v:1,id,journey,seq,createdAt,size}, record:{type,typeVersion,body}}`; size is the UTF-8 length of canonical JSON for record, at most 1,048,576 bytes. Its proof's envelopeHash commits the whole object. Public binary descriptors are exactly `{format:'public-v1',v:1,journey,id,size,digest}`, with SHA-256 of the raw bytes and size at most 25,000,000. No nonce, fictional encryption epoch or ciphertextSize. Retain eight attachments per version and immutable descriptors/live-reference rules from Stage 1. Strict content decoders continue to constrain types and payload fields. Unsupported discriminants, altered lengths/digests/IDs, foreign references and caller-selected bucket paths fail. Storage addressing is an opaque journey/artifact-copy namespace with a protection discriminant, not a name-derived path or a visibility-keyed identity. Future conversion can append new protected payloads/descriptors without changing logical identity; this stage exposes no conversion control, route or settings toggle.
+2. **Control and profile confidentiality in public journeys.** Extend proof dispatch with `format:'public-v1'` creation/settings/listing/admission/attribution/copy actions; older proof formats retain their exact validators. Public ordinary content uses the readable container, but member-only controls, profiles, emails and full origin metadata use a separate membership-metadata key and encrypted labels. Public journey membership still has key rotation/wraps for that metadata; public content needs no key. Anonymous readers receive a safe public projection, never raw membership history, wraps, internal IDs/keys/account mappings, encrypted member labels, operator exports or all control bodies. Server verification uses the full signed chain; projections do not pretend to be independently verifiable author-signed originals. Anonymous readers receive a server-verified projection over TLS labelled simply "Verified", without anonymous signing identity or raw full chain; this does not provide independent author verification or protection from a malicious server. No additional visible trust label is added; member readers retain full pinned-chain verification. Guide settings/admission authority works for either content role. Pending metadata-key rotation blocks new admissions/member wrap delivery and ordinary signed writes until completed, but not authorized controls required to complete rotation. Public reads remain available; removal cannot make public content secret.
+3. **Settings and revision contracts.** Genesis signs fixed visibility, initial listing, joining policy and defaultRole together. Private creation starts unlisted; public creation explicitly selects an allowed listing audience. Settings retain existing name/description bounds and extend with exact listing strings `unlisted`, `signed-in`, `anyone`; Bend permits only the first two for private. Private joining policy permits only invitation-only or join-on-approval; reject an immediate policy at creation, settings, replay and admission. Public journeys permit all three policies. Use independent current revisions for settings, each invitation, each applicant request and each person's attribution. Each change signs the observed predecessor and conflicts with 409 on stale or no-op changes. A minimum-raising request satisfies its resulting capability boundary. Visibility changes always fail, even for guides and even during export/import. No deletion/recreation is offered as conversion. DefaultRole is applied from the policy revision committed with admission, not from a later settings value and not from the caller's claimed role. Existing members are unchanged by a default-role edit.
+4. **Listing is a narrow index, not authority.** Add `/v1/directory` alongside, not in place of, the member's `/v1/journeys`. Return only journey ID, approved listing name/short description, fixed visibility, listing audience, joining policy and default role. No creator email, member count/list, activity/storage metrics, account fields, private-artifact counts or origin references. Use bounded pages of at most 100 entries, opaque validated cursors and literal text search over only approved listing fields; escape text, never fetch URLs or interpolate caller SQL. No private full-text content search. Anonymous callers see only public/anyone listings; normal signed-in people see signed-in listings as well. Recovery sessions confer no signed-in directory privileges. A live approved agent uses its adding person's current signed-in entitlement with exactly that person's current access, not the registry operator view or a special agent directory policy; expired/removed agents have no such entitlement but may make the same anonymous public read as anyone. Links remain link-scoped and are not signed-in-person credentials. Every directory page rechecks authoritative audience/revision; a stale registry row cannot leak a now-unlisted entry. Cross-object indexing uses versioned, idempotent receipts/outbox repair and authoritative rechecks rather than claiming a registry/Enclave distributed transaction.
+5. **Discovery and public-read API.** Use separate anonymous `/v1/public/journeys/:id/protocol` and `/v1/public/journeys/:id` overview/list/search/show/versions/comments/blob read routes, leaving authenticated member/control routes protected. The negotiation route returns only format/version requirements and an unknown/private ID has the same 404 response. Public content remains readable by exact URL when unlisted or listed only to signed-in people; those settings affect directory discovery only. Join landing returns only the minimal policy/type fields needed to request/join; unlisted private name/description are absent until authorized listing or membership. Compose Stage 2 main/project/all selectors and existing filters through a narrow core public projection; unknown project is 404, malformed selector/cursor 400, stale revision 409, update-required 409 with no content. Public pages exclude deleted/recovery/private content before filtering/counting/pagination, not afterwards. Response cursors bind audience, filters and current projection revision; changed revision requires restarting rather than mixing attribution or visibility snapshots. Use no-store for dynamic projections and protected data; public blobs have checked digest/length and safe attachment disposition, never privileged cookies or raw R2 access. Stage 1/5 viewers govern rendering. HTML retains its no-journey-access restriction. Applets are powerful by design and may read and act with exactly the current viewer's authorized access, including their own private data and authorized shared-store writes. Do not add an applet-only access restriction or blanket shared-store ban. A signed-out viewer has public read access only; a hostile applet must not obtain member keys, read another person's unauthorized private data or cause a shared response/store to disclose that data. Any deliberate author publication uses the same authorization and confirmation as other clients. HTML remains inert with no journey access.
+6. **Admission is policy replay, not server authorship.** A guide signs policy activation in the chain. A person applicant signs their journey-scoped principal/public keys, request ID, observed policy revision and acceptance of its default role. Bend accepts an immediate self-admission only for a public journey against that current verified guide policy; private journeys reject it regardless of caller credentials; guide-approved admission additionally binds a current guide-signed approval to the exact request/key set; invitation admission binds a current guide-signed one-use invitation and the applicant's secret proof/acceptance. These are explicit new control variants, not forged guide member.add entries or caller-supplied accessChanges. Replay checks the policy at entry time and the server rechecks current state/time at commit. No applicant can grant guide authority or enroll an agent; people still add their own approved agents through Stage 0. The existing signed-in/passkey person flow supplies account authentication; approved agents act with exactly their member's access, including authorized discovery, requests and guide controls, while signing with their own approved binding rather than impersonating a person. They cannot create independent person membership. A read-only person may request/join without content-write authority. Approved agents may read/use/share and perform controls with exactly their adding person's current member access, with no separate agent role cap or person-only operation rule. Their adding person's admission to another journey does not enroll all agents there automatically; each agent still needs that person's approval in the destination.
+7. **Requests and invites.** Use journey-scoped random IDs, exact named-field bodies and signed transitions: requests `pending -> admitted|refused|withdrawn`, invitations `live -> consumed|cancelled|expired`. A guide of either role issues/cancels invites and approves/refuses requests; applicants withdraw their own request. One live request per account/journey; retry returns the same pending request, an already-active person returns current membership, and changed keys require withdrawal/new request. A refused/withdrawn request cannot replay as admitted; refusal ends that request only, and a fresh request is allowed. There is no persistent refusal block across policies. Invitations use the existing 32-byte fragment secret/hash scheme, one use, bounded expiry and existing seven-day maximum; store only its hash, never secret or transient delivery email in logs. Cancellation and acceptance serialize within the journey authority object. Policy changes invalidate uncommitted acceptance proofs; live invites survive policy/default-role changes until cancellation/expiry, while pending applicants refresh their signed acceptance against the current policy/default role before admission. A settings edit never activates pending membership; show these consequences before save. Approval/cancellation/refusal each uses the current request/invite predecessor. Rate limit submission/delivery without logging secrets/content, and retain only minimal signed outcomes for replay; pending rows are not membership. Preserve temporary support read-only/expiry restrictions; ordinary default roles cannot upgrade support membership.
+8. **Existing-member key delivery; no instant private joining.** Private journeys allow invitation-only or join-on-approval, never immediate self-admission. An existing authorized member holding the keys prepares recipient-bound wraps and delivers them with committed invitation/approval admission. The guide signs admission authority; an existing key-holding member may supply wraps without gaining guide authority. No always-online service, service registration, journey-server escrow, broker guide credential, plaintext key storage or new external key holder is introduced. Public immediate admission grants public content access without keys; member-only metadata becomes usable when an existing member supplies its wraps, and the interface reports waiting for member keys honestly rather than promising offline delivery. Wraps bind the exact admitted account/key set, policy revision and current epoch; release rechecks committed membership, recipient, rotation and removal/expiry. Prepare wraps before commit where needed, expose them only after committed admission, and keep retries recoverable through durable receipts/outbox without claiming a Registry/journey distributed transaction. No uncommitted, substituted, refused, cancelled, removed or expired recipient receives keys. Newly admitted members receive all undeleted ordinary history, including historical wraps after rotation, but never author-private/D44-excluded content. Re-admission is new membership, not revival of project/round grants. New-agent historical-wrap backlog remains outside this node. If no existing member with the keys is available, show waiting for member key delivery, not instant private join success. Prove this within joining-authority using local member clients and fault injection, not a service harness.
+9. **Shared copies use Stage 3 identity and audience.** Reuse the accepted stable author identity and copy records from Stage 3; do not invent identity by email or treat a destination principal ID as proof of authorship. Require signed source proof, verified original author/copy identity, current source read/content-write authority as required by the ontology access table, and current destination membership/content-write authority. For an agent author, require that same agent's verified destination binding and current member access; an adding person is not automatically the author of an agent-created artifact. An author's agent may act with exactly the author's access through the accepted Stage 3 author binding. Copy selects one version and its referenced attachments only, with no comments, earlier versions, round/interview relationships or automatic synchronization; preview that selection before confirmation. Copy creates new destination artifact/version/blob IDs, independent deletion/placement/head, retaining immutable original author and a separately authenticated copy writer. Bind the copied source version digest to destination creation and retain the full origin only in author-authorized private storage; destination readers see a source name/link only for a public source; full private origin is author-only in Stage 3 storage, never destination-member or public disclosure. Keep source attestations, original source principal IDs/keys and private-source digests on the protected verification path. Anonymous output must use destination-scoped attribution identifiers, not source IDs, signatures, hashes, blob addresses or URLs that let a caller recover/link the private origin. A public destination cannot publish the original source proof as its copy provenance. Member verification preserves the original-author binding through Stage 3's accepted protected identity contract. Do not use legacy unsigned sharedFrom as authority. Re-encrypt ordinary bytes for a private destination; store ordinary public destination bytes readably. Never reuse a source bucket key, source epoch/nonce or inaccessible attachment reference. No source edit, source deletion or destination deletion silently changes another copy. Stage 2 placement starts unassigned and explicit destination placement must name one same-journey project.
+10. **Private copies stay on the private path.** Device-only Stage 3 means no private-copy record, blob, index entry, count or provenance goes to the journey server; the author saves the destination association locally and accepts its synchronization limits. Padded-vault Stage 3 means copies, versions, comments, attachments and provenance stay inside that member's accepted padded encrypted vault, using its concealment/access rules; the public journey APIs never enumerate or decode vault entries. In both cases a private artifact shared to a public journey stays private and invisible, not a plaintext public record with an access flag. Stage 4's D44 subject read is preserved only through its accepted private interview mechanism; labels, source subject IDs and round participation never become public or grant destination readers access. Copying confirmed findings copies the already-shared document, not interviews/transcripts or private related-artifact references. Counts/search/pagination/navigation/export/blob cleanup/applet data exclude private items for unauthorized viewers before aggregation. Agent links exclude private artifacts for every viewer, including the author; no author credential parameter overrides D31. Use tests for both storage adapters and explicit D44 fixtures, with opaque planted private names, IDs, sizes, timestamps and source names searched across storage/output/log capture.
+11. **Public attribution projection.** Implement D43 as a verified self-only per-journey person profile control, defaulting existing and new profiles to journeys only, with explicit opt-in and a public name/picture preview. Copy public visibility/display name/profile-picture reference by name, separate from account name/email/passkeys. Keep the existing journey email opt-in member-only. A guide cannot change someone else's visibility. Absent approved publication fields project to "a member", not account email, encrypted-label hashes, principal IDs or inferred names. Member readers still see normal author identity. Profile pictures are bounded uploaded image references validated with Stage 1 limits and safe image rendering, not remotely fetched avatars or caller-supplied HTML; public availability requires explicit profile visibility. Public copies consult the current authorized attribution binding, not a stale name embedded in the content/proof. Version writers, commenters, confirmed contributors and project/round participants use the same safe identity projection where exposed; private interview subjects/relationships are absent. Agent credit inherits the member's per-journey visibility: show an explicitly approved agent name and the person's approved public credit when public, otherwise "a member"; never publish proposed agent names. Nonmembers see project/round purpose/state and authorized shared content but no participant/facilitator/subject/member rosters. Shared writers/contributors use this attribution; members retain normal permitted rosters. Public-source name/link is the only reader-visible origin; private origin stays author-only. Withdrawal changes new server responses and references but cannot recall screenshots, downloads, caches or third-party copies. No immutable public raw log or public archive is allowed to bypass the projection.
+12. **Interfaces, archives and versions.** Browser exposes signed creation/settings/listing warnings, directory/read-only public landing, person request/public-immediate/invite join, existing-member wrap delivery, request withdrawal, guide approve/refuse/issue/cancel, profile visibility and deliberate copy preview/confirmation. It labels non-private public content and warns on private-to-public ordinary copies; a private copy clearly says it remains private. CLI `directory list`, `public overview|list|search|show|versions|comments|download`, `artifact share` and matching MCP `directory_list`, `public_overview`, `public_list`, `public_search`, `public_show`, `public_versions`, `public_comments`, `public_download`, `artifact_share` use the same narrow core projection and explicit observed revisions. CLI/MCP joining/guide/profile controls use the same member authority as the browser: approved agents get exactly their member's access and sign as that approved agent, never as an impersonated person. No agent-only restrictions or independent membership are introduced. No new person credential export or approval bypass. Agent links adapt the existing paged overview to public payloads and attribution, keep current expiry/revocation/version behavior, no-store and PAGE_LIMIT, and never become anonymous join credentials or a write route. Do not claim Stage 7 full parity. Use next client version after the preceding stage plus `public-v1`/`X-Public-Format`/`publicFormat` alongside every required preceding capability. New journeys require that boundary; existing journeys need a guide-authorized signed monotonic minimum raise before Stage 6 controls. At that minimum all journey reads/writes/controls/blobs/export require all preceding capabilities plus public-v1. Public interfaces send the public capability/version too; human landing shells remain content-free until negotiation. Both missing capabilities and unsupported future minima fail before partial content, and explicit 0.1.3-or-older rejection stays tested. Update public core/client manifests/dependencies/lock, leaving private web/server and rules package versions unchanged; derive unsupported-future fixtures from the actual chosen release, never pin one here. Membership-only encrypted archives carry exact mixed protected/public payloads and live blob bytes with strict discriminants; rebuild authority/placements/attribution by verified replay, not caller indexes. Stage 3 author-private export remains separate and never enters a member/public/link archive. Round-trip mixed public content and encrypted member metadata, plus private destination copies, after rotation. No migration purge, history rewrite, browser import promise or new rollback guarantee.
+
+## Closed questions and accepted decisions
+
+All former questions are answered by the operator sections at the end. There is no open `work:decisions` region; closed decisions must not promote as unanswered questions.
+
+- **private-key-delivery:** No instant private joining. Private journeys are invitation-only or join-on-approval; an existing member with keys delivers required current and historical wraps. No additional key holder or always-online service. Remove `key-delivery` and its criterion/evidence; `joining-authority` owns member delivery.
+- **profile-visibility-scope:** Per-journey explicit opt-in, journeys only by default for existing and new profiles, with an explicit public name/picture preview. Account name and email opt-in never imply publication consent.
+- **agent-public-credit:** Inherit the member's visibility; public credit includes the explicitly approved agent name and person's approved public credit, otherwise "a member". Access remains exactly the member's current access, without special agent rules.
+- **copy-selection:** A deliberate selected-version snapshot and its referenced attachments; no comments, history, round/interview relationships or automatic synchronization. Retain verified author/origin binding and preview before confirmation.
+- **origin-disclosure:** Public-source name/link only if the source is public. Full private origin is author-only in Stage 3 storage, never disclosed to destination members or public readers.
+- **public-rosters:** Nonmembers see purpose/state and authorized shared content, not member/participant/facilitator/subject rosters. Shared writers/contributors use safe attribution; members retain their permitted views.
+- **registry-creator-email:** Remove duplicated creatorEmail and its operator journey-row projection; backfill/redact existing rows without deleting journeys. Keep sign-in emails in existing account storage and describe server-visible account associations honestly.
+- **public-verification:** Server-verified safe projections over TLS labelled simply "Verified". No anonymous signing identity or full public chain. Member pinned-chain verification remains unchanged; anonymous readers do not get independent author verification or a malicious-server guarantee.
+- **admission-policy-transitions:** Refusal ends only that request; a fresh request is permitted. Live invites survive until explicit cancellation/expiry. Pending applicants refresh current policy/default-role acceptance before admission; settings edits never silently admit them. Show consequences before save. No persistent ban.
+- **history-access:** New members receive all undeleted ordinary history and required historical wraps after rotation, excluding author-private/D44 material. The separate new-agent historical-wrap backlog remains out of scope here.
+- **applet-access (current direction):** Applets are powerful by design. They may read and act with the viewer's authorized access, including authorized private reads and shared-store writes, without an applet-only restriction. Unauthorized cross-viewer private disclosure remains forbidden; HTML stays inert.
+- **agent-access (current direction):** Approved agents get exactly their member's current access, including authorized controls, with no special agent cap or person-only operation ban. Keep approval/signature bindings and reject independent membership or person impersonation.
+- **Scope:** Every stage remains in MVP scope; Stage 2–5 delivery dependencies are not removed by these answers.
+
+Remaining open questions: none within Stage 6. Stage 3's separately recorded storage choice and preceding-stage delivery remain external prerequisites, not reopened Stage 6 questions.
+
+## Current code observations
+
+Read the ontology, decision 0001, protocol and full Stage 2 draft first, then current tracked contracts/rules, server registry/authority/routes/link, browser/client journey/artifact/entry paths and their runtime/test guidance against main 889b218. These are source observations, not passing Stage 6 evidence.
+
+- The active ControlProof/controlDefinitions chain binds signed authority to encrypted payload digests and delegates decisions to compiled Bend. Stage 0 private/invitation-only activation is deliberate; rules represent public/other joining values but refuse their activation. Stage 1 uses strict artifact payloads, live blob references/local R2 transport and byte limits. Reusing a plaintext object as an encrypted envelope or adding unsigned sharedFrom cannot satisfy Stage 6.
+- Ontology section 10 is stale relative to this main in several places: Stage 0 verified authority/person roles/inherited agent access/removal/personal controls and Stage 1 files/artifacts/version gates already exist. CLIENT_VERSION and public package manifests are 0.1.5, not the appendix's 0.1.3. The protocol's Stage 0/1 format documentation is more current; its older account-PRF/memory-only guidance still differs from persistent/app-wide-input code. Do not restore old accessChanges/opaque-log routes or expand this stage into recovery work.
+- The registry schema still requires name and creatorEmail, but current creation passes `name:'[encrypted]'`, not the actual unlisted private name. The operator registry still selects creatorEmail; sign-in account emails/membership mappings remain plaintext. D2 reconciliation therefore needs explicit listing plaintext fields and creator-email disposition, not a false claim that current creation stores every private name. Update documentation against measured stored rows; name commitments are guessable and not proof of name secrecy.
+- Existing invite acceptance consumes the registry token and makes a pending person; a guide browser signs member.add and supplies wraps. Current inviteAccess uses verified guide authority, including read-only guides, unlike the appendix's old read-write-principal check. Cancellation/refusal, public public-three-policy/private-invitation-or-approval/private invitation-or-approval activation, member-delivered keys and admission races still need Stage 6 work. Enclave and Registry are separate objects; existing sequential effects are not atomic across them.
+- Per-journey middleware presently resolves an authenticated person/approved agent before content routes. Public reads need an explicit new safe projection path, not removal of that middleware. Current raw log, member profiles, account list metrics, exports and key wraps are not anonymous-public responses. Profile fields are name and optional email, not D43 visibility/picture contracts.
+- No public/private cross-journey copy, directory or public payload/blob contract is built. Projects are planned, not integrated at this baseline. Stage 3 identity/concealed copy storage and Stage 4 relationship redaction must be accepted before Stage 6 uses them; tests on today's journey-visible artifact store cannot prove D36.
+- Agent link currently decrypts verified journey-visible content to a bounded paged read-only overview. It must adapt to readable public payloads and selected attribution, not become a directory identity, join service or private-artifact viewer. General link read parity belongs to Stage 7.
+- Root build orders rules before consumers. Core has Node/workerd/browser test runners; server tests use local workerd/R2. Browser and client server-backed tests share port 18787 and run serially with guaranteed cleanup. Generated rules.mjs/build/cache/scratch files are ignored. No HOME, real Keychain, email, remote provisioning or deployment is evidence. Read Bend guidance before editing Bend and invoke scripts/bend.mjs with HOME unset.
+
+## Criterion homes and proof contract
+
+Every Stage 6 focused test, fixture, member-delivery harness and negative runner named below is a planned deliverable, not an existing test or observed pass. Each criterion has one command evidence object, expect exit 0, its final printed marker and real assertions. Run from a clean committed repository root with installed dependencies as `env -i PATH="$PATH" sh -c '<run>'`; HOME/live services are absent. Check clean status, record `git diff --binary HEAD -- .` before/after, demand equality and a clean final status. Generate only ignored outputs; never install dependencies, alter locks/manifests/sources or hide diffs during evidence. A marker alone is not proof.
+
+Negative runners use disposable ignored copies, first demand passing baselines, name each mutation/expected test, and demand the expected assertion or proof failure, not a syntax/setup/missing-module failure. Missing tests, failed setup, surviving mutants and skipped prerequisites fail the runner. Prohibited fields/content are supplied in tests and searched in durable rows, replies, exports, blobs, captured logs and derived counts/cursors. Exercise both accepted Stage 3 adapter boundaries: the unchosen one may be a test adapter, never an unapproved shipped storage alternative. Test planted private artifacts and D44 subjects, anonymous callers, nonauthor members/guides, removed/expired agents and members whose access was downgraded, stale revision/race requests and forged member-delivery receipts. Public read tests alone cannot prove privacy or key-delivery authority.
+
+| Criterion | Observable result | Owning node | Evidence | Why here |
+| --- | --- | --- | --- | --- |
+| public-contract | Strict mixed formats, revisions, safe projection, copies, archives and capability boundary | public-contract | command | Portable contracts and verified adapters |
+| public-laws | Production Bend listing/admission/copy/privacy/attribution/version laws and proofs | public-contract | command | Rules and adapters ship together |
+| public-storage | Persisted public/private separation, directory audiences, safe reads and registry redaction | public-storage | command | Storage and disclosure boundary |
+
+| joining-authority | Public three-policy/private invitation-or-approval admission, existing-member wraps/history, guide lifecycle and durable races | joining-authority | command | Serialized membership and member key delivery |
+| browser-public | Reloaded creation/directory/joins/settings/attribution/copy workflows and public/private warnings | browser-public | command | Person and guide workflows |
+| client-public | Real CLI/MCP discovery/reads/copies/controls with exactly the member's access and no person impersonation | client-public | command | Agent interface authority |
+| stage6-negative-controls | Executed weakened guards and extended AST Bend boundary | integration | command | Cross-component privacy proof |
+| stage6-regression | Full package/runtime/preceding-stage regressions, mixed archives, links and version alignment | integration | command | Assembled tree |
+
+## Scope overlap review
+
+Six worker-sized nodes. public-contract defines portable rules/formats/projection/version plumbing first; public-storage owns safe directory/content storage and public read routes; joining-authority follows public-storage and owns admission plus existing-member key delivery. browser-public and client-public follow joining-authority and may edit in parallel but cannot run shared-port server gates concurrently; integration follows both. The operator's no-instant-private-joining decision removes key-delivery, rewires joining-authority from key-delivery to public-storage and removes the service criterion/command/workspace. All other node IDs and graph edges remain unchanged. Contract/integration own version and shared interface capability plumbing; no key-service dependency/build/lock scaffolding is added. Nodes use the closed decisions above and the accepted Stage 2–5 contracts. External stage prerequisites are not sibling IDs or lifecycle fields; the delivered preceding-stage tree remains a dispatch tripwire.
+
+## Worker boundaries
+
+### public-contract
+
+Depends on: none within Stage 6. External prerequisites: ontology approval, delivered Stage 2–5 contracts, recorded Stage 6 decisions incorporated, Stage 3 storage/identity choice accepted.
+
+Touches: ["packages/rules", "packages/core/src/public.ts", "packages/core/src/admission.ts", "packages/core/src/controlProof.ts", "packages/core/src/log.ts", "packages/core/src/rules.ts", "packages/core/src/artifacts.ts", "packages/core/src/blobs.ts", "packages/core/src/transfer.ts", "packages/core/src/types.ts", "packages/core/src/index.ts", "packages/core/src/versions.ts", "packages/core/package.json", "packages/server/package.json", "packages/web/package.json", "packages/client/package.json", "package-lock.json", "packages/server/src/types.ts", "packages/server/src/index.ts", "packages/web/src/journey.ts", "packages/client/src/journey.ts", "packages/core/test/stage6-public.test.ts", "packages/core/test/stage6-archive.test.ts", "packages/server/test/stage6-fixtures.ts", "packages/client/test/stage6-fixtures.ts", "packages/web/e2e/stage6-fixtures.ts", "docs/journey-protocol.md"]
+
+Define exact public payload/blob/action schemas, settings/invite/request/attribution revisions, membership policy self-acceptance, stable Stage 3 author/copy bindings, public origin/profile/project/round projection and mixed archive replay. Reuse the accepted private adapters and Stage 4 D44 relationship rules. Production Bend owns fixed visibility, allowed listing audiences, the five allowed admission combinations and private-immediate rejection, guide authority/default roles/member wrap eligibility, accepted request/invite transitions, agent access exactly equal to the member's access, selected-version/attachments-only copy authorship/destination writes, per-journey attribution defaults/approved agent credit, public-only origin/no-public-roster privacy before aggregation, references and version readiness. Public projections use the exact "Verified" label, never anonymous signing identity/full chain. Applet authority equals the viewer's authorized access; do not introduce applet-only read/write restrictions. TypeScript verifies signatures/commitments and adapts named fields; no duplicate decisions. Preserve old validators/histories without purge. Own next-version/public-v1/dependency/header/fixture plumbing; add no server effects, speculative key service or UI implementation. Prove actual production functions in both proof modes and focused portable tests in Node/workerd/browser, with real mixed encrypted archives/live bytes in Node.
+
+### public-storage
+
+Depends on: public-contract.
+
+Touches: ["packages/rules", "packages/server/src/enclave.ts", "packages/server/src/registry.ts", "packages/server/src/index.ts", "packages/server/src/types.ts", "packages/server/src/agentLink.ts", "packages/server/test/stage6-storage.test.ts", "packages/server/test/stage6-directory.test.ts", "packages/server/test/stage6-link.test.ts", "packages/server/test/stage6-fixtures.ts", "packages/server/README.md", "docs/journey-protocol.md"]
+
+Implement mixed ordinary public/private storage and safe anonymous routes using verified Bend/core projection, not a raw member API. Persist fixed visibility/settings and exact signed payload/byte bindings. Implement copy source attestations and destination copy commits from the contract, checking stable original author and current membership/write authority in both journeys. Private ordinary source bytes are opened and reprotected by the authorized client, not the journey server; stage public-to-private bytes only after destination encryption. Copy retries bind operation ID/source digest/destination proof and never create duplicate copies. Author-private copies use only the Stage 3 adapter, never these ordinary routes. Implement minimal listing index, audience-bound cursors, current revision rechecks and retryable outbox/index repair. Apply accepted registry creator-email backfill without deleting histories/accounts; unlisted private labels remain encrypted and server-visible account mappings are described honestly. Private-author stores remain opaque and excluded; never create shared private-artifact envelope/descriptor rows. Test fresh-object replay, R2 byte boundaries/live references/deletion, listing changes between pages, revoked attribution, missing capability/unknown formats, malicious extra fields, logs and canaries, public unlisted reads, private-ID indistinguishability, member-only metadata/export/wrap denial and safe Stage 2/4/5 projections. Assert the exact "Verified" label and absence of full anonymous chain/signing identity, public rosters and private-source origin. Prove authorized applet reads/actions/shared-store writes succeed while cross-viewer private reads/disclosures fail; do not mistake applet power for unauthorized access. Adapt existing bounded link overview to public content, preserving read-only/expiry/revocation/secret handling and total private-artifact exclusion; no Stage 7 link expansion.
+
+### joining-authority
+
+Depends on: public-storage.
+
+Touches: ["packages/rules", "packages/core/src/admission.ts", "packages/server/src/enclave.ts", "packages/server/src/registry.ts", "packages/server/src/index.ts", "packages/server/src/types.ts", "packages/server/src/email.ts", "packages/server/test/stage6-joining.test.ts", "packages/server/test/stage6-fixtures.ts", "packages/server/README.md", "docs/journey-protocol.md"]
+
+Implement the five allowed type/policy combinations: three public policies and private invitation-only/join-on-approval; reject private immediate activation and admission through every API/control/replay path. Implement signed request/withdraw/approve/refuse/invite/cancel/accept transitions, accepted policy-transition behavior and current default-role binding. Existing authorized members prepare and deliver exact-recipient current/historical wraps with committed invitation/approval admission; no service or guide-offline promise. Public immediate admission needs no public-content keys and reports member-metadata delivery separately until a member supplies wraps. Serialize policy/default edits, removal, rotation, approval/refusal, wrap release and invite consumption/cancellation in the authority object; exact retries are idempotent and stale changed requests conflict. Keep proof/state/local effects atomic and use durable receipts/outbox for Registry/member-delivery effects; fault-inject partial steps/restarts to prove no premature keys or lost/duplicated membership. Refusal permits a fresh request, live invites survive settings changes and pending requests require fresh policy/default acceptance. Recheck guide status, including read-only guides, and applicant/member validity through Bend; approved agents use exactly their member's current access. Preserve support restrictions and last-guide controls. Reject arbitrary guide grants, changed keys/accounts, duplicate identity, independent agent joins, recovery sessions and stale/wrong-recipient wraps. Use fake email and local existing-member clients only. No new UI, manifests, person credential export or escrow.
+
+### browser-public
+
+Depends on: joining-authority.
+
+Touches: ["packages/web/src/public.ts", "packages/web/src/main.ts", "packages/web/src/journey.ts", "packages/web/src/artifacts.ts", "packages/web/src/artifact-viewer.ts", "packages/web/src/style.css", "packages/web/e2e/stage6-public.spec.ts", "packages/web/e2e/stage6-fixtures.ts", "packages/web/README.md"]
+
+Implement signed public/private creation/settings/listing, approved publication/profile preview, directory/public read-only navigation, all person joining outcomes and guide invitation/request controls, explicit snapshot copy preview/confirmation and private-copy preservation. Display Public: not encrypted and exactly Verified for public non-private content including direct/unlisted views; listing warnings explain the exact server-readable fields and account storage separately. Keep Stage 2 project filters and Stage 4 round/private-interview views audience-correct, using Stage 5 powerful viewer-authorized applet access without new applet-only restrictions. Reload persisted history after every mutation. Test public reads signed out, every listing audience, read-only guide settings/admissions without writes, all five allowed policy/type combinations and rejected private-immediate attempts, unavailable-member/waiting-for-keys/conflict/retry, public-to-private/private-to-public copies, private canaries for both adapters, D44 subjects, attribution withdrawal and escaped hostile labels. Preserve header/footer, account/passkey/approval flows and Stage 0–5 rendering/key boundaries; no remote avatar/network fetch or manifests.
+
+### client-public
+
+Depends on: joining-authority.
+
+Touches: ["packages/client/src/public.ts", "packages/client/src/journey.ts", "packages/client/src/artifacts.ts", "packages/client/src/cli.ts", "packages/client/src/mcp.ts", "packages/client/src/index.ts", "packages/client/test/stage6-public.integration.test.ts", "packages/client/test/stage6-fixtures.ts", "packages/client/README.md"]
+
+Implement exact CLI/MCP directory/public read/artifact-share and joining/guide/profile surfaces, using explicit URLs/files, safe core projections and observed revisions. Anonymous public reads need no approval, membership or journey key; approved agents receive exactly their member's access for signed-in discovery, reads, writes and controls, with no special agent role cap or person-only workflow prohibition. Preserve approved agent binding and Stage 3 stable-author copy identity; agents never impersonate person signatures or gain independent membership. Real CLI subprocess/stdio MCP tests against local workerd cover anonymous/member distinctions, authorized joining/guide/profile controls, private-immediate rejection, existing-member wraps/waiting state, project filters/archives/public bytes, immutable author vs writer, explicitly approved credit, selected-version/attachments-only copies, public-only origin, author-private copies in both adapters, member read-only denial, owner downgrade/removal/expiry, stale revisions/capabilities and file/download handling. Test local state/keychain only; no manifest edits or general Stage 7 refactor.
+
+### integration
+
+Depends on: browser-public, client-public.
+
+Touches: ["scripts/check-bend-boundary.mjs", "scripts/check-stage6-negative-controls.mjs", "scripts/check-stage6-prerequisites.mjs", "packages/core/src/versions.ts", "packages/core/package.json", "packages/server/package.json", "packages/web/package.json", "packages/client/package.json", "package-lock.json", "packages/core/test", "packages/server/test", "packages/web/e2e", "packages/web/src/stage0-versions.test.ts", "packages/client/test", "packages/core/README.md", "packages/server/README.md", "packages/web/README.md", "packages/client/README.md", "docs/journey-protocol.md"]
+
+Complete next-version/public-v1/all-preceding-capability alignment and unsupported-future fixtures without fixed numeric promises. Implement a prerequisite runner whose explicit reviewed command list comes from accepted Stage 2–5 specs; missing accepted contracts/tests/member-delivery fixtures or missing named preceding gates fail, never skip or auto-discover success from whatever files happen to exist. Extend AST boundary rules for listing/public/private projection/admission/agent/copy/attribution/revision/version decisions with real required production Bend call sites; exempt only exact named-field format adapters. Disposable guard mutations cover fixed visibility; directory audience/unlisted metadata/stale index; anonymous read-only/raw control denial; five allowed admission combinations/private-immediate rejection/default roles/guide-only invites; member-equal agent access and rejection of special agent caps; accepted request/invite transitions; selected-version/attachments-only copy selection; no-public-roster and exact Verified projection; powerful authorized applet operations and unauthorized disclosure denial; cancellation/refusal/recipient/member-wrap/rotation/history/races; source author/destination membership/write/copy bytes; private content/existence/D44/count/search/blob/archive/link and unauthorized applet disclosure; attribution/default consent/origin redaction; format/hash/extra fields; capability/unknown controls. Representative production Bend mutants fail focused assertions and both proof modes; duplicate TypeScript decisions fail --rules. Exercise runner missing-test/setup/survivor controls. Execute full existing/new runtime gates, exact accepted preceding-stage gates and mixed cross-interface/link/archive cases serially where ports overlap. Report each guard/case/exit/assertion/proof, preserving production tracked tree and keys held only by existing members.
+
+## Evidence commands
+
+These become node-owned `kind: command` evidence during later decomposition, with `expect.exit: 0` and `expect.output_includes` equal to the final printed marker. Focused commands use `timeout_ms: 600000`; integration uses `timeout_ms: 3600000`. Each test/runner must exist before it can pass. Run shared-port gates serially, stop servers and clean disposable trees on success/failure. The prerequisite runner's accepted Stage 2–5 command list is pinned/reviewed before promotion; its checks cannot treat unavailable prerequisite private-storage/member-delivery contracts as success. Member-delivery tests assert local authorization and recovery, not always-online availability.
+
+### public-contract command
+
+```bash
+env -i PATH="$PATH" sh -c '
+set -eu
+test -z "$(git status --porcelain)"
+before=$(git diff --binary HEAD -- .)
+npm run build:rules
+npm run build -w @ai-wayfinding/core
+npm run test -w @ai-wayfinding/core -- test/stage6-public.test.ts test/stage6-archive.test.ts
+npm run test:workers -w @ai-wayfinding/core -- test/stage6-public.test.ts
+npm run test:browser -w @ai-wayfinding/core -- test/stage6-public.test.ts
+after=$(git diff --binary HEAD -- .)
+test "$before" = "$after"
+test -z "$(git status --porcelain)"
+printf "Stage 6 public-contract assertions passed\n"
+'
+```
+
+### public-laws command
+
+```bash
+env -i PATH="$PATH" sh -c '
+set -eu
+test -z "$(git status --porcelain)"
+before=$(git diff --binary HEAD -- .)
+npm run build:rules
+npm run build -w @ai-wayfinding/core
+(cd packages/rules
+  proof=$(node ../../scripts/bend.mjs PROOF.bend)
+  printf "%s\n" "$proof"
+  case "$proof" in *"ALL PROOFS CHECK"*) ;; *) exit 1 ;; esac
+  verdict=$(node ../../scripts/bend.mjs PROOF.bend --verdict)
+  printf "%s\n" "$verdict"
+  case "$verdict" in *"ALL PROOFS CHECK"*) ;; *) exit 1 ;; esac
+)
+npm run test -w @ai-wayfinding/core -- test/stage6-public.test.ts
+after=$(git diff --binary HEAD -- .)
+test "$before" = "$after"
+test -z "$(git status --porcelain)"
+printf "Stage 6 public-laws assertions passed\n"
+'
+```
+
+### public-storage command
+
+```bash
+env -i PATH="$PATH" sh -c '
+set -eu
+test -z "$(git status --porcelain)"
+before=$(git diff --binary HEAD -- .)
+npm run build:rules
+npm run build -w @ai-wayfinding/core
+npm run test -w @ai-wayfinding/server -- test/stage6-storage.test.ts test/stage6-directory.test.ts test/stage6-link.test.ts
+after=$(git diff --binary HEAD -- .)
+test "$before" = "$after"
+test -z "$(git status --porcelain)"
+printf "Stage 6 public-storage assertions passed\n"
+'
+```
+
+### joining-authority command
+
+```bash
+env -i PATH="$PATH" sh -c '
+set -eu
+test -z "$(git status --porcelain)"
+before=$(git diff --binary HEAD -- .)
+npm run build:rules
+npm run build -w @ai-wayfinding/core
+npm run test -w @ai-wayfinding/server -- test/stage6-joining.test.ts
+after=$(git diff --binary HEAD -- .)
+test "$before" = "$after"
+test -z "$(git status --porcelain)"
+printf "Stage 6 joining-authority assertions passed\n"
+'
+```
+
+### browser-public command
+
+```bash
+env -i PATH="$PATH" sh -c '
+set -eu
+test -z "$(git status --porcelain)"
+before=$(git diff --binary HEAD -- .)
+npm run build:rules
+npm run build -w @ai-wayfinding/core
+npm run test:e2e -w @ai-wayfinding/web -- e2e/stage6-public.spec.ts
+after=$(git diff --binary HEAD -- .)
+test "$before" = "$after"
+test -z "$(git status --porcelain)"
+printf "Stage 6 browser-public assertions passed\n"
+'
+```
+
+### client-public command
+
+```bash
+env -i PATH="$PATH" sh -c '
+set -eu
+test -z "$(git status --porcelain)"
+before=$(git diff --binary HEAD -- .)
+npm run build:rules
+npm run build -w @ai-wayfinding/core
+npm run build -w @ai-wayfinding/client
+npm run test -w @ai-wayfinding/client -- test/stage6-public.integration.test.ts
+after=$(git diff --binary HEAD -- .)
+test "$before" = "$after"
+test -z "$(git status --porcelain)"
+printf "Stage 6 client-public assertions passed\n"
+'
+```
+
+### stage6-negative-controls command
+
+```bash
+env -i PATH="$PATH" sh -c '
+set -eu
+test -z "$(git status --porcelain)"
+before=$(git diff --binary HEAD -- .)
+npm run build:rules
+npm run build -w @ai-wayfinding/core
+node scripts/check-stage6-negative-controls.mjs
+node scripts/check-bend-boundary.mjs --rules
+after=$(git diff --binary HEAD -- .)
+test "$before" = "$after"
+test -z "$(git status --porcelain)"
+printf "Stage 6 stage6-negative-controls assertions passed\n"
+'
+```
+
+### stage6-regression command
+
+```bash
+env -i PATH="$PATH" sh -c '
+set -eu
+test -z "$(git status --porcelain)"
+before=$(git diff --binary HEAD -- .)
+npm run build:rules
+(cd packages/rules
+  proof=$(node ../../scripts/bend.mjs PROOF.bend)
+  printf "%s\n" "$proof"
+  case "$proof" in *"ALL PROOFS CHECK"*) ;; *) exit 1 ;; esac
+  verdict=$(node ../../scripts/bend.mjs PROOF.bend --verdict)
+  printf "%s\n" "$verdict"
+  case "$verdict" in *"ALL PROOFS CHECK"*) ;; *) exit 1 ;; esac
+)
+node scripts/check-bend-boundary.mjs --rules
+npm run typecheck -w @ai-wayfinding/core
+npm run build -w @ai-wayfinding/core
+npm run typecheck -w @ai-wayfinding/server
+npm run typecheck -w @ai-wayfinding/web
+npm run typecheck -w @ai-wayfinding/client
+npm run build
+node scripts/check-bend-boundary.mjs --build
+node scripts/check-bend-boundary.mjs --guidance
+npm run test -w @ai-wayfinding/core
+npm run test:workers -w @ai-wayfinding/core
+npm run test:browser -w @ai-wayfinding/core
+npm run test -w @ai-wayfinding/server
+npm run test -w @ai-wayfinding/web
+npm run test:e2e -w @ai-wayfinding/web
+npm run test -w @ai-wayfinding/client
+npm run test:integration -w @ai-wayfinding/client
+npm run test -w @ai-wayfinding/core -- test/stage6-public.test.ts test/stage6-archive.test.ts
+npm run test:workers -w @ai-wayfinding/core -- test/stage6-public.test.ts
+npm run test:browser -w @ai-wayfinding/core -- test/stage6-public.test.ts
+npm run test -w @ai-wayfinding/server -- test/stage6-storage.test.ts test/stage6-directory.test.ts test/stage6-link.test.ts test/stage6-joining.test.ts
+npm run test:e2e -w @ai-wayfinding/web -- e2e/stage6-public.spec.ts
+npm run test -w @ai-wayfinding/client -- test/stage6-public.integration.test.ts
+node scripts/check-stage1-negative-controls.mjs
+node scripts/check-stage2-negative-controls.mjs
+node scripts/check-stage6-prerequisites.mjs
+node scripts/check-stage6-negative-controls.mjs
+after=$(git diff --binary HEAD -- .)
+test "$before" = "$after"
+test -z "$(git status --porcelain)"
+printf "Stage 6 stage6-regression assertions passed\n"
+'
+```
+
+## Acceptance criteria <!-- work:criteria -->
+- public-contract: When portable Stage 6 suites run in Node, workerd and browser, strict public JSON/raw-blob and encrypted metadata discriminants, signed fixed-visibility/settings/admission revisions, per-journey journeys-only defaults/explicit public opt-in, approved agent credit, public-only origin/no-public-roster/"Verified" TLS projections, Stage 3 stable-author selected-version/attachments-only copy bindings/private adapters, Stage 2 placements and Stage 4 interview-subject exclusions, mixed encrypted archive/live-byte replay and next client version after the preceding stage/public-v1 plus all preceding capability boundaries pass; forged identities, altered bytes, unexpected fields, foreign references, stale predecessors, unsupported formats and caller indexes fail without partial output or private-content/existence disclosure.
+- public-laws: When production Bend Stage 6 rules compile and PROOF.bend runs normally and with --verdict through scripts/bend.mjs, both print ALL PROOFS CHECK for fixed visibility, permitted listing audiences without private-read grants, public three-policy/private invitation-or-approval admission with private-immediate rejection, default roles/guide-only lifecycle, accepted request/invite policy transitions, self-only per-journey attribution/default opt-in, agent access exactly equal to the member's current access, author/destination copy authority, selected-version/attachment selection, private/D44/public-only-origin/attribution-safe/no-public-roster projections before aggregation and capability readiness while preserving preceding-stage laws; portable TypeScript adapters call these production decisions instead of duplicating them.
+- public-storage: When local workerd/R2 Stage 6 storage/directory/link tests run and reload fresh objects, public non-private payloads/bytes are readable and labelled Public: not encrypted and exactly Verified, without anonymous signing identity/full chain, public rosters or private-source origin, while private ordinary/member metadata remains protected, listing audience/revision/index repair and bounded cursor/filter/count semantics work, unlisted public content remains readable, private IDs/names and account/creator/operator/control/wrap fields do not enter public output, accepted registry redaction retains histories, and private-artifact/D44 canaries remain absent from unauthorized storage/projections/links/archives/blobs/applet responses under both Stage 3 test adapters; authorized viewer applet reads/actions/shared-store writes succeed and unauthorized cross-viewer reads/disclosures fail; stale/forged/extra-field/version requests change nothing and links stay bounded, read-only and expiry/revocation-correct.
+
+- joining-authority: When local Stage 6 joining suites run, all five allowed visibility/policy combinations admit only through verified current signed transitions and every private-immediate creation/settings/replay/admission attempt is rejected; existing-member delivery binds committed membership, exact recipient, current epoch and all undeleted ordinary historical wraps, while unavailable members leave an honest waiting-for-keys state and public immediate admission reads public content without keys. Read-only guides manage admissions without gaining writes; approved agents get exactly their member's access; support restrictions remain. Fresh requests after refusal, surviving live invites and refreshed pending-policy/default-role acceptance follow the accepted transitions; concurrent cancellation/refusal/policy edit/rotation/removal/recipient substitution and injected Registry/member-delivery failures/restarts yield authorized retryable exact-proof-idempotent outcomes, with no premature wraps, arbitrary guide grants, independent agent/recovery-session admission, plaintext escrow or additional key holder.
+- browser-public: When Stage 6 browser end-to-end suites reload stored histories, people create private/public journeys with fixed visibility, see correct listing/encryption warnings and directory audiences, read unlisted public content signed out, use public three-policy/private invitation-or-approval joining and existing-member key delivery, reject private-immediate paths and use guide invitation/request controls, manage accepted profile/agent attribution and deliberately copy approved content between journey types; private copies/D44 interviews remain private and invisible under both Stage 3 test adapters, public copies never name a private source or expose journeys-only identities/account details, stale/unavailable-member/update errors are honest, and header/footer plus preceding-stage controls, project filters, rounds and safe inert HTML and powerful viewer-authorized applets remain intact, with authorized reads/actions/shared-store writes succeeding and unauthorized cross-viewer disclosure rejected.
+- client-public: When real CLI subprocess and stdio MCP Stage 6 suites run against local workerd, anonymous public overview/list/search/show/versions/comments/download and live-agent inherited directory access use safe shared projections, approved author-copy operations preserve identity/placement/byte/privacy/origin rules, and approved-agent joining/guide/profile controls have exactly their member's access without impersonation; member read-only limits, owner downgrade/removal/expiry, nonauthor/read-only destination/stale revision/unsupported capability denials hold without credential or approval regressions, partial content, private-adapter/D44 leakage or link-authority elevation.
+- stage6-negative-controls: When disposable Stage 6 mutation runners and the extended AST Bend boundary gate run, every named weakened visibility/listing/projection/admission/guide/cancellation/refusal/key-recipient/member-wrap/rotation/race/copy-authority/private-existence/D44/attribution/origin/byte/extra-field/version guard reaches its expected assertion failure, private-immediate activation/admission remains rejected, and injected special agent caps or applet-only restrictions fail the authorized-access tests, representative Bend mutants fail both proof modes, duplicate TypeScript decisions fail --rules, and missing tests, setup failures, skipped prerequisites or surviving mutants fail the runner while production tracked files remain unchanged.
+- stage6-regression: When the assembled accepted Stage 6 tree runs full existing and new package/runtime gates plus every explicitly reviewed accepted Stage 2–5 gate, all typechecks/builds, core Node/workerd/browser, server workerd/R2, web unit/end-to-end, client unit/integration, member-delivery suites, both Bend proof modes, all boundary modes, mixed public/encrypted archives/live blobs/private copies, public/link selector/attribution integration and negative controls pass serially where ports overlap; next client version after the preceding stage/public-v1 and all preceding capabilities/unsupported-future fixtures align, no histories are purged or private-storage hold bypassed, and evidence needs no HOME/live services/deployment or tracked-tree changes.
+
+## Operator decisions (recorded 2026-09-03)
+
+- **private-key-delivery:** Dan chose no instant private joining. A person joins a private journey only by invitation or after approval. An existing member with the keys delivers them at that point. Remove the always-online key-delivery service and any immediate private join path from the graph and criteria before promotion. Do not add a key holder outside the members.
+- **Scope:** every stage is in MVP scope.
+
+## Operator decisions, part 2 (recorded 2026-10-02)
+
+- **Q16 public verification:** signed-out readers see content labelled simply "Verified" (the server-verified projection over TLS). No anonymous signing identity, and no full chain is published.
+- Every other recommendation (profile visibility per journey, defaulting to journey members only; agent credit; selected-version copy; public-only origin; no public rosters; remove the creator email; admission transitions; history access) is **accepted as written**.
+
