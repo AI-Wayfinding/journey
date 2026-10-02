@@ -1,4 +1,8 @@
 import { canWriteContent, canReadContent, effectiveScope } from '@ai-wayfinding/core';
+import { PROJECT_FORMAT, projectPurposeHash, replayProject, sealProjectPayload, effectiveProjectParticipants, selectProjectArtifacts, projectSelector } from '@ai-wayfinding/core';
+import type { ProjectActionType } from '@ai-wayfinding/core';
+import { projectId, observedRevision, purposeText, stateValue } from './projects.js';
+import type { ProjectView, ParticipationExplanation } from './projects.js';
 import { CLIENT_VERSION, meetsMinClientVersion, newId, unwrapJourneyKey, verifyControlProofs, controlDefinitions, ARTIFACT_FORMAT, artifactTypeHash, canonical, readArtifactPayload, sealArtifactPayload, sealBlob, openBlob, signControlProof, importSigningKey, replayArtifact } from '@ai-wayfinding/core';
 import type { ControlProof, Member, Envelope, JourneyKey, LogState, ArtifactActionType, ArtifactAttachment, ArtifactPayload, JsonObject } from '@ai-wayfinding/core';
 import { artifactPayload, artifactText, attachmentName, localBytes, saveDownload, skillPackage, validateLocalAttachment } from './artifacts.js';
@@ -32,7 +36,7 @@ export class JourneyClient {
       const code = error?.error?.code ?? String(result.status);
       if (code === 'client-too-old') throw new Error(updateError());
       if (result.status === 403 || result.status === 401) throw new Error('Access to this journey has ended');
-      if (result.status === 409) throw new Error('Artifact conflict: something changed. Reload and try again.');
+      if (result.status === 409) throw new Error('Journey conflict: something changed. Reload and try again.');
       throw new Error('Journey request failed (' + code + ').');
     }
     return result;
@@ -96,9 +100,10 @@ export class JourneyClient {
     }
     return views;
   }
-  private item(view: ArtifactView): ArtifactItem {
+  private item(view: ArtifactView, state: LogState): ArtifactItem {
     const first = view.versions[0]!, head = view.versions.at(-1)!;
-    return { id: view.state.id, version: head.id, itemType: head.payload.content.kind, title: head.payload.title, body: artifactText(head.payload), tags: head.payload.tags, author: view.state.author, authoredBy: first.authoredBy, writer: head.actor, created: first.at, payload: head.payload };
+    const placement = state.projects?.placements[view.state.id];
+    return { project: placement?.project ?? null, placementRevision: placement?.revision ?? null, placementHistory: placement?.history ?? [], id: view.state.id, version: head.id, itemType: head.payload.content.kind, title: head.payload.title, body: artifactText(head.payload), tags: head.payload.tags, author: view.state.author, authoredBy: first.authoredBy, writer: head.actor, created: first.at, payload: head.payload };
   }
   private async view(id: string, verified: Verified): Promise<ArtifactView> {
     const view = (await this.views(verified)).find(v => v.state.id === id);
@@ -137,11 +142,13 @@ export class JourneyClient {
     return (await this.show(id)).item;
   }
   async importSkill(path: string, title: string, tags: string[] = []): Promise<ArtifactItem> { const pkg = await skillPackage(path); return this.add({ type: 'skill', title, body: pkg.body, files: pkg.files, tags }); }
-  async list(type?: string, tag?: string): Promise<ArtifactItem[]> {
-    return (await this.views(await this.verified())).map(view => this.item(view)).filter(item => (!type || item.itemType === type) && (!tag || item.tags.includes(tag)));
+  async list(type?: string, tag?: string, project?: string): Promise<ArtifactItem[]> {
+    const selection = projectSelector(project), verified = await this.verified();
+    const selected = new Set(selectProjectArtifacts(verified.state, selection));
+    return (await this.views(verified)).filter(view => selected.has(view.state.id)).map(view => this.item(view, verified.state)).filter(item => (!type || item.itemType === type) && (!tag || item.tags.includes(tag)));
   }
-  async search(text: string): Promise<ArtifactItem[]> { const needle = text.toLocaleLowerCase(); return (await this.list()).filter(item => [item.title, item.body, item.itemType, ...item.tags].some(value => value.toLocaleLowerCase().includes(needle))); }
-  async show(id: string): Promise<ItemView> { const view = await this.view(id, await this.verified()); return { item: this.item(view), comments: view.comments, versions: view.versions }; }
+  async search(text: string, project?: string, type?: string, tag?: string): Promise<ArtifactItem[]> { const needle = text.toLocaleLowerCase(); return (await this.list(type, tag, project)).filter(item => [item.title, item.body, item.itemType, ...item.tags].some(value => value.toLocaleLowerCase().includes(needle))); }
+  async show(id: string): Promise<ItemView> { const verified = await this.verified(), view = await this.view(id, verified); return { item: this.item(view, verified.state), comments: view.comments, versions: view.versions }; }
   async versions(id: string): Promise<ArtifactView['versions']> { return (await this.show(id)).versions; }
   async comments(id: string): Promise<ArtifactComment[]> { return (await this.show(id)).comments; }
   async comment(id: string, text: string, onVersion?: string): Promise<ArtifactComment> {
@@ -172,6 +179,52 @@ export class JourneyClient {
     const bytes = await openBlob(new Uint8Array(await response.arrayBuffer()), attachment.blob, key);
     await saveDownload(path, bytes);
     return { path, bytes: bytes.length };
+  }
+  private projectView(id: string, verified: Verified): ProjectView {
+    const project = verified.state.projects?.items[id];
+    if (!project) throw new Error('No journey project has that ID.');
+    return { id: project.id, purpose: project.purpose, purposeHash: project.purposeHash, state: project.state, revision: project.revision, creator: project.creator, at: project.at, history: project.history, participants: effectiveProjectParticipants(verified.state, id), participation: (verified.state.projects?.participation ?? []).filter(pair => pair.project === id).map(pair => ({ project: pair.project, member: pair.member, revision: pair.revision, active: pair.active })) };
+  }
+  async projectList(): Promise<ProjectView[]> {
+    const verified = await this.verified();
+    return Object.keys(verified.state.projects?.items ?? {}).map(id => this.projectView(id, verified));
+  }
+  async projectShow(id: string): Promise<ProjectView> { return this.projectView(projectId(id), await this.verified()); }
+  private async commitProject(type: ProjectActionType, body: JsonObject, payload: JsonObject): Promise<void> {
+    // D17 is not writable(): Bend distinguishes participant metadata from content authority.
+    const latest = await this.verified();
+    const transition = replayProject(latest.state, type, body, this.session.principal, Date.now()).transition;
+    if (transition.$ !== 'ProjectAccepted') throw new Error(transition.$ === 'ProjectDenied' ? 'Project action denied: current participation or content-write authority and Stage 2 minimum are required.' : 'Project conflict: predecessor, state or reference changed. Reload and try again.');
+    const key = latest.epochs.get(latest.state.currentEpoch)!;
+    const at = new Date().toISOString(), seq = latest.state.lastSeq + 1;
+    const envelope = await sealProjectPayload(type, body, payload, { id: newId(), journey: this.session.journeyId, seq, epoch: key.epoch, createdAt: at }, key);
+    const proof = await signControlProof({ v: 1, seq, prev: latest.state.lastHash, at, actor: this.session.principal, type, body }, envelope, this.session.journeyId, await importSigningKey(this.session.signingPrivateKey));
+    await this.request(`/journeys/${this.session.journeyId}/log`, 'POST', { control: { proof, envelope } });
+  }
+  async projectCreate(purpose: string): Promise<ProjectView> {
+    const text = purposeText(purpose), id = newId();
+    await this.commitProject('project.create', { format: PROJECT_FORMAT, project: id, purposeHash: await projectPurposeHash(text), state: 'getting-started' }, { purpose: text });
+    return this.projectShow(id);
+  }
+  async projectPurpose(id: string, purpose: string, predecessor: number | null): Promise<ProjectView> {
+    const project = projectId(id), text = purposeText(purpose), revision = observedRevision(predecessor);
+    await this.commitProject('project.purpose', { format: PROJECT_FORMAT, project, purposeHash: await projectPurposeHash(text), predecessor: revision }, { purpose: text });
+    return this.projectShow(project);
+  }
+  async projectState(id: string, state: string, predecessor: number | null): Promise<ProjectView> {
+    const project = projectId(id);
+    await this.commitProject('project.state', { format: PROJECT_FORMAT, project, state: stateValue(state), predecessor: observedRevision(predecessor) }, {});
+    return this.projectShow(project);
+  }
+  async projectParticipation(id: string): Promise<ParticipationExplanation> {
+    const project = await this.projectShow(id);
+    return { project: project.id, inherited: true, message: 'Agents inherit their adding person’s project participation. Ask that person to join or leave this project in the browser. No action was posted.' };
+  }
+  async artifactProject(id: string, project: string | null, predecessor: number | null): Promise<ArtifactItem> {
+    const target = project === null ? null : projectId(project), revision = observedRevision(predecessor);
+    const view = await this.view(id, await this.verified());
+    await this.commitProject('artifact.project', { format: PROJECT_FORMAT, artifact: id, author: view.state.author, actor: this.session.principal, project: target, predecessor: revision }, {});
+    return (await this.show(id)).item;
   }
   async status(): Promise<{ journeyId: string; principal: string; scope: 'read' | 'readwrite'; expiresAt: number; seq: number }> {
     const { state } = await this.verified();

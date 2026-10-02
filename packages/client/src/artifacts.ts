@@ -2,14 +2,14 @@ import { open, readdir, lstat, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { basename, join } from 'node:path';
 import { ARTIFACT_TYPES, MAX_BLOB_BYTES, suggestedArtifact, validPackagePath, validateArtifactPayload } from '@ai-wayfinding/core';
-import type { ArtifactAttachment, ArtifactContent, ArtifactPayload, ArtifactState } from '@ai-wayfinding/core';
+import type { ArtifactAttachment, ArtifactContent, ArtifactPayload, ArtifactState, PlacementChange } from '@ai-wayfinding/core';
 
 export interface LocalAttachment { path: string; packagePath?: string; mime?: string }
 export interface ArtifactInput { type: string; title: string; body?: string; tags?: string[]; files?: LocalAttachment[]; format?: 'json' | 'csv' | 'toml' | 'yaml' | 'sqlite'; url?: string; summary?: string; notes?: string }
 export interface ArtifactVersion { id: string; actor: string; authoredBy: 'agent' | 'human'; at: string; payload: ArtifactPayload }
 export interface ArtifactComment { id: string; item: string; onVersion?: string; author: string; actor: string; authoredBy: 'agent' | 'human'; at: string; body: string; text: string }
 export interface ArtifactView { state: ArtifactState; versions: ArtifactVersion[]; comments: ArtifactComment[] }
-export interface ArtifactItem { id: string; version: string; itemType: string; title: string; body: string; tags: string[]; author: string; authoredBy: 'agent' | 'human'; writer: string; created: string; payload: ArtifactPayload }
+export interface ArtifactItem { project: string | null; placementRevision: number | null; placementHistory: PlacementChange[]; id: string; version: string; itemType: string; title: string; body: string; tags: string[]; author: string; authoredBy: 'agent' | 'human'; writer: string; created: string; payload: ArtifactPayload }
 export function artifactText(payload: ArtifactPayload): string {
   const c = payload.content;
   switch (c.kind) {

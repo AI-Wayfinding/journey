@@ -21,12 +21,18 @@ wayfinding disconnect [--key-folder PATH]
 wayfinding add --type TYPE --title TITLE [--body TEXT] [--tags a,b] [--file PATH] [--format json|csv|toml|yaml|sqlite] [--url URL]
 wayfinding import <file-or-folder>
 wayfinding import-skill <folder> --title TITLE
-wayfinding list [--type TYPE] [--tag TAG]
+wayfinding project list|show|create|join|leave|purpose|state
+wayfinding project show|join|leave <project-id>
+wayfinding project create --purpose TEXT
+wayfinding project purpose <project-id> --purpose TEXT --predecessor SEQUENCE
+wayfinding project state <project-id> --project-state getting-started|active|looking-for-others|archived --predecessor SEQUENCE
+wayfinding artifact project <artifact-id> <project-id|none> --predecessor SEQUENCE|null
+wayfinding list [--type TYPE] [--tag TAG] [--project main|PROJECT_ID|all]
 wayfinding edit <id> --predecessor VERSION --type TYPE --title TITLE [--body TEXT] [--file PATH]
 wayfinding versions <id>
 wayfinding delete <id>
 wayfinding download <id> --blob BLOB_ID --output PATH [--version VERSION]
-wayfinding search <text>
+wayfinding search <text> [--project main|PROJECT_ID|all] [--type TYPE] [--tag TAG]
 wayfinding show <id>
 wayfinding comment <id> <text> [--version VERSION]
 wayfinding comments <id>
@@ -38,7 +44,7 @@ Use --journey <journey-id> with any one-shot command to ask for approval each ti
 Use --cache to store only encrypted journey records and a verified log head; --no-cache turns it off.
 Keys never go into the local cache. An agent cannot change journey membership or access.`;
 
-const valueFlags = new Set(['--scope', '--name', '--server', '--key-folder', '--journey', '--connect', '--type', '--title', '--body', '--tags', '--state', '--timeout', '--tag', '--file', '--format', '--url', '--summary', '--notes', '--predecessor', '--blob', '--output', '--version']);
+const valueFlags = new Set(['--scope', '--name', '--server', '--key-folder', '--journey', '--connect', '--type', '--title', '--body', '--tags', '--state', '--timeout', '--tag', '--file', '--format', '--url', '--summary', '--notes', '--predecessor', '--blob', '--output', '--version', '--project', '--purpose', '--project-state']);
 const boolFlags = new Set(['--remember', '--cache', '--no-cache', '--help', '--no-wait', '--wait', '--json']);
 function parse(args: string[]): { command: string; positional: string[]; flags: Record<string, string | boolean> } {
   const command = args[0] ?? '--help', flags: Record<string, string | boolean> = {}, positional: string[] = [];
@@ -165,7 +171,27 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       if (format && !['json', 'csv', 'toml', 'yaml', 'sqlite'].includes(format)) throw new Error('Unsupported data format.');
       return { type, title, body: flag(flags, '--body'), tags: flag(flags, '--tags')?.split(',').map(tag => tag.trim()).filter(Boolean) ?? [], files: file ? [{ path: file }] : undefined, format: format as ArtifactInput['format'], url: flag(flags, '--url'), summary: flag(flags, '--summary'), notes: flag(flags, '--notes') };
     };
+    const predecessor = (): number | null => {
+      const value = flag(flags, '--predecessor');
+      if (value === 'null') return null;
+      if (value === undefined || !/^(0|[1-9][0-9]*)$/.test(value) || !Number.isSafeInteger(Number(value))) throw new Error('Supply --predecessor with the observed sequence or null.');
+      return Number(value);
+    };
     switch (command) {
+      case 'project': {
+        const [action, id] = positional;
+        switch (action) {
+          case 'list': result = await client.projectList(); break;
+          case 'create': if (!flag(flags, '--purpose')) throw new Error('Supply --purpose TEXT.'); result = await client.projectCreate(flag(flags, '--purpose')!); break;
+          case 'show': if (!id) throw new Error('Give the project ID.'); result = await client.projectShow(id); break;
+          case 'join': case 'leave': if (!id) throw new Error('Give the project ID.'); result = await client.projectParticipation(id); break;
+          case 'purpose': if (!id || !flag(flags, '--purpose')) throw new Error('Give the project ID and --purpose TEXT.'); result = await client.projectPurpose(id, flag(flags, '--purpose')!, predecessor()); break;
+          case 'state': if (!id || !flag(flags, '--project-state')) throw new Error('Give the project ID and --project-state.'); result = await client.projectState(id, flag(flags, '--project-state')!, predecessor()); break;
+          default: throw new Error('Use project list, show, create, join, leave, purpose or state.');
+        }
+        break;
+      }
+      case 'artifact': if (positional[0] !== 'project' || !positional[1] || !positional[2]) throw new Error('Use artifact project <artifact-id> <project-id|none> --predecessor SEQUENCE|null.'); result = await client.artifactProject(positional[1], positional[2] === 'none' ? null : positional[2], predecessor()); break;
       case 'add': case 'create': result = await client.add(input()); break;
       case 'edit': if (!positional[0] || !flag(flags, '--predecessor')) throw new Error('Edit needs an artifact ID and --predecessor VERSION.'); result = await client.edit(positional[0], flag(flags, '--predecessor')!, input()); break;
       case 'versions': if (!positional[0]) throw new Error('Give the artifact ID.'); result = await client.versions(positional[0]); break;
@@ -173,8 +199,8 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       case 'download': if (!positional[0] || !flag(flags, '--blob') || !flag(flags, '--output')) throw new Error('Download needs an artifact ID, --blob and --output local path.'); result = await client.download(positional[0], flag(flags, '--blob')!, flag(flags, '--output')!, flag(flags, '--version')); break;
       case 'import-skill': if (!positional[0] || !flag(flags, '--title')) throw new Error('Give a skill folder and --title.'); result = await client.importSkill(positional[0], flag(flags, '--title')!, flag(flags, '--tags')?.split(',') ?? []); break;
       case 'import': if (!positional[0]) throw new Error('Give a Markdown file or folder to import.'); result = await importMarkdown(client, positional[0]); break;
-      case 'list': result = await client.list(flag(flags, '--type'), flag(flags, '--tag')); break;
-      case 'search': if (!positional[0]) throw new Error('Give words to search for in the journey.'); result = await client.search(positional.join(' ')); break;
+      case 'list': result = await client.list(flag(flags, '--type'), flag(flags, '--tag'), flag(flags, '--project')); break;
+      case 'search': if (!positional[0]) throw new Error('Give words to search for in the journey.'); result = await client.search(positional.join(' '), flag(flags, '--project'), flag(flags, '--type'), flag(flags, '--tag')); break;
       case 'show': if (!positional[0]) throw new Error('Give the journey item ID to show.'); result = await client.show(positional[0]); break;
       case 'comment': if (!positional[0] || !positional[1]) throw new Error('Give the journey item ID and comment text.'); result = await client.comment(positional[0], positional.slice(1).join(' '), flag(flags, '--version')); break;
       case 'comments': if (!positional[0]) throw new Error('Give the journey item ID to read comments.'); result = await client.comments(positional[0]); break;

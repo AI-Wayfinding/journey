@@ -1,6 +1,6 @@
 # Journey agent client
 
-The `wayfinding` command gives an agent access to one encrypted journey after a person approves it. It also runs a Model Context Protocol (MCP) server over standard input and output. Agents can create, read, edit, delete and comment on artifacts; **they cannot change journey membership or access**. Read-only agents cannot write.
+The `wayfinding` command gives an agent access to one encrypted journey after a person approves it. It also runs a Model Context Protocol (MCP) server over standard input and output. Agents can create, read, edit, delete and comment on artifacts; **they cannot change journey membership or access**. Read-only agents cannot write artifacts. A participating agent may change project purpose/state, even when read-only; this never grants artifact, comment, placement or upload permission.
 
 ## Install
 
@@ -98,6 +98,35 @@ Artifact IDs stay stable. Every edit requires the observed predecessor version; 
 Each read checks the full signed journey controls and their encrypted labels. Before a write, the client checks them again and uses the compiled Bend access rules. An agent's effective access follows the adding person's current role, limited by its original approval: a read-write agent loses writes while its person is read-only, and a read-only agent never gains writes. `status` reports that current effective access. Removing the person ends their agents' access. The client also checks the required version before encrypting an item or comment locally. Server requests are signed with the method, path and query, body digest, timestamp, and fresh nonce. If access ends, the client says so and stops. Decrypted items remain in memory for the process lifetime; keys are also stored in a file only when you explicitly use `--state`.
 
 Stage 1 requires client 0.1.5 and the `artifact-v1` capability. Older clients must update. If the required minimum rises or an unsupported control appears, CLI and MCP stop before returning content or writing. Run `npm install -g @ai-wayfinding/client@latest`, then retry with the same connection; do not request approval again. Legacy journeys were purged by server schema v2, not migrated. A live agent link shows current signed journey settings and remains read-only; its server must be updated if it cannot understand the controls.
+
+### Projects inside a journey
+
+Projects group artifacts; they do not change who can read them. Stage 2 requires client **0.1.6** and `project-v1`. Existing histories without project actions start with empty projects and unassigned artifacts; no migration or new approval is needed.
+
+```sh
+wayfinding project list
+wayfinding project create --purpose "Work on the shared question"
+wayfinding project show <project-id>
+wayfinding project join <project-id>
+wayfinding project leave <project-id>
+wayfinding project purpose <project-id> --purpose "Revised purpose" --predecessor <observed-sequence>
+wayfinding project state <project-id> --project-state active --predecessor <observed-sequence>
+wayfinding artifact project <artifact-id> <project-id> --predecessor null
+wayfinding artifact project <artifact-id> none --predecessor <observed-placement-sequence>
+wayfinding list --project main
+wayfinding list --project <project-id> --type document --tag resource
+wayfinding search "question" --project all --type document --tag resource
+```
+
+`project list` includes empty and archived projects. `project show` returns purpose, state, revision, signed history, person participation records and effective participants (including live agents). Creation requires ordinary content-write access, starts `getting-started` and joins nobody. People join or leave themselves in the browser. Agent `join` and `leave` only explain inherited participation; they post no action. An agent follows its adding person, including when added after that person joined. Leaving or removal ends that inherited participation.
+
+Participating agents may edit purpose/state under their person's participation, regardless of read-only approval or role. States are `getting-started`, `active`, `looking-for-others` and `archived`. Set another explicit state to reopen. Archives remain readable. Archive is a state label, not a content-write freeze: current content-write authority still permits artifacts, comments and placement. Metadata permission never permits artifact creation/edit/deletion, comments, placement or blob uploads. A key update blocks ordinary writes, not authorized project metadata.
+
+For purpose/state use the `revision` observed in `project show`; for placement use `placementRevision` from `show`, initially `null`. These are signed proof sequence numbers, not artifact version IDs. A stale edit conflicts: reread and decide again. Placement requires current content-write access even without project participation. It assigns, moves or clears one project pointer without changing the artifact's author, content version or attachments.
+
+`list` and `search` default to **main**, the unassigned artifacts. `--project main|PROJECT_ID|all` selects the grouping and intersects with type/tag/text filters. Direct `show`, comments, versions and downloads are not restricted by project placement. Unknown project IDs and malformed selectors fail rather than returning partial results.
+
+MCP adds `project_list`, `project_show`, `project_create`, `project_join`, `project_leave`, `project_purpose`, `project_state` and `artifact_project`. Use `id` for project/artifact IDs; `purpose` for text; `state` for an explicit state; `project` for placement (null clears). Purpose/state and placement require `predecessor` as a sequence number (null only for initial placement). MCP `list` and `search` accept `project: "main"|PROJECT_ID|"all"`, `type` and `tag`. All commands/tools use the existing approved connection and explicit local files; no credential handling changes.
 
 ### Optional encrypted-data cache
 
