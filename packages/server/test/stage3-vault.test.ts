@@ -10,6 +10,38 @@ const headers = { 'X-Client-Version': '0.1.7', 'X-Control-Format': 'control-proo
 const request = (path: string, auth: Record<string, string>, body?: Uint8Array) => worker.fetch(new Request('https://app.wayfinding.support' + path, { method: body ? 'PUT' : 'GET', headers: { ...headers, ...auth, Origin: 'https://app.wayfinding.support', 'X-Wayfinding': '1', 'Content-Type': 'application/octet-stream' }, ...(body ? { body: Uint8Array.from(body) } : {}) }), { ...env, RP_ID: 'app.wayfinding.support', ORIGIN: 'https://app.wayfinding.support', EMAIL_HASH_KEY: 'test-key' } as Env);
 
 describe('dedicated fixed ciphertext member vault in workerd SQLite', () => {
+  it('fills every slot independently, rolls back incomplete allocation and preserves bytes on retries', async () => {
+    const first = vault('allocation-test', 'first');
+    const inspect = (state: DurableObjectState) => ({
+      head: state.storage.sql.exec('SELECT token FROM head').toArray(),
+      rows: state.storage.sql.exec('SELECT id,length(ciphertext) AS bytes FROM slots ORDER BY id').toArray(),
+      // Both ends of every getRandomValues-sized chunk catch zero-fill, reused
+      // slots and incomplete fills without copying 64 MiB to the test.
+      fingerprints: state.storage.sql.exec<{ fingerprint: string }>(`WITH RECURSIVE chunks(n) AS (SELECT 0 UNION ALL SELECT n+1 FROM chunks WHERE n<15)
+        SELECT hex(substr(ciphertext,n*65536+1,16)) || hex(substr(ciphertext,(n+1)*65536-15,16)) AS fingerprint FROM slots,chunks ORDER BY id,n`).toArray().map(row => row.fingerprint),
+    });
+    await runInDurableObject(first, async (_o, state) => {
+      state.storage.sql.exec("CREATE TRIGGER fail_allocation BEFORE INSERT ON slots WHEN NEW.id=17 BEGIN SELECT RAISE(ABORT,'allocation interrupted'); END");
+      await expect(new PrivateVaultObject(state).allocate()).rejects.toThrow('allocation interrupted');
+      expect(state.storage.sql.exec('SELECT COUNT(*) AS n FROM slots').one()).toEqual({ n: 0 });
+      expect(state.storage.sql.exec('SELECT COUNT(*) AS n FROM head').one()).toEqual({ n: 0 });
+      state.storage.sql.exec('DROP TRIGGER fail_allocation');
+    });
+    const original = await runInDurableObject(first, async (_o, state) => {
+      await Promise.all([new PrivateVaultObject(state).allocate(), new PrivateVaultObject(state).allocate()]);
+      return inspect(state);
+    });
+    expect(original.head).toHaveLength(1);
+    expect(original.rows).toEqual(Array.from({ length: 64 }, (_, id) => ({ id, bytes: PRIVATE_SLOT_BYTES })));
+    expect(original.fingerprints).toHaveLength(1024);
+    expect(new Set(original.fingerprints).size).toBe(1024);
+    expect(original.fingerprints.every(value => value !== '0'.repeat(64))).toBe(true);
+    const retry = await runInDurableObject(first, async (_o, state) => { await new PrivateVaultObject(state).allocate(); return inspect(state); });
+    expect(retry).toEqual(original);
+    const second = await runInDurableObject(vault('allocation-test', 'second'), async (_o, state) => { await new PrivateVaultObject(state).allocate(); return inspect(state); });
+    expect(new Set([...original.fingerprints, ...second.fingerprints]).size).toBe(2048);
+    expect(second.head).not.toEqual(original.head);
+  });
   it('allocates all 64 MiB at every admission, isolates authenticated members/agents and never enters shared tables/R2', async () => {
     const { owner, j } = await fixture(), guest = await addPerson(j, owner), agent = await addAgent(j, owner, 'readwrite');
     for (const p of [owner, guest, agent]) {

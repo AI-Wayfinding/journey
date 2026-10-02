@@ -15,9 +15,17 @@ export class PrivateVaultObject {
   async allocate(): Promise<void> {
     if (this.state.storage.sql.exec('SELECT token FROM head WHERE id=1').toArray().length) return;
     const token = randomToken();
+    // SQLite copies bound bytes synchronously. Reuse one slot and its 64 KiB
+    // views instead of allocating 64 buffers and 1,024 views per admission.
+    const bytes = new Uint8Array(PRIVATE_SLOT_BYTES);
+    const chunks = Array.from({ length: PRIVATE_SLOT_BYTES / 65536 }, (_, i) => bytes.subarray(i * 65536, (i + 1) * 65536));
     this.state.storage.transactionSync(() => {
       if (this.state.storage.sql.exec('SELECT token FROM head WHERE id=1').toArray().length) return;
-      for (let i = 0; i < 64; i++) this.state.storage.sql.exec('INSERT INTO slots VALUES(?,?)', i, privateRandomBytes(PRIVATE_SLOT_BYTES));
+      for (let i = 0; i < 64; i++) {
+        // Never reuse contents: refill every byte with fresh CSPRNG output.
+        for (const chunk of chunks) crypto.getRandomValues(chunk);
+        this.state.storage.sql.exec('INSERT INTO slots VALUES(?,?)', i, bytes);
+      }
       this.state.storage.sql.exec('INSERT INTO head VALUES(1,?,NULL)', token);
     });
   }
