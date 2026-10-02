@@ -266,7 +266,7 @@ test('two people share a journey with PRF passkeys and same-origin assets', asyn
     const bobLists = await bob.page.request.get('/v1/journeys', { headers: journeyHeaders });
     const bobPrincipal = ((await bobLists.json()) as { journeys: { id: string; principal: string }[] }).journeys.find(j => journeyPath.endsWith(j.id))!.principal;
     await bob.page.getByRole('link', { name: 'First observation' }).click();
-    await expect(bob.page.getByText('A note shared with Bob')).toBeVisible();
+    await expect(bob.page.locator('#artifact-viewer').getByText('A note shared with Bob')).toBeVisible();
     await bob.page.getByLabel('Add a comment').fill('I can see this now.');
     await bob.page.getByRole('button', { name: 'Add comment' }).click();
     await expect(bob.page.getByText('I can see this now.')).toBeVisible();
