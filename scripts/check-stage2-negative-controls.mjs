@@ -62,7 +62,7 @@ const cases = [
   bend('placement: observed predecessor', '&& Nat.is_eq(old, predecessor) && Bool.not(Nat.is_eq(previous, project))', '&& True{} && Bool.not(Nat.is_eq(previous, project))', placement, true),
   bend('placement: single same-journey project', '(Nat.is_eq(project, 0n) || project_exists(project_find(items, project)))', 'True{}', placement),
   bend('placement: deleted reference', 'Bool.not(deleted) && Nat.is_eq(author, creator) && Nat.is_eq(writer, actor) && Nat.is_eq(old, predecessor)', 'True{} && Nat.is_eq(author, creator) && Nat.is_eq(writer, actor) && Nat.is_eq(old, predecessor)', placement, true),
-  bend('filter: main intersection', '(Nat.is_eq(selector, 1n) || Nat.is_eq(selector, project))', 'True{}', placement),
+  bend('filter: main intersection', '      Bool.not(deleted) && (Nat.is_eq(selector, 1n) || Nat.is_eq(selector, project))', '      Bool.not(deleted) && True{}', placement),
   bend('version: signed project barrier', 'project_ready(minimum) && project_previous(action, revision)', 'True{} && project_previous(action, revision)', versions, true),
   bend('capability: project required', 'control && artifact && project && project_ready(client)', 'control && artifact && True{} && project_ready(client)', versions, true),
   bend('capability: control required', 'control && artifact && project && project_ready(client)', 'True{} && artifact && project && project_ready(client)', versions),
