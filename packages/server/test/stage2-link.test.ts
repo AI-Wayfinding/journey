@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { newId, newLinkSecret, linkLookupHash, sealLinkIdentity, seal, projectPurposeHash } from '@ai-wayfinding/core';
+import { newId, newLinkSecret, linkLookupHash, sealLinkIdentity, seal, projectPurposeHash, verifyArtifactArchive, selectProjectArtifacts, exportArtifactJourney, importArtifactJourney, openBlob, type ArtifactArchive } from '@ai-wayfinding/core';
 import { PAGE_LIMIT } from '../src/agentLink.js';
 import { fixture, createProject, project, send, addAgent, addPerson, as, request, artifact, body, payload, submit, staged, upload, change, proof, stored } from './stage2-fixtures.js';
 
@@ -23,7 +23,7 @@ async function pages(secret: string, selector?: string) {
     expect(visited.has(url)).toBe(false); visited.add(url);
     const response = await request(url); expect(response.status).toBe(200);
     expect(response.headers.get('Cache-Control')).toBe('no-store, no-transform');
-    const text = await response.text(); expect(new TextEncoder().encode(text).length).toBeLessThanOrEqual(PAGE_LIMIT);
+    const text = await response.text(); expect(new TextEncoder().encode(text).length).toBeLessThanOrEqual(12_000);
     const data: LinkPage = JSON.parse(text); entries.push(data); raw += text;
     expect(data.selection).toBe(selector ?? 'main');
     expect(data.access.scope).toBe('read'); expect(data.howToWrite).toContain('read-only');
@@ -60,9 +60,32 @@ describe('Stage 2 read-only verified project link pages', () => {
     expect((await request(`/a/${secret}?project=${newId()}`)).status).toBe(404);
     const other = await fixture(), foreign = await createProject(other.j, other.owner); expect((await request(`/a/${secret}?project=${foreign.id}`)).status).toBe(404);
     expect((await request(`/v1/journeys/${j.id}/log`, 'GET', undefined, as(guest))).status).toBe(200);
+    // The member export, keyed replay and read-only link must agree on grouping;
+    // archive is a label, never a read boundary or a reason to drop live bytes.
+    const exported = await request(`/v1/journeys/${j.id}/export`, 'GET', undefined, as(guest));
+    expect(exported.status).toBe(200);
+    const archive = await exported.json() as ArtifactArchive;
+    const trust = { journey: j.id, creator: j.controls[0]!.proof.body.creator as ArtifactArchive['creator'] };
+    const verified = await verifyArtifactArchive(archive, [guest.age.identity], trust);
+    for (const [selector, page] of [['main', mainPage], [p.id, projectPage], ['all', allPage]] as const) {
+      const linkIds = page.entries.flatMap(entry => entry.items.map(item => item.id));
+      const artifactIds = selectProjectArtifacts(verified.state, selector);
+      expect(linkIds.filter(id => id === main.artifact || id === placed.artifact).sort()).toEqual(artifactIds.sort());
+    }
+    expect(verified.state.projects!.items[p.id]!.state).toBe('archived');
+    expect(verified.state.projects!.participation.some(pair => pair.member === guest.principal)).toBe(false);
+    const encrypted = await exportArtifactJourney(archive, [guest.age.recipient], [guest.age.identity], trust);
+    const imported = await importArtifactJourney(encrypted, [guest.age.identity], trust);
+    expect(imported.archive).toEqual(archive);
+    expect(imported.archive.blobs).toHaveLength(1);
+    const downloaded = await request(`/v1/journeys/${j.id}/blobs/${attachment.descriptor.id}`, 'GET', undefined, as(guest));
+    expect(downloaded.status).toBe(200);
+    const ciphertext = new Uint8Array(await downloaded.arrayBuffer());
+    expect(Array.from(ciphertext)).toEqual(Array.from(attachment.ciphertext));
+    expect(new TextDecoder().decode(await openBlob(ciphertext, attachment.descriptor, j.key))).toBe('SECRET attachment bytes');
     const before = await stored(j);
     for (const suffix of ['', '/log', '/projects', '/search', '/show', `/blobs/${attachment.descriptor.id}`]) {
-      const denied = await request(`/a/${secret}${suffix}`, 'POST', { control: await project(j, owner, 'project.join', { project: p.id, member: guest.principal, predecessor: null }) }); expect(denied.status).not.toBe(201); expect(await denied.text()).not.toContain('PROJECT ARTIFACT');
+      const denied = await request(`/a/${secret}${suffix}`, 'POST', { control: await project(j, owner, 'project.join', { project: p.id, member: guest.principal, predecessor: null }) }); expect(denied.status).toBeGreaterThanOrEqual(400); expect(await denied.text()).not.toContain('PROJECT ARTIFACT');
       if (suffix) { const read = await request(`/a/${secret}${suffix}`); expect(await read.text()).not.toContain('PROJECT ARTIFACT'); }
     }
     expect(await stored(j)).toBe(before);
@@ -71,6 +94,7 @@ describe('Stage 2 read-only verified project link pages', () => {
   });
 
   it('continues large Unicode purposes, text and effective rosters under PAGE_LIMIT with unchanged selectors and no plaintext storage', async () => {
+    expect(PAGE_LIMIT).toBe(12_000);
     const { owner, j, agent: linkAgent, secret } = await linked(), purpose = '🧭\n\t"\\'.repeat(1100), p = await createProject(j, owner, purpose);
     expect((await send(j, owner, await project(j, owner, 'project.join', { project: p.id, member: owner.principal, predecessor: null }))).status).toBe(201);
     // Large names stress both the overview's people rows and project participant continuations.

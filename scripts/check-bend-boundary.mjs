@@ -27,6 +27,15 @@ function build() {
   assert.match(read('packages/core/src/rules.ts'), /import rules from '@ai-wayfinding\/rules'/);
   assert.match(read('packages/server/src/enclave.ts'), /import rules from '@ai-wayfinding\/rules'/);
   for (const name of ['web', 'client']) assert.match(read(`packages/${name}/src/journey.ts`), /canWriteContent/);
+  const lock = JSON.parse(read('package-lock.json')).packages;
+  for (const name of ['core', 'client']) {
+    assert.equal(JSON.parse(read(`packages/${name}/package.json`)).version, '0.1.6');
+    assert.equal(lock[`packages/${name}`].version, '0.1.6');
+  }
+  for (const name of ['server', 'web', 'client']) {
+    assert.equal(JSON.parse(read(`packages/${name}/package.json`)).dependencies['@ai-wayfinding/core'], '0.1.6');
+    assert.equal(lock[`packages/${name}`].dependencies['@ai-wayfinding/core'], '0.1.6');
+  }
   console.log('Bend clean build ordering and shared consumer imports passed');
 }
 
@@ -40,25 +49,38 @@ function violations(source, path) {
   function visit(node) {
     // Exempt only known format validators and named-field adapters in their
     // owning files, never a whole consumer or an arbitrary same-named function.
-    if (path === 'packages/core/src/log.ts') {
-      if (ts.isFunctionDeclaration(node) && ['validMember', 'copyMember'].includes(node.name?.text)) return;
-      if (ts.isVariableDeclaration(node) && ['grants', 'memberBody', 'logDefinitions'].includes(node.name.getText(file))) return;
-    }
-    if (path === 'packages/core/src/rules.ts' && ts.isFunctionDeclaration(node) && ['normalizedMembers', 'projectMembers'].includes(node.name?.text)) return;
     if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === 'includes' && node.arguments.some(arg => text(arg) === "'members.manage'")) {
       // addMember translates the verified signed grant into a boolean input.
-      const adapter = path === 'packages/core/src/log.ts' && text(node.expression.expression) === '(body.grants as Grant[])';
+      const adapter = path === 'packages/core/src/log.ts' && ["(body.grants as Grant[]).includes('members.manage')", "b.grants.includes('members.manage')"].includes(text(node));
       // liveGrantInput translates only the verified signed grant into replayControl's Bend input.
       const liveGrantInput = path === 'packages/server/src/enclave.ts' && text(node) === "(proof.body.grants as string[]).includes('members.manage')";
-      if (!adapter && !liveGrantInput) findings.push('guide authority must call Bend');
+      const normalizedGrant = path === 'packages/core/src/rules.ts' && text(node) === "v.grants.includes('members.manage')";
+      if (!adapter && !liveGrantInput && !normalizedGrant) findings.push('guide authority must call Bend');
     }
-    if (ts.isBinaryExpression(node) && ['===', '!==', '==', '!='].includes(text(node.operatorToken))) {
+    if (ts.isBinaryExpression(node) && ['<', '<=', '>', '>=', '===', '!==', '==', '!='].includes(text(node.operatorToken))) {
       const expression = text(node);
+      const projectField = /(?:\.(?:project|participation|participants|active|revision)\b|\[['"](?:project|participation|participants|active|revision)['"]\])|(?:project|placement|pair)\.state\b/i;
+      const projectDecision = !ts.isStringLiteral(node.left) && projectField.test(text(node.left)) || !ts.isStringLiteral(node.right) && projectField.test(text(node.right));
+      if (/minClientVersion|CLIENT_VERSION/.test(expression)) findings.push('version decision must call Bend');
+      // Exact syntax/normalization/display adapters only; these cannot authorize an action.
+      const projectAdapter = [
+        ['packages/core/src/projects.ts', "body.project === null"],
+        ['packages/client/src/mcp.ts', "args.project === null"],
+        ['packages/web/src/projects.ts', 'p.project === project'],
+        ['packages/client/src/journey.ts', 'pair.project === id'],
+        ['packages/core/src/log.ts', 'Number(value.revision) - 1 === seq'],
+        ['packages/core/src/log.ts', 'Number(p.revision) - 1 === seq'],
+        ['packages/core/src/log.ts', 'p.project === 0n'],
+        ['packages/web/src/main.ts', "project.state === 'archived'"],
+        ['packages/web/src/main.ts', 's === project.state'],
+      ].some(([owner, input]) => owner === path && input === expression);
+      if (projectDecision && !projectAdapter) findings.push('project participation/state/placement decision must call Bend');
       const roleTest = /(?:\.(?:scope|role|contentRole|limit)|\[['"](?:scope|role|contentRole|limit)['"]\])\s*(?:===|!==|==|!=)\s*['"](?:read(?:write)?|read-only|read-write)['"]/.test(expression);
       const artifactDecision = /(?:\.(?:predecessor|head|typeHash)|\[['"](?:predecessor|head|typeHash)['"]\])\s*(?:===|!==|==|!=)/.test(expression) && !/\s(?:undefined|null)$/.test(expression);
       // Type/hash projection checks validate content, not permission or transitions.
       const artifactFormat = path === 'packages/core/src/artifacts.ts' && expression === 'await artifactTypeHash(payload.content.kind) !== body.typeHash';
-      const ownedTest = /(?:\.addedBy|\[['"]addedBy['"]\])\s*(?:===|!==|==|!=)/.test(expression);
+      const ownerField = ['packages/core/src/rules.ts', 'packages/core/src/log.ts'].includes(path) && ['value.addedBy !== undefined', 'value.addedBy === undefined'].includes(expression);
+      const ownedTest = /(?:\.addedBy|\[['"]addedBy['"]\])\s*(?:===|!==|==|!=)/.test(expression) && !ownerField;
       const artifactOwnership = /(?:\.(?:author|writer|owner)|\[['"](?:author|writer|owner)['"]\])\s*(?:===|!==|==|!=)/.test(expression);
       // Stored transport inputs are intentionally not verified replay; server
       // identity matching and kind/scope constructor mapping stay host-owned.
@@ -72,7 +94,8 @@ function violations(source, path) {
       const scopeSchema = /packages\/client\/src\/(?:connection|state|storage)\.ts$/.test(path)
         && ts.isBinaryExpression(node.parent) && node.parent.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken
         && /^(approved|row|session)\.scope !== 'read' && \1\.scope !== 'readwrite'$/.test(text(node.parent));
-      const parser = scopeSchema || path === 'packages/server/src/index.ts' && ["change.scope !== 'read'", "b.scope !== 'read'", "row.scope !== 'read'"].includes(expression);
+      const memberFormat = path === 'packages/core/src/log.ts' && ["value.scope === 'read'", "value.scope === 'readwrite'"].includes(expression);
+      const parser = scopeSchema || memberFormat || path === 'packages/server/src/index.ts' && ["change.scope !== 'read'", "b.scope !== 'read'", "row.scope !== 'read'"].includes(expression);
       const roleInput = ts.isConditionalExpression(node.parent) && [
         ['packages/core/src/log.ts', "body.role === 'read-only'"],
         ['packages/server/src/enclave.ts', "proof.body.role === 'read-only'"],
@@ -82,8 +105,19 @@ function violations(source, path) {
         && text(node.parent) === "b.role === 'read-only' || b.role === 'read-write'";
       if ((roleTest || ownedTest || artifactOwnership || artifactDecision && !artifactFormat) && !mapping && !bendInput && !parser && !roleInput && !roleSchema) findings.push('role/owner/artifact decision must call Bend');
     }
-    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && ['filter', 'some'].includes(node.expression.name.text)) {
-      if (/members\.manage|\.addedBy/.test(text(node))) findings.push('removal/last-guide decision must call Bend');
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && ['filter', 'some', 'find', 'includes', 'has'].includes(node.expression.name.text)) {
+      const expression = text(node);
+      const projectMembership = /particip(?:ation|ants)|(?:pairs|placements)\b/.test(expression)
+        || ts.isVariableDeclaration(node.parent) && /participant/i.test(text(node.parent.name));
+      const adapter = [
+        ['packages/web/src/projects.ts', 'ctx.state.projects?.participation.find(p => p.project === project && p.member === ctx.principal)'],
+        ['packages/client/src/journey.ts', '(verified.state.projects?.participation ?? []).filter(pair => pair.project === id)'],
+        ['packages/core/src/rules.ts', 'Object.keys(state.members).filter(actor => rules.project_participant(model.members, index.pairs, projectId(project), model.id(actor)))'],
+        ['packages/core/src/rules.ts', 'Object.keys(state.artifacts?.items ?? {}).filter(id => rules.project_selected(rules.artifact_find(artifacts.items, model.id(id)), index.placements, chosen, model.id(id)))'],
+      ].some(([owner, input]) => owner === path && input === expression);
+      if (projectMembership && !adapter) findings.push('derived project participants/placement filtering must call Bend');
+      const ownerIds = path === 'packages/core/src/rules.ts' && expression === 'Object.values(state.members).map(v => v.member.addedBy).filter((id): id is string => id !== undefined)';
+      if (['filter', 'some'].includes(node.expression.name.text) && /members\.manage|\.addedBy/.test(text(node)) && !ownerIds) findings.push('removal/last-guide decision must call Bend');
     }
     ts.forEachChild(node, visit);
   }
@@ -100,17 +134,18 @@ async function rules() {
     }
   }
   const required = {
-    'packages/core/src/log.ts': ['replayControl', 'projectMembers', 'replayArtifact'],
-    'packages/core/src/rules.ts': ['rules.artifact_apply', 'rules.artifact_live_blob'],
-    'packages/core/src/versions.ts': ['rules.artifact_client'],
+    'packages/core/src/log.ts': ['replayControl', 'projectMembers', 'replayArtifact', 'replayProject', 'invalidateProjectParticipation'],
+    'packages/core/src/rules.ts': ['rules.artifact_apply', 'rules.artifact_live_blob', 'rules.project_apply', 'rules.project_participant', 'rules.project_remove', 'rules.project_selector', 'rules.project_selected'],
+    'packages/core/src/versions.ts': ['rules.artifact_client', 'rules.project_client'],
     'packages/web/src/artifacts.ts': ['canWriteContent'],
-    'packages/server/src/agentLink.ts': ['canReadContent'],
-    'packages/client/src/journey.ts': ['canWriteContent', 'effectiveScope', 'replayArtifact'],
+    'packages/server/src/agentLink.ts': ['canReadContent', 'effectiveProjectParticipants', 'selectProjectArtifacts'],
+    'packages/client/src/journey.ts': ['canWriteContent', 'effectiveScope', 'replayArtifact', 'replayProject', 'effectiveProjectParticipants', 'selectProjectArtifacts'],
     'packages/core/src/removal.ts': ['replayControl', 'projectMembers', 'canControl'],
     'packages/core/src/link.ts': ['ownsAgent'],
-    'packages/web/src/main.ts': ['canWriteContent', 'isPersonGuide', 'canControl', 'canRenameAgent'],
+    'packages/web/src/main.ts': ['canWriteContent', 'isPersonGuide', 'canControl', 'canRenameAgent', 'canEditProject', 'effectiveProjectParticipants', 'selectProjectArtifacts'],
+    'packages/web/src/projects.ts': ['replayProject'],
     'packages/web/src/journey.ts': ['canWriteContent', 'isPersonGuide'],
-    'packages/server/src/enclave.ts': ['rules.server_version', 'rules.member_access', 'rules.server_content', 'rules.server_read', 'rules.server_admission', 'replayControl', 'normalizedMembers', 'rules.blob_stage', 'rules.blob_upload', 'rules.blob_reference', 'rules.blob_read', 'rules.blob_collect', 'rules.blob_reuse', 'replayArtifact', 'liveArtifactBlobIds'],
+    'packages/server/src/enclave.ts': ['rules.server_version', 'rules.member_access', 'rules.server_content', 'rules.server_read', 'rules.server_admission', 'replayControl', 'normalizedMembers', 'rules.blob_stage', 'rules.blob_upload', 'rules.blob_reference', 'rules.blob_read', 'rules.blob_collect', 'rules.blob_reuse', 'replayArtifact', 'liveArtifactBlobIds', 'replayProject', 'rules.project_client', 'rules.project_ready'],
   };
   for (const [path, calls] of Object.entries(required)) {
     const file = ts.createSourceFile(path, read(path), ts.ScriptTarget.Latest, true);
@@ -125,6 +160,19 @@ async function rules() {
   const replay = adapters.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === 'replayArtifact');
   const returned = replay?.body?.statements.find(ts.isReturnStatement)?.expression;
   assert(returned && ts.isObjectLiteralExpression(returned) && returned.properties.some(p => ts.isPropertyAssignment(p) && p.name.getText(adapters) === 'transition' && ts.isCallExpression(p.initializer) && p.initializer.expression.getText(adapters) === 'rules.artifact_apply'), 'Artifact replay transition must come directly from Bend');
+  const projectReplay = adapters.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === 'replayProject');
+  const projectReturn = projectReplay?.body?.statements.find(ts.isReturnStatement)?.expression;
+  assert(projectReturn && ts.isObjectLiteralExpression(projectReturn) && projectReturn.properties.some(p => ts.isPropertyAssignment(p) && p.name.getText(adapters) === 'transition' && ts.isCallExpression(p.initializer) && p.initializer.expression.getText(adapters) === 'rules.project_apply'), 'Project replay transition must come directly from Bend');
+  const directProjectAdapters = {
+    effectiveProjectParticipants: 'Object.keys(state.members).filter(actor => rules.project_participant(model.members, index.pairs, projectId(project), model.id(actor)))',
+    canEditProject: 'rules.project_participant(model.members, index.pairs, projectId(project), model.id(actor))',
+    selectProjectArtifacts: 'Object.keys(state.artifacts?.items ?? {}).filter(id => rules.project_selected(rules.artifact_find(artifacts.items, model.id(id)), index.placements, chosen, model.id(id)))',
+  };
+  for (const [name, expression] of Object.entries(directProjectAdapters)) {
+    const adapter = adapters.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === name);
+    const returned = adapter?.body?.statements.filter(ts.isReturnStatement);
+    assert(returned?.length === 1 && returned[0].expression?.getText(adapters) === expression, `${name} must use the real Bend decision as its return value`);
+  }
   // Negative controls: deleting a guard or restoring representative legacy
   // implementations makes this executable check fail, rather than a marker.
   for (const fixture of [
@@ -145,9 +193,30 @@ async function rules() {
     "if (edit['typeHash'] === artifact.typeHash) return true;",
     "function normalizedArtifacts() { return artifact.author === actor; }",
     "const projection = row.owner === actor;",
+    "if (pair.project === project && pair.member === actor && pair.active) return true;",
+    "if (pair['active'] === true) return true;",
+    "if (actor === pair['member'] && project === pair['project']) return true;",
+    "if (project.revision <= edit.predecessor) return true;",
+    "if (client >= state.minClientVersion) return true;",
+    "const participants = Object.values(state.members).filter(member => member.live);",
+    "if (project.state !== 'archived') return true;",
+    "if (edit.revision === project.revision) return true;",
+    "if (placement.project !== project.id) return false;",
+    "if (project.participants.includes(actor)) return true;",
+    "const members = state.projects.participation.filter(pair => pair.active);",
+    "const participants = Object.values(state.members).filter(member => pairs.has(member.id));",
+    "function normalizedProjects() { return pairs.some(pair => pair.member === actor); }",
     "if (body.role === 'read-only') return false;",
   ]) for (const path of ['packages/core/src/removal.ts', 'packages/server/src/enclave.ts', 'packages/server/src/index.ts', 'packages/web/src/main.ts', 'packages/client/src/journey.ts']) {
     assert(violations(fixture, path).length > 0, `Boundary negative control: ${path}: ${fixture}`);
+  }
+  for (const fixture of [
+    "function normalizedMembers() { return state.projects.participation.filter(pair => pair.active); }",
+    "function projectMembers() { return edit.predecessor === project.revision; }",
+    "function validMember() { return project.participants.includes(actor); }",
+    "const logDefinitions = [{ apply: () => pairs.some(pair => pair.member === actor) }];",
+  ]) for (const path of ['packages/core/src/rules.ts', 'packages/core/src/log.ts']) {
+    assert(violations(fixture, path).length > 0, `Adapter names must not exempt decisions: ${path}: ${fixture}`);
   }
   const grantInput = "(proof.body.grants as string[]).includes('members.manage')";
   assert.deepEqual(violations(grantInput, 'packages/server/src/enclave.ts'), []);

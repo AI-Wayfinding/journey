@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CLIENT_CAPABILITIES, CLIENT_VERSION, PROJECT_STATES, canonical, canWriteContent, canReadContent, canEditProject, stage0Rules, effectiveProjectParticipants, newId, projectPurposeHash, projectSelector, selectProjectArtifacts, seal, sealProjectPayload, signControlProof, validateProjectPublic, logDefinitions, supportsProjects, verifyControlProofs } from '../src/index.js';
+import { CLIENT_CAPABILITIES, CLIENT_VERSION, isProjectAction, PROJECT_STATES, canonical, canWriteContent, canReadContent, canEditProject, stage0Rules, effectiveProjectParticipants, newId, projectPurposeHash, projectSelector, selectProjectArtifacts, seal, sealProjectPayload, signControlProof, validateProjectPublic, logDefinitions, supportsProjects, verifyControlProofs } from '../src/index.js';
 import type { JsonObject, LogState } from '../src/index.js';
 import { artifactFixture, artifactAppend, artifactResult, artifactBody, agent, person } from './stage0-fixture.js';
 
@@ -23,6 +23,10 @@ async function denied(f: Awaited<ReturnType<typeof artifactFixture>>, code?: str
 }
 
 describe('signed project-v1 contracts', () => {
+  it('rejects unknown project controls even with an empty public body', () => {
+    expect(isProjectAction('project.future')).toBe(false);
+    expect(validateProjectPublic('project.future', { format: 'project-v1', project: newId(), predecessor: null }).ok).toBe(false);
+  });
   it('creates a fixed initial state with empty participation and committed private purpose; old histories are empty', async () => {
     for (const minimum of ['0.1.4', '0.1.5']) {
       const old = await artifactFixture(minimum);
@@ -175,6 +179,7 @@ describe('signed project-v1 contracts', () => {
       expect(s.projects!.items[project]!.state).toBe(state); expect(canReadContent(s, f.guide.member.id)).toBe(true);
       await artifactAppend(f, f.guide, 'project.state', { format: 'project-v1', project, state, predecessor }, {}); await denied(f);
     }
+    await artifactAppend(f, f.guide, 'project.state', { format: 'project-v1', project, state: 'looking-for-others', predecessor: 1 }, {}); await denied(f);
     await artifactAppend(f, f.guide, 'project.purpose', { format: 'project-v1', project, purposeHash: await projectPurposeHash('Updated'), predecessor: 1 }, { purpose: 'Updated' }); await denied(f);
     await artifactAppend(f, f.guide, 'project.purpose', { format: 'project-v1', project, purposeHash: await projectPurposeHash('Updated'), predecessor }, { purpose: 'Updated' });
     expect((await checked(f)).projects!.items[project]!.history).toHaveLength(8);
