@@ -93,7 +93,7 @@ async function artifactEffect(state: LogState, type: string, body: JsonObject, a
   projectArtifact(state.artifacts, type, body, actor, state.lastSeq + 1);
   return null;
 }
-import { emptyProjectHistory, PROJECT_ACTIONS, projectFields, validateProjectPublic } from './projects.js';
+import { emptyProjectHistory, projectActions, projectFields, validateProjectPublic } from './projects.js';
 import type { ProjectHistory, ProjectActionType, ProjectChange, ProjectState } from './projects.js';
 async function projectEffect(state: LogState, type: ProjectActionType, body: JsonObject, actor: string, at?: string): Promise<EffectError | null> {
   const seq = state.lastSeq + 1;
@@ -126,7 +126,7 @@ async function projectEffect(state: LogState, type: ProjectActionType, body: Jso
   state.projects = next;
   return null;
 }
-export const projectDefinitions: readonly LogDefinition[] = PROJECT_ACTIONS.map(name => ({ name, fields: projectFields(name), validate: b => validateProjectPublic(name, b), apply: (state, body, actor, at) => projectEffect(state, name, body, actor, at) }));
+export const projectDefinitions: readonly LogDefinition[] = projectActions().map(name => ({ name, fields: projectFields(name), validate: b => validateProjectPublic(name, b), apply: (state, body, actor, at) => projectEffect(state, name, body, actor, at) }));
 const ok: Validation = { ok: true };
 const fail = (reason: string): Validation => ({ ok: false, reason });
 const object = (value: unknown): value is JsonObject => Boolean(value) && typeof value === 'object' && !Array.isArray(value);

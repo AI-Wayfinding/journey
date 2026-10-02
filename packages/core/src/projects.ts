@@ -11,8 +11,12 @@ import type { JsonObject, ProtocolRecord, Validation } from './types.js';
 export const PROJECT_FORMAT = 'project-v1' as const;
 export const PROJECT_STATES = ['getting-started', 'active', 'looking-for-others', 'archived'] as const;
 export type ProjectState = typeof PROJECT_STATES[number];
-export const PROJECT_ACTIONS = ['project.create', 'project.purpose', 'project.state', 'project.join', 'project.leave', 'artifact.project'] as const;
-export type ProjectActionType = typeof PROJECT_ACTIONS[number];
+export type ProjectActionType = 'project.create' | 'project.purpose' | 'project.state' | 'project.join' | 'project.leave' | 'artifact.project';
+/** A hoisted factory lets log definitions initialize even when adapters load first. */
+export function projectActions(): readonly ProjectActionType[] {
+  return ['project.create', 'project.purpose', 'project.state', 'project.join', 'project.leave', 'artifact.project'];
+}
+export const PROJECT_ACTIONS = projectActions();
 export interface ProjectChange { seq: number; actor: string; at: string; type: ProjectActionType; from?: ProjectState; to?: ProjectState }
 export interface Project { id: string; purpose: string; purposeHash: string; state: ProjectState; revision: number; creator: string; at: string; history: ProjectChange[] }
 export interface ProjectParticipation { project: string; member: string; revision: number; active: boolean }

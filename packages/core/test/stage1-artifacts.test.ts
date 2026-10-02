@@ -62,7 +62,7 @@ describe('Stage 1 strict contracts', () => {
   it('refuses unsafe URLs without fetching and requires both Stage 1 capabilities', () => {
     for (const url of ['http://example.org', 'https://example.org/path?q=1#part']) expect(validArtifactUrl(url)).toBe(true);
     for (const url of ['javascript:alert(1)', 'data:text/html,x', 'file:///etc/passwd', 'ftp://example.org/file', '/relative', 'https://user:pass@example.org', 'https://example.org/\n', ' https://example.org', 'https://example.org/a b']) expect(validArtifactUrl(url)).toBe(false);
-    expect(CLIENT_VERSION).toBe('0.1.5'); expect(CLIENT_CAPABILITIES).toEqual(['control-proof-v1', 'artifact-v1']);
+    expect(CLIENT_VERSION).toBe('0.1.6'); expect(CLIENT_CAPABILITIES).toEqual(['control-proof-v1', 'artifact-v1', 'project-v1']);
     expect(supportsArtifacts('0.1.5', '0.1.5', CLIENT_CAPABILITIES)).toBe(true);
     for (const version of ['0.1.4', '0.1.3', '01.1.5', '0.1.5-extra']) expect(supportsArtifacts(version, '0.1.5', CLIENT_CAPABILITIES)).toBe(false);
     for (const capabilities of [[], ['control-proof-v1'], ['artifact-v1']]) expect(supportsArtifacts('0.1.5', '0.1.5', capabilities)).toBe(false);
