@@ -1,10 +1,10 @@
 import rules from '@ai-wayfinding/rules';
 import type { Version } from '@ai-wayfinding/rules';
 export const PROTOCOL_VERSION = 1 as const;
-export const CLIENT_VERSION = '0.1.5' as const;
+export const CLIENT_VERSION = '0.1.6' as const;
 export const CONTROL_FORMAT = 'control-proof-v1' as const;
 export const ARTIFACT_CLIENT_VERSION = '0.1.5' as const;
-export const CLIENT_CAPABILITIES = [CONTROL_FORMAT, 'artifact-v1'] as const;
+export const CLIENT_CAPABILITIES = [CONTROL_FORMAT, 'artifact-v1', 'project-v1'] as const;
 export function supportsArtifacts(client: string, minimum: string, capabilities: readonly string[]): boolean {
   try { return rules.artifact_client(ruleVersion(client), ruleVersion(minimum), capabilities.includes(CONTROL_FORMAT), capabilities.includes('artifact-v1')); } catch { return false; }
 }
@@ -20,4 +20,9 @@ export function ruleVersion(value: string): Version {
 }
 export function meetsMinClientVersion(client: string, minimum: string): boolean {
   return rules.version_ge(ruleVersion(client), ruleVersion(minimum));
+}
+
+export const PROJECT_CLIENT_VERSION = '0.1.6' as const;
+export function supportsProjects(client: string, minimum: string, capabilities: readonly string[]): boolean {
+  try { return rules.project_client(ruleVersion(client), ruleVersion(minimum), capabilities.includes(CONTROL_FORMAT), capabilities.includes('artifact-v1'), capabilities.includes('project-v1')); } catch { return false; }
 }

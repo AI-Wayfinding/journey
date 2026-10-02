@@ -6,7 +6,7 @@ export interface Principal { id: string; kind: Kind; scope: Scope; expiresAt?: n
 export interface EpochWrap { principal: string; epoch: number; wrap: string }
 export interface ControlInput { proof: ControlProof; envelope: Envelope }
 export interface Admission { id: string; kind: Kind; recipient: string; signingKey: string; accountHash?: string; support?: boolean; scope?: Scope; expiresAt?: number }
-export interface CreateJourney { id: string; name: string; creatorEmail: string; creatorHash: string; creator: Principal; control: ControlInput; wraps: EpochWrap[]; recoveryWrap: string; minClientVersion: string; clientVersion?: string; controlFormat?: string; artifactFormat?: string }
+export interface CreateJourney { id: string; name: string; creatorEmail: string; creatorHash: string; creator: Principal; control: ControlInput; wraps: EpochWrap[]; recoveryWrap: string; minClientVersion: string; clientVersion?: string; controlFormat?: string; artifactFormat?: string; projectFormat?: string }
 export interface RecordInput { envelope: Envelope }
 export type ErrorCode = 'invalid-request' | 'unauthorized' | 'forbidden' | 'csrf' | 'not-found' | 'conflict' | 'old-epoch' | 'rate-limited' | 'too-large' | 'internal';
 export function failure(code: ErrorCode, status: number): Response { return Response.json({ error: { code } }, { status }); }
@@ -21,7 +21,7 @@ export function limitNumber(value: string | undefined, fallback: number): number
 export function sequenceCursor(value: string | undefined, fallback: number): number | null { if (value === undefined) return fallback; const n = Number(value); return /^\d+$/.test(value) && Number.isSafeInteger(n) ? n : null; }
 
 // Only the Worker calls these objects; the public JSON boundary validates and copies named fields first.
-export interface Subject { principal: string; accountHash?: string; agent?: boolean; clientVersion?: string; controlFormat?: string; artifactFormat?: string }
+export interface Subject { principal: string; accountHash?: string; agent?: boolean; clientVersion?: string; controlFormat?: string; artifactFormat?: string; projectFormat?: string }
 export type RegistryMessage =
   | { op: 'emailStart'; ipHash: string; emailHash: string; tokenHash: string; email: string }
   | { op: 'emailVerify'; tokenHash: string; sessionHash: string }

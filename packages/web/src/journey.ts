@@ -4,7 +4,7 @@ import type { ArtifactArchive, ControlProof, Envelope, JourneyKey, KeyWrap, LogE
 import { getPersonKeys, rememberJourneyKey } from './keys.js';
 import type { PersonKeys } from './keys.js';
 
-export const INTERFACE_VERSION = '0.1.5';
+export const INTERFACE_VERSION = '0.1.6';
 export class ApiError extends Error { constructor(message: string, readonly status: number) { super(message); } }
 export type JourneyListing = { id: string; name: string; principal: string };
 export type SignedControl = { proof: ControlProof; envelope: Envelope };
@@ -12,7 +12,7 @@ export type EntryRow = SignedControl & { seq: number };
 export type JourneyContext = { id: string; principal: string; keys: PersonKeys; state: LogState; epochs: Map<number, JourneyKey>; log: LogEntry[]; controls: SignedControl[] };
 const historyError = 'Journey history could not be verified. Stop and ask a member for help.';
 export async function api<T>(path: string, method = 'GET', data?: unknown, principal?: string): Promise<T> {
-  const response = await fetch('/v1' + path, { method, credentials: 'same-origin', cache: 'no-store', headers: { 'X-Client-Version': INTERFACE_VERSION, 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': 'artifact-v1', ...(data === undefined ? {} : { 'Content-Type': 'application/json' }), ...(method === 'GET' ? {} : { 'X-Wayfinding': '1' }), ...(principal ? { 'X-Principal': principal } : {}) }, ...(data === undefined ? {} : { body: JSON.stringify(data) }) });
+  const response = await fetch('/v1' + path, { method, credentials: 'same-origin', cache: 'no-store', headers: { 'X-Client-Version': INTERFACE_VERSION, 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': 'artifact-v1', 'X-Project-Format': 'project-v1', ...(data === undefined ? {} : { 'Content-Type': 'application/json' }), ...(method === 'GET' ? {} : { 'X-Wayfinding': '1' }), ...(principal ? { 'X-Principal': principal } : {}) }, ...(data === undefined ? {} : { body: JSON.stringify(data) }) });
   if (!response.ok) {
     const error = await response.json().catch(() => null) as { error?: { code?: string } } | null;
     throw new ApiError(plainError(error?.error?.code, response.status), response.status);
@@ -40,8 +40,9 @@ export function assertSupported(minimum: string, format = 'control-proof-v1'): v
   if (format !== 'control-proof-v1' || !meetsMinClientVersion(INTERFACE_VERSION, minimum)) throw new Error(UPDATE_REQUIRED);
 }
 export async function verifiedJourney(id: string, principal: string, keys: PersonKeys): Promise<JourneyContext> {
-  const protocol = await api<{ minClientVersion: string; controlFormat: string; artifactFormat?: string }>(`/journeys/${id}/protocol`, 'GET', undefined, principal);
+  const protocol = await api<{ minClientVersion: string; controlFormat: string; artifactFormat?: string; projectFormat?: string }>(`/journeys/${id}/protocol`, 'GET', undefined, principal);
   assertSupported(protocol.minClientVersion, protocol.controlFormat);
+  if (protocol.projectFormat !== undefined && protocol.projectFormat !== 'project-v1') throw new Error(UPDATE_REQUIRED);
   if (protocol.artifactFormat !== undefined && protocol.artifactFormat !== 'artifact-v1') throw new Error(UPDATE_REQUIRED);
   const rows = await allLogRows(id, principal);
   if (!rows.length || rows.some(row => !row.proof || !row.envelope || row.seq !== row.proof.seq)) throw new Error(historyError);

@@ -1,3 +1,4 @@
+import { isProjectAction, copyProjectPublic, validateProjectPublic, readProjectPayload } from './projects.js';
 import { asBuffer, decode, encode, utf8 } from './codec.js';
 import { canonical, controlDefinitions, initialLogState, verifyLog } from './log.js';
 import type { LogEntry, LogResult, Member, LogState } from './log.js';
@@ -35,6 +36,7 @@ export async function sealControlLabels(entry: Pick<LogEntry, 'body'>, outside: 
   return seal({ type: 'control.labels', typeVersion: 1, body: privateLabels(entry) }, outside, key);
 }
 async function projection(entry: Pick<LogEntry, 'type' | 'body'>): Promise<JsonObject> {
+  if (isProjectAction(entry.type)) return copyProjectPublic(entry.type, entry.body);
   if (isArtifactAction(entry.type)) return copyArtifactPublic(entry.type, entry.body);
   const definition = controlDefinitions.find(d => d.name === entry.type);
   if (!definition) throw new Error('Unknown control');
@@ -69,6 +71,7 @@ export async function signControlProof(entry: Omit<LogEntry, 'sig'>, envelope: E
  * are SHA-256 values, not names/emails; all other fields keep normal validation. */
 function publicBody(proof: ControlProof): JsonObject | undefined {
   if (!object(proof.body)) return undefined;
+  if (isProjectAction(proof.type)) return validateProjectPublic(proof.type, proof.body).ok ? copyProjectPublic(proof.type, proof.body) : undefined;
   if (isArtifactAction(proof.type)) return validateArtifactPublic(proof.type, proof.body).ok ? copyArtifactPublic(proof.type, proof.body) : undefined;
   const definition = controlDefinitions.find(d => d.name === proof.type);
   if (!definition || Object.keys(proof.body).some(k => !definition.fields.includes(k))) return undefined;
@@ -108,6 +111,11 @@ export async function readControlProof(proof: ControlProof, envelope: Envelope, 
   if (isArtifactAction(proof.type)) {
     if (key) await readArtifactPayload(proof, envelope, key);
     return { entry: { v: 1, seq: proof.seq, prev: proof.prev, at: proof.at, actor: proof.actor, type: proof.type, body, sig: proof.sig }, unavailableLabels: key ? [] : ['content'] };
+  }
+  if (isProjectAction(proof.type)) {
+    const record = key ? await readProjectPayload(proof, envelope, key) : undefined;
+    if (record?.type === 'project.content') body.purpose = record.body.purpose;
+    return { entry: { v: 1, seq: proof.seq, prev: proof.prev, at: proof.at, actor: proof.actor, type: proof.type, body, sig: proof.sig }, unavailableLabels: key ? [] : ['purpose'] };
   }
   let labels: JsonObject = {};
   if (key) try {
@@ -153,7 +161,7 @@ export async function verifyControlProofs(proofs: readonly ControlProof[], envel
       || proof.envelopeHash !== await digest(envelope)) return fail('Control ciphertext or position mismatch');
     const body = publicBody(proof);
     if (!body) return fail('Invalid public control body');
-    if (isArtifactAction(proof.type)) {
+    if (isArtifactAction(proof.type) || isProjectAction(proof.type)) {
       if (legacy.length) return fail('No legacy artifact migration');
       if (!Number.isSafeInteger(envelope.outside.size) || envelope.outside.size < 0 || envelope.outside.size > MAX_ARTIFACT_PAYLOAD_BYTES || envelope.outside.epoch !== state?.currentEpoch) return fail('Invalid artifact payload size or epoch');
       if (body.typeHash !== undefined && !(await Promise.all(ARTIFACT_TYPES.map(artifactTypeHash))).includes(body.typeHash as string)) return fail('Unsupported artifact type');
@@ -166,9 +174,10 @@ export async function verifyControlProofs(proofs: readonly ControlProof[], envel
       if (!await crypto.subtle.verify('Ed25519', key, asBuffer(decode(proof.sig)), asBuffer(utf8(canonical(unsigned(proof)))))) return fail('Control signature mismatch');
     } catch { return fail('Invalid control signature'); }
     if (!stage0Rules.stage_ready(ruleVersion(state?.minClientVersion ?? body.minClientVersion as string))) return fail('Control proofs require the legacy upgrade barrier');
+    if (isProjectAction(proof.type) && keys.length && !keys.some(k => k.epoch === envelope.outside.epoch)) return fail('Missing project key');
     let entry: LogEntry;
     try { entry = (await readControlProof(proof, envelope, keys.find(k => k.epoch === envelope.outside.epoch))).entry; }
-    catch { return fail('Invalid encrypted artifact payload'); }
+    catch { return fail('Invalid encrypted artifact or project payload'); }
     if (seq === 0) state = initialLogState(entry);
     else {
       const failure = await controlDefinitions.find(d => d.name === proof.type)!.apply?.(state!, entry.body, proof.actor, proof.at);
@@ -177,5 +186,6 @@ export async function verifyControlProofs(proofs: readonly ControlProof[], envel
     state!.lastSeq = seq;
     state!.lastHash = await hashControlProof(proof);
   }
+  if (state && keys.length && !stage0Rules.version_ge(ruleVersion('0.1.6'), ruleVersion(state.minClientVersion))) return { ok: false, error: { code: 'client-too-old', seq: state.lastSeq, message: 'Unsupported client minimum; update client' } };
   return state ? { ok: true, state } : { ok: false, error: { code: 'invalid-entry', seq: 0, message: 'Missing creation proof' } };
 }

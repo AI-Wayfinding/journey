@@ -36,7 +36,7 @@ it('CLI and live MCP fail closed for upgraded minimum and unsupported controls w
     expect((await sdk.callTool({ name: 'list' })).isError).not.toBe(true);
     for (const gate of ['unsupported', 'minimum']) {
       unsupported = gate === 'unsupported';
-      if (!unsupported) await change(trip, owner, 'client.minVersion', { version: '0.1.6' });
+      if (!unsupported) await change(trip, owner, 'client.minVersion', { version: '0.1.7' });
       requests.length = 0;
       for (const args of [['list'], ['status'], ['add','--type','note','--title','Must not save','--body','No']]) {
         const failed = await exec(process.execPath, [cli, ...args, '--state', file]).catch(error => error);

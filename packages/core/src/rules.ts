@@ -111,9 +111,9 @@ export function replayJourneyControl(state: LogState, model: ReturnType<typeof n
 }
 
 /** Signed artifact history -> production Bend, with one ID namespace including type commitments. */
-export function normalizedArtifacts(state: LogState, body: import('./types.js').JsonObject = {}, actor = '', now?: number) {
+export function normalizedArtifacts(state: LogState, body: import('./types.js').JsonObject = {}, actor = '', now?: number, extraIds: readonly string[] = []) {
   const history = state.artifacts ?? { items: {}, used: [] };
-  const strings = [...history.used, actor];
+  const strings = [...history.used, actor, ...extraIds, ...Object.keys(state.projects?.items ?? {})];
   for (const item of Object.values(history.items)) {
     strings.push(item.id, item.author, item.typeHash, item.head);
     for (const version of item.versions) strings.push(version.id, version.actor, ...version.blobs.map(b => b.id));
@@ -122,7 +122,7 @@ export function normalizedArtifacts(state: LogState, body: import('./types.js').
   for (const field of ['artifact', 'author', 'actor', 'version', 'predecessor', 'typeHash', 'comment', 'onVersion']) if (typeof body[field] === 'string') strings.push(body[field]);
   if (Array.isArray(body.blobs)) for (const blob of body.blobs as import('./artifacts.js').BlobDescriptor[]) strings.push(blob.id);
   const model = normalizedMembers(state, strings, now);
-  const index: import('@ai-wayfinding/rules').ArtifactIndex = { $: 'ArtifactIndex', used: ruleList(history.used.map(model.id)), items: ruleList(Object.values(history.items).map(item => ({
+  const index: import('@ai-wayfinding/rules').ArtifactIndex = { $: 'ArtifactIndex', used: ruleList([...history.used, ...Object.keys(state.projects?.items ?? {})].map(model.id)), items: ruleList(Object.values(history.items).map(item => ({
     $: 'Artifact' as const, id: model.id(item.id), author: model.id(item.author), typeHash: model.id(item.typeHash), head: model.id(item.head), deleted: item.deleted,
     versions: ruleList(item.versions.map(v => ({ $: 'ArtifactVersion' as const, id: model.id(v.id), writer: model.id(v.actor), blobs: ruleList(v.blobs.map(b => model.id(b.id))) }))),
   }))) };
@@ -143,4 +143,63 @@ export function liveArtifactBlobIds(state: LogState): string[] {
   const { model, index } = normalizedArtifacts(state);
   const blobs = Object.values(state.artifacts?.items ?? {}).flatMap(a => a.versions.flatMap(v => v.blobs.map(b => b.id)));
   return [...new Set(blobs)].filter(id => rules.artifact_live_blob(index.items, model.id(id)));
+}
+
+import type { ProjectState, ProjectActionType } from './projects.js';
+import { projectSelector } from './projects.js';
+import type { JsonObject } from './types.js';
+const phases = { 'getting-started': 'GettingStarted', active: 'Active', 'looking-for-others': 'LookingForOthers', archived: 'Archived' } as const;
+const revision = (seq: number | null): bigint => seq === null ? 0n : BigInt(seq + 1);
+/** Normalization reserves 0 for main and 1 for all; all IDs share a namespace. */
+export function normalizedProjects(state: LogState, body: JsonObject = {}, actor = '', now?: number) {
+  const history = state.projects ?? { items: {}, participation: [], placements: {} };
+  const strings = [actor, ...Object.keys(history.items), ...history.participation.flatMap(p => [p.project, p.member]), ...Object.values(history.placements).flatMap(p => [p.artifact, ...(p.project ? [p.project] : [])])];
+  for (const key of ['project', 'member', 'artifact', 'actor', 'author']) if (typeof body[key] === 'string') strings.push(body[key]);
+  const { model, index: artifacts } = normalizedArtifacts(state, {}, actor, now, strings);
+  // Shift only project identifiers: the artifact/member namespace remains aligned.
+  const projectId = (value: string | null) => value === null ? 0n : model.id(value) + 1n;
+  const index: import('@ai-wayfinding/rules').ProjectIndex = { $: 'ProjectIndex',
+    items: ruleList(Object.values(history.items).map(p => ({ $: 'ProjectInfo' as const, id: projectId(p.id), revision: revision(p.revision), phase: { $: phases[p.state] } }))),
+    pairs: ruleList(history.participation.map(p => ({ $: 'Participation' as const, project: projectId(p.project), person: model.id(p.member), revision: revision(p.revision), active: p.active }))),
+    placements: ruleList(Object.values(history.placements).map(p => ({ $: 'Placement' as const, artifact: model.id(p.artifact), project: projectId(p.project), revision: revision(p.revision) }))),
+  };
+  // Project IDs are shifted, so translate used IDs to that same namespace for collision checks.
+  const reserved: import('@ai-wayfinding/rules').ArtifactIndex = { $: 'ArtifactIndex', items: artifacts.items, used: ruleList((state.artifacts?.used ?? []).map(v => model.id(v) + 1n)) };
+  return { model, index, artifacts, reserved, projectId };
+}
+export function replayProject(state: LogState, type: ProjectActionType, body: JsonObject, actor: string, now?: number) {
+  const { model, index, reserved, projectId } = normalizedProjects(state, body, actor, now);
+  const id = projectId(body.project as string | null);
+  const predecessor = revision((body.predecessor ?? null) as number | null);
+  let action: import('@ai-wayfinding/rules').ProjectAction;
+  switch (type) {
+    case 'project.create': action = { $: 'ProjectCreate', id }; break;
+    case 'project.purpose': action = { $: 'ProjectPurpose', id, predecessor }; break;
+    case 'project.state': action = { $: 'ProjectStateChange', id, predecessor, phase: { $: phases[body.state as ProjectState] } }; break;
+    case 'project.join': case 'project.leave': action = { $: type === 'project.join' ? 'ProjectJoin' : 'ProjectLeave', id, member: model.id(body.member as string), predecessor }; break;
+    case 'artifact.project': action = { $: 'ArtifactProject', id: model.id(body.artifact as string), project: id, author: model.id(body.author as string), writer: model.id(body.actor as string), predecessor }; break;
+  }
+  return { transition: rules.project_apply(model.members, model.id(actor), ruleVersion(state.minClientVersion), state.pendingRotation === true, index, reserved, revision(state.lastSeq + 1), action), model, projectId };
+}
+export function effectiveProjectParticipants(state: LogState, project: string, now = Date.now()): string[] {
+  const { model, index, projectId } = normalizedProjects(state, { project }, '', now);
+  return Object.keys(state.members).filter(actor => rules.project_participant(model.members, index.pairs, projectId(project), model.id(actor)));
+}
+export function canEditProject(state: LogState, actor: string, project: string, now = Date.now()): boolean {
+  const { model, index, projectId } = normalizedProjects(state, { project }, actor, now);
+  return rules.project_participant(model.members, index.pairs, projectId(project), model.id(actor));
+}
+export function invalidateProjectParticipation(state: LogState, person: string): void {
+  if (!state.projects) return;
+  const { model, index, projectId } = normalizedProjects(state, { member: person });
+  const names = new Map(Object.keys(state.projects.items).map(id => [projectId(id), id]));
+  state.projects.participation = ruleValues(rules.project_remove(index.pairs, model.id(person), revision(state.lastSeq + 1))).map(p => ({ project: names.get(p.project)!, member: model.ids[Number(p.person) - 1]!, revision: Number(p.revision) - 1, active: p.active }));
+}
+/** Bend selects only live matching artifacts; host type/tag/text filters intersect this result. */
+export function selectProjectArtifacts(state: LogState, selector?: unknown): string[] {
+  const selection = projectSelector(selector);
+  const { model, index, artifacts, projectId } = normalizedProjects(state, { project: selection });
+  const chosen = selection === 'main' ? 0n : selection === 'all' ? 1n : projectId(selection);
+  if (!rules.project_selector(index.items, chosen)) throw new Error('Unknown project');
+  return Object.keys(state.artifacts?.items ?? {}).filter(id => rules.project_selected(rules.artifact_find(artifacts.items, model.id(id)), index.placements, chosen, model.id(id)));
 }

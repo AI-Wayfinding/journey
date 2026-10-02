@@ -1,7 +1,7 @@
 import { expect } from 'vitest';
 import { createAgeIdentity, createSigningIdentity, importSigningKey, newId, hashEntry, signEntry, verifyLog } from '../src/index.js';
-import type { LogEntry, Member, ControlProof, Envelope, JsonObject, ArtifactActionType } from '../src/index.js';
-import { generateJourneyKey, hashControlProof, sealControlLabels, sealArtifactPayload, signControlProof, verifyControlProofs, isArtifactAction, artifactTypeHash } from '../src/index.js';
+import type { LogEntry, Member, ControlProof, Envelope, JsonObject, ArtifactActionType, ProjectActionType } from '../src/index.js';
+import { generateJourneyKey, hashControlProof, sealControlLabels, sealArtifactPayload, signControlProof, verifyControlProofs, isArtifactAction, artifactTypeHash, isProjectAction, sealProjectPayload } from '../src/index.js';
 export async function person() {
   const sign = await createSigningIdentity(), age = await createAgeIdentity();
   return { member: { id: newId(), kind: 'person', recipient: age.recipient, signingKey: sign.publicKey } as Member, key: await importSigningKey(sign.privateKey), identity: age.identity };
@@ -34,7 +34,7 @@ export async function artifactBody(actor: string, overrides: JsonObject = {}): P
 export async function artifactAppend(f: ArtifactFixture, actor: Awaited<ReturnType<typeof person>>, type: string, body: JsonObject, payload: JsonObject = documentPayload(), at = '2026-01-02T00:00:00.000Z') {
   const entry = { v: 1 as const, seq: f.controls.length, prev: f.controls.length ? await hashControlProof(f.controls.at(-1)!.proof) : null, at, actor: actor.member.id, type, body };
   const outside = { id: newId(), journey: f.journey, seq: entry.seq, epoch: f.key.epoch, createdAt: at };
-  const envelope = isArtifactAction(type) ? await sealArtifactPayload(type as ArtifactActionType, body, payload, outside, f.key) : await sealControlLabels(entry, outside, f.key);
+  const envelope = isProjectAction(type) ? await sealProjectPayload(type as ProjectActionType, body, payload, outside, f.key) : isArtifactAction(type) ? await sealArtifactPayload(type as ArtifactActionType, body, payload, outside, f.key) : await sealControlLabels(entry, outside, f.key);
   const control = { proof: await signControlProof(entry, envelope, f.journey, actor.key), envelope };
   f.controls.push(control);
   return control;

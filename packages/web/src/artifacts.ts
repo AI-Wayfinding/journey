@@ -51,7 +51,7 @@ async function binaryResponse(response: Response): Promise<Response> {
   return response;
 }
 function blobHeaders(ctx: JourneyContext): Record<string, string> {
-  return { 'X-Client-Version': INTERFACE_VERSION, 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': ARTIFACT_FORMAT, 'X-Principal': ctx.principal };
+  return { 'X-Client-Version': INTERFACE_VERSION, 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': ARTIFACT_FORMAT, 'X-Project-Format': 'project-v1', 'X-Principal': ctx.principal };
 }
 /** Reject oversized files before reading or staging; upload only binary ciphertext. */
 export async function uploadAttachment(ctx: JourneyContext, file: File, path?: string): Promise<ArtifactAttachment> {

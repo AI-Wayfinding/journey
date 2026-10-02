@@ -42,12 +42,13 @@ import { verifyControlProofs } from './controlProof.js';
 import type { ControlProof } from './controlProof.js';
 import type { Member } from './log.js';
 import type { JourneyKey } from './teamKey.js';
-import { canonical, logDefinitions } from './log.js';
+import { canonical, controlDefinitions } from './log.js';
 import type { JsonObject } from './types.js';
 import { asBuffer, decode, encode, utf8 } from './codec.js';
 import { validateBlobDescriptor, copyBlobDescriptor, copyArtifactPublic, isArtifactAction, validDigest, MAX_ARTIFACT_PAYLOAD_BYTES } from './artifacts.js';
 import type { BlobDescriptor } from './artifacts.js';
 import { liveArtifactBlobIds } from './rules.js';
+import { isProjectAction, copyProjectPublic } from './projects.js';
 import { isId } from './ids.js';
 
 export interface ArchiveBlob { descriptor: BlobDescriptor; ciphertext: string }
@@ -75,8 +76,8 @@ function archiveMember(member: Member): Member {
   return copy;
 }
 function archiveProof(proof: ControlProof): ControlProof {
-  const body: JsonObject = isArtifactAction(proof.type) ? copyArtifactPublic(proof.type, proof.body) : {};
-  if (!isArtifactAction(proof.type)) for (const field of logDefinitions.find(d => d.name === proof.type)!.fields) if (Object.hasOwn(proof.body, field)) {
+  const body: JsonObject = isProjectAction(proof.type) ? copyProjectPublic(proof.type, proof.body) : isArtifactAction(proof.type) ? copyArtifactPublic(proof.type, proof.body) : {};
+  if (!isArtifactAction(proof.type) && !isProjectAction(proof.type)) for (const field of controlDefinitions.find(d => d.name === proof.type)!.fields) if (Object.hasOwn(proof.body, field)) {
     const value = proof.body[field];
     body[field] = (field === 'creator' || field === 'member') && archiveObject(value) ? archiveMember(value as Member) : Array.isArray(value) ? value.slice() : value;
   }

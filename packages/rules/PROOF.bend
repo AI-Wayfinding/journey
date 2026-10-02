@@ -228,3 +228,56 @@ def Laws.blob_live_never_collected(expired, committed):
 
 def Laws.blob_deleted_not_reusable(id, author, kind, head, versions, blob):
   {==}
+
+def Laws.project_self_only(members, actor, member):
+  {==}
+def Laws.project_agents_follow_live_people(members, pairs, project, id, role, guide, owner, support, live):
+  {==}
+def Laws.project_agent_cannot_be_person_participant(id, role, guide, owner, support, live, pairs, project):
+  {==}
+def Laws.project_removed_pair_does_not_resurrect():
+  {==}
+def Laws.project_readonly_metadata_not_content():
+  {==}
+def Laws.project_readonly_creation_denied():
+  {==}
+def Laws.project_readonly_placement_denied():
+  {==}
+def Laws.project_content_still_blocked_by_rotation(members, actor, pairs, id):
+  and_false(R.access_write(R.member_access(R.find(members, actor), members)))
+def Laws.project_initial_state_and_no_auto_join():
+  {==}
+def Laws.project_state_allows_archive():
+  {==}
+def Laws.project_archive_reopens():
+  {==}
+def Laws.project_archive_remains_selectable():
+  {==}
+def Laws.project_stale_metadata_conflicts():
+  {==}
+def Laws.project_repeated_participation_conflicts():
+  {==}
+def Laws.project_placement_preserves_artifact_identity(items, pairs, placements, id, project, author, writer, actor, predecessor, revision, previous, old, creator, deleted, kind, head, versions):
+  {==}
+def project_deleted_value(value: R.Placement, items: +List<R.ProjectInfo>, pairs: +List<R.Participation>, placements: +List<R.Placement>, id: Nat, project: Nat, author: Nat, writer: Nat, actor: Nat, predecessor: Nat, revision: Nat, creator: Nat, kind: Nat, head: Nat, versions: +List<R.ArtifactVersion>) -> {R.project_placement_value(value, Some{R.Artifact{id, creator, kind, head, True{}, versions}}, items, pairs, placements, id, project, author, writer, actor, predecessor, revision) == R.ProjectConflict{} : R.ProjectTransition}:
+  match value:
+    case R.Placement{_, _, _}:
+      {==}
+
+def Laws.project_deleted_placement_conflicts(items, pairs, placements, id, project, author, writer, actor, predecessor, revision, creator, kind, head, versions):
+  project_deleted_value(R.placement_find(placements, id), items, pairs, placements, id, project, author, writer, actor, predecessor, revision, creator, kind, head, versions)
+
+
+def project_absent_value(value: R.Placement, placements: +List<R.Placement>, selector: Nat, id: Nat) -> {R.project_selected_value(value, None{}, placements, selector, id) == False{} : Bool}:
+  match value:
+    case R.Placement{_, _, _}:
+      {==}
+
+def Laws.project_lists_do_not_elevate_read_scope(placements, selector, id):
+  project_absent_value(R.placement_find(placements, id), placements, selector, id)
+
+
+def Laws.project_client_requires_capability(client, minimum, control, artifact):
+  Equal.cong(Bool, Bool, b => b && R.project_ready(client) && R.version_ge(client, minimum), (control && artifact) && False{}, False{}, and_false(control && artifact))
+def Laws.project_replay_uses_authority_version_and_revision(members, actor, minimum, pending, index, artifacts, revision, action, pairs, items, placements):
+  {==}

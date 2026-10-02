@@ -16,7 +16,22 @@ export interface Artifact { $: 'Artifact'; id: bigint; author: bigint; typeHash:
 export interface ArtifactIndex { $: 'ArtifactIndex'; items: List<Artifact>; used: List<bigint> }
 export type ArtifactAction = { $: 'ArtifactCreate'; id: bigint; version: bigint; author: bigint; writer: bigint; typeHash: bigint; blobs: List<bigint> } | { $: 'ArtifactEdit'; id: bigint; version: bigint; predecessor: bigint; author: bigint; writer: bigint; typeHash: bigint; blobs: List<bigint> } | { $: 'ArtifactComment'; id: bigint; comment: bigint; onVersion: bigint; author: bigint; writer: bigint } | { $: 'ArtifactDelete'; id: bigint; author: bigint; writer: bigint };
 export type ArtifactTransition = { $: 'ArtifactAccepted'; index: ArtifactIndex } | { $: 'ArtifactDenied' | 'ArtifactConflict' };
+export type ProjectPhase = { $: 'GettingStarted' | 'Active' | 'LookingForOthers' | 'Archived' };
+export interface ProjectInfo { $: 'ProjectInfo'; id: bigint; revision: bigint; phase: ProjectPhase }
+export interface Participation { $: 'Participation'; project: bigint; person: bigint; revision: bigint; active: boolean }
+export interface Placement { $: 'Placement'; artifact: bigint; project: bigint; revision: bigint }
+export interface ProjectIndex { $: 'ProjectIndex'; items: List<ProjectInfo>; pairs: List<Participation>; placements: List<Placement> }
+export type ProjectAction = { $: 'ProjectCreate'; id: bigint } | { $: 'ProjectPurpose'; id: bigint; predecessor: bigint } | { $: 'ProjectStateChange'; id: bigint; predecessor: bigint; phase: ProjectPhase } | { $: 'ProjectJoin' | 'ProjectLeave'; id: bigint; member: bigint; predecessor: bigint } | { $: 'ArtifactProject'; id: bigint; project: bigint; author: bigint; writer: bigint; predecessor: bigint };
+export type ProjectTransition = { $: 'ProjectAccepted'; index: ProjectIndex } | { $: 'ProjectDenied' | 'ProjectConflict' };
 declare const rules: {
+  project_ready(version: Version): boolean;
+  project_client(client: Version, minimum: Version, control: boolean, artifact: boolean, project: boolean): boolean;
+  project_apply(members: List<Member>, actor: bigint, minimum: Version, pending: boolean, index: ProjectIndex, artifacts: ArtifactIndex, revision: bigint, action: ProjectAction): ProjectTransition;
+  project_participant(members: List<Member>, pairs: List<Participation>, project: bigint, actor: bigint): boolean;
+  project_remove(pairs: List<Participation>, person: bigint, revision: bigint): List<Participation>;
+  project_selector(items: List<ProjectInfo>, selector: bigint): boolean;
+  project_selected(target: Maybe<Artifact>, placements: List<Placement>, selector: bigint, id: bigint): boolean;
+
   blob_reuse(target: Maybe<Artifact>, blob: bigint): boolean;
   artifact_find(items: List<Artifact>, id: bigint): Maybe<Artifact>;
   blob_stage(access: Maybe<Role>, identity: boolean, version: boolean, pending: boolean, epoch: bigint, current: bigint): boolean;

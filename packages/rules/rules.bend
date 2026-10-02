@@ -672,3 +672,228 @@ def blob_reuse(target: Maybe<&2, Artifact>, blob: Nat) -> Bool:
       False{}
     case Some{Artifact{_, _, _, _, deleted, versions}}:
       Bool.not(deleted) && artifact_blob_has(versions, blob)
+
+# Stage 2 grouping never changes journey read access or artifact content.
+def project_ready(v: Version) -> Bool:
+  version_ge(v, Version{0n, 1n, 6n})
+
+def project_client(+client: Version, minimum: Version, control: Bool, artifact: Bool, project: Bool) -> Bool:
+  control && artifact && project && project_ready(client) && version_ge(client, minimum)
+
+type ProjectPhase is Data:
+  GettingStarted{}
+  Active{}
+  LookingForOthers{}
+  Archived{}
+
+def phase_eq(a: ProjectPhase, b: ProjectPhase) -> Bool:
+  match a:
+    case GettingStarted{}:
+      match b:
+        case GettingStarted{}: True{}
+        case _: False{}
+    case Active{}:
+      match b:
+        case Active{}: True{}
+        case _: False{}
+    case LookingForOthers{}:
+      match b:
+        case LookingForOthers{}: True{}
+        case _: False{}
+    case Archived{}:
+      match b:
+        case Archived{}: True{}
+        case _: False{}
+
+type ProjectInfo is Data:
+  ProjectInfo{id: Nat, revision: Nat, phase: ProjectPhase}
+type Participation is Data:
+  Participation{project: Nat, person: Nat, revision: Nat, active: Bool}
+type Placement is Data:
+  Placement{artifact: Nat, project: Nat, revision: Nat}
+type ProjectIndex is Data:
+  ProjectIndex{items: +List<ProjectInfo>, pairs: +List<Participation>, placements: +List<Placement>}
+type ProjectAction is Data:
+  ProjectCreate{id: Nat}
+  ProjectPurpose{id: Nat, predecessor: Nat}
+  ProjectStateChange{id: Nat, predecessor: Nat, phase: ProjectPhase}
+  ProjectJoin{id: Nat, member: Nat, predecessor: Nat}
+  ProjectLeave{id: Nat, member: Nat, predecessor: Nat}
+  ArtifactProject{id: Nat, project: Nat, author: Nat, writer: Nat, predecessor: Nat}
+type ProjectTransition is Data:
+  ProjectAccepted{index: ProjectIndex}
+  ProjectDenied{}
+  ProjectConflict{}
+
+def project_find(xs: +List<ProjectInfo>, +id: Nat) -> Maybe<&2, ProjectInfo>:
+  match xs:
+    case Nil{}: None{}
+    case Con{+h, +t}:
+      ProjectInfo{key, _, _} = h
+      Bool.pick(Maybe<&2, ProjectInfo>, Nat.is_eq(key, id), Some{h}, project_find(t, id))
+
+def project_put(xs: +List<ProjectInfo>, +value: ProjectInfo) -> +List<ProjectInfo>:
+  match xs:
+    case Nil{}: value <> Nil{}
+    case Con{+h, +t}:
+      ProjectInfo{key, _, _} = h
+      ProjectInfo{id, _, _} = value
+      Bool.pick(+List<ProjectInfo>, Nat.is_eq(key, id), value <> t, h <> project_put(t, value))
+
+def pair_find(xs: +List<Participation>, +project: Nat, +person: Nat) -> Participation:
+  match xs:
+    case Nil{}: Participation{project, person, 0n, False{}}
+    case Con{+h, +t}:
+      Participation{key, member, _, _} = h
+      Bool.pick(Participation, Nat.is_eq(key, project) && Nat.is_eq(member, person), h, pair_find(t, project, person))
+
+def pair_put(xs: +List<Participation>, +value: Participation) -> +List<Participation>:
+  match xs:
+    case Nil{}: value <> Nil{}
+    case Con{+h, +t}:
+      Participation{key, member, _, _} = h
+      Participation{project, person, _, _} = value
+      Bool.pick(+List<Participation>, Nat.is_eq(key, project) && Nat.is_eq(member, person), value <> t, h <> pair_put(t, value))
+
+def placement_find(xs: +List<Placement>, +id: Nat) -> Placement:
+  match xs:
+    case Nil{}: Placement{id, 0n, 0n}
+    case Con{+h, +t}:
+      Placement{key, _, _} = h
+      Bool.pick(Placement, Nat.is_eq(key, id), h, placement_find(t, id))
+
+def placement_put(xs: +List<Placement>, +value: Placement) -> +List<Placement>:
+  match xs:
+    case Nil{}: value <> Nil{}
+    case Con{+h, +t}:
+      Placement{key, _, _} = h
+      Placement{id, _, _} = value
+      Bool.pick(+List<Placement>, Nat.is_eq(key, id), value <> t, h <> placement_put(t, value))
+
+def project_exists(target: Maybe<&2, ProjectInfo>) -> Bool:
+  match target:
+    case None{}: False{}
+    case Some{_}: True{}
+
+def pair_active(p: Participation) -> Bool:
+  Participation{_, _, _, active} = p
+  active
+
+def project_person(target: Maybe<&2, Member>, pairs: +List<Participation>, project: Nat) -> Bool:
+  match target:
+    case None{}: False{}
+    case Some{Member{id, kind, _, _, _, _, live}}:
+      match kind:
+        case Agent{}: False{}
+        case Person{}: live && pair_active(pair_find(pairs, project, id))
+
+def project_follower(target: Maybe<&2, Member>, +members: +List<Member>, pairs: +List<Participation>, +project: Nat) -> Bool:
+  match target:
+    case None{}: False{}
+    case Some{Member{+id, kind, _, _, owner, _, live}}:
+      match kind:
+        case Person{}: live && pair_active(pair_find(pairs, project, id))
+        case Agent{}: live && project_person(find(members, owner), pairs, project)
+
+def project_participant(+members: +List<Member>, pairs: +List<Participation>, +project: Nat, actor: Nat) -> Bool:
+  project_follower(find(members, actor), members, pairs, project)
+
+# Called on accepted removal, before a later admission can re-use the identity.
+def project_remove(xs: +List<Participation>, +person: Nat, +revision: Nat) -> +List<Participation>:
+  match xs:
+    case Nil{}: Nil{}
+    case Con{Participation{project, +member, old, +active}, t}:
+      Participation{project, member, Bool.pick(Nat, active && Nat.is_eq(member, person), revision, old), active && Bool.not(Nat.is_eq(member, person))} <> project_remove(t, person, revision)
+
+def project_guard(valid: Bool, index: ProjectIndex) -> ProjectTransition:
+  match valid:
+    case False{}: ProjectConflict{}
+    case True{}: ProjectAccepted{index}
+
+def project_metadata(target: Maybe<&2, ProjectInfo>, +items: +List<ProjectInfo>, pairs: +List<Participation>, placements: +List<Placement>, predecessor: Nat, +revision: Nat, phase: Maybe<&2, ProjectPhase>) -> ProjectTransition:
+  match target:
+    case None{}: ProjectConflict{}
+    case Some{ProjectInfo{+id, old, +previous}}:
+      match phase:
+        case None{}:
+          project_guard(Nat.is_eq(old, predecessor), ProjectIndex{project_put(items, ProjectInfo{id, revision, previous}), pairs, placements})
+        case Some{+next}:
+          project_guard(Nat.is_eq(old, predecessor) && Bool.not(phase_eq(previous, next)), ProjectIndex{project_put(items, ProjectInfo{id, revision, next}), pairs, placements})
+
+def project_membership_pair(pair: Participation, +items: +List<ProjectInfo>, +pairs: +List<Participation>, placements: +List<Placement>, +id: Nat, +member: Nat, predecessor: Nat, revision: Nat, +active: Bool) -> ProjectTransition:
+  Participation{_, _, old, +before} = pair
+  project_guard(project_exists(project_find(items, id)) && Nat.is_eq(old, predecessor) && Bool.pick(Bool, active, Bool.not(before), before), ProjectIndex{items, pair_put(pairs, Participation{id, member, revision, active}), placements})
+
+def project_membership(+items: +List<ProjectInfo>, +pairs: +List<Participation>, placements: +List<Placement>, +id: Nat, +member: Nat, predecessor: Nat, revision: Nat, active: Bool) -> ProjectTransition:
+  project_membership_pair(pair_find(pairs, id, member), items, pairs, placements, id, member, predecessor, revision, active)
+
+def project_placement_value(value: Placement, target: Maybe<&2, Artifact>, +items: +List<ProjectInfo>, pairs: +List<Participation>, +placements: +List<Placement>, +id: Nat, +project: Nat, author: Nat, writer: Nat, actor: Nat, predecessor: Nat, revision: Nat) -> ProjectTransition:
+  Placement{_, previous, old} = value
+  match target:
+    case None{}: ProjectConflict{}
+    case Some{Artifact{_, creator, _, _, deleted, _}}:
+      project_guard(Bool.not(deleted) && Nat.is_eq(author, creator) && Nat.is_eq(writer, actor) && Nat.is_eq(old, predecessor) && Bool.not(Nat.is_eq(previous, project)) && (Nat.is_eq(project, 0n) || project_exists(project_find(items, project))), ProjectIndex{items, pairs, placement_put(placements, Placement{id, project, revision})})
+
+def project_placement(target: Maybe<&2, Artifact>, items: +List<ProjectInfo>, pairs: +List<Participation>, +placements: +List<Placement>, +id: Nat, project: Nat, author: Nat, writer: Nat, actor: Nat, predecessor: Nat, revision: Nat) -> ProjectTransition:
+  project_placement_value(placement_find(placements, id), target, items, pairs, placements, id, project, author, writer, actor, predecessor, revision)
+
+def project_self(+members: +List<Member>, +actor: Nat, member: Nat) -> Bool:
+  Nat.is_eq(actor, member) && is_person(find(members, actor)) && access_read(member_access(find(members, actor), members))
+
+def project_authority(+members: +List<Member>, +actor: Nat, +pairs: +List<Participation>, pending: Bool, action: ProjectAction) -> Bool:
+  match action:
+    case ProjectCreate{_}: content_write(member_access(find(members, actor), members), pending)
+    case ArtifactProject{_, _, _, _, _}: content_write(member_access(find(members, actor), members), pending)
+    case ProjectJoin{_, member, _}: project_self(members, actor, member)
+    case ProjectLeave{_, member, _}: project_self(members, actor, member)
+    case ProjectPurpose{id, _}: project_participant(members, pairs, id, actor)
+    case ProjectStateChange{id, _, _}: project_participant(members, pairs, id, actor)
+
+def project_action(index: ProjectIndex, artifacts: ArtifactIndex, +actor: Nat, +revision: Nat, action: ProjectAction) -> ProjectTransition:
+  ProjectIndex{+items, +pairs, +placements} = index
+  ArtifactIndex{+content, used} = artifacts
+  match action:
+    case ProjectCreate{+id}:
+      project_guard(Bool.not(project_exists(project_find(items, id)) || nat_has(used, id)), ProjectIndex{ProjectInfo{id, revision, GettingStarted{}} <> items, pairs, placements})
+    case ProjectPurpose{+id, predecessor}:
+      project_metadata(project_find(items, id), items, pairs, placements, predecessor, revision, None{})
+    case ProjectStateChange{+id, predecessor, phase}:
+      project_metadata(project_find(items, id), items, pairs, placements, predecessor, revision, Some{phase})
+    case ProjectJoin{id, member, predecessor}:
+      project_membership(items, pairs, placements, id, member, predecessor, revision, True{})
+    case ProjectLeave{id, member, predecessor}:
+      project_membership(items, pairs, placements, id, member, predecessor, revision, False{})
+    case ArtifactProject{+id, project, author, writer, predecessor}:
+      project_placement(artifact_find(content, id), items, pairs, placements, id, project, author, writer, actor, predecessor, revision)
+
+def project_previous(action: ProjectAction, revision: Nat) -> Bool:
+  match action:
+    case ProjectCreate{_}: True{}
+    case ProjectPurpose{_, predecessor}: Nat.is_lt(predecessor, revision)
+    case ProjectStateChange{_, predecessor, _}: Nat.is_lt(predecessor, revision)
+    case ProjectJoin{_, _, predecessor}: Nat.is_lt(predecessor, revision)
+    case ProjectLeave{_, _, predecessor}: Nat.is_lt(predecessor, revision)
+    case ArtifactProject{_, _, _, _, predecessor}: Nat.is_lt(predecessor, revision)
+
+def project_authorized(allowed: Bool, index: ProjectIndex, artifacts: ArtifactIndex, actor: Nat, revision: Nat, action: ProjectAction) -> ProjectTransition:
+  match allowed:
+    case False{}: ProjectDenied{}
+    case True{}: project_action(index, artifacts, actor, revision, action)
+
+def project_apply(+members: +List<Member>, +actor: Nat, minimum: Version, pending: Bool, +index: ProjectIndex, artifacts: ArtifactIndex, +revision: Nat, +action: ProjectAction) -> ProjectTransition:
+  ProjectIndex{_, pairs, _} = index
+  project_authorized(project_ready(minimum) && project_previous(action, revision) && project_authority(members, actor, pairs, pending, action), index, artifacts, actor, revision, action)
+
+# -1 is not a Nat: selectors use 0=main, 1=all, 2+ normalized project id.
+def project_selector(items: +List<ProjectInfo>, +selector: Nat) -> Bool:
+  Nat.is_eq(selector, 0n) || Nat.is_eq(selector, 1n) || project_exists(project_find(items, selector))
+
+def project_selected_value(value: Placement, target: Maybe<&2, Artifact>, placements: +List<Placement>, +selector: Nat, id: Nat) -> Bool:
+  Placement{_, project, _} = value
+  match target:
+    case None{}: False{}
+    case Some{Artifact{_, _, _, _, deleted, _}}:
+      Bool.not(deleted) && (Nat.is_eq(selector, 1n) || Nat.is_eq(selector, project))
+
+def project_selected(target: Maybe<&2, Artifact>, +placements: +List<Placement>, selector: Nat, +id: Nat) -> Bool:
+  project_selected_value(placement_find(placements, id), target, placements, selector, id)

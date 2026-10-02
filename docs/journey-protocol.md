@@ -123,6 +123,30 @@ A later version may reuse an identical committed descriptor from an undeleted ve
 
 Stage 1 uses client/interface version `0.1.5` and both capabilities `control-proof-v1` and `artifact-v1` (`X-Control-Format` and `X-Artifact-Format` headers). `supportsArtifacts` refuses old/malformed versions, missing capabilities and a newer signed minimum. New journeys require Stage 1; Stage 0 fixtures can raise their signed minimum before the first artifact action. Consumers must fail with an update message before partial content, not skip unknown actions. Live agent links remain deliberately server-readable, read-only and limited to their existing overview; attachment access requires the member interface.
 
+### Stage 2 signed project contracts
+
+Core/client/interface version `0.1.6` adds `project-v1` alongside `control-proof-v1` and `artifact-v1`. Request adapters send `X-Project-Format`; subjects and protocol-response readers carry `projectFormat` by name. `supportsProjects` checks the signed minimum and all three capabilities through Bend. A person guide must raise an existing journey's signed minimum to at least `0.1.6` before a project action. Histories at `0.1.4` or `0.1.5` remain valid with empty project indexes; `artifact-v1` still begins at `0.1.5`. A keyed reader rejects a minimum newer than its supported version rather than returning partial content. Server capability enforcement and project interface workflows are separate Stage 2 work.
+
+The public chain adds these exact bodies (every body includes `format:'project-v1'`):
+
+| Action | Other public fields |
+| --- | --- |
+| `project.create` | `project`, `purposeHash`, `state:'getting-started'` |
+| `project.purpose` | `project`, `purposeHash`, `predecessor` |
+| `project.state` | `project`, `state`, `predecessor` |
+| `project.join`, `project.leave` | `project`, `member`, `predecessor` |
+| `artifact.project` | `project` (ID or null), `artifact`, `author`, `actor`, `predecessor` |
+
+Project IDs are journey-scoped ULIDs and cannot reuse project, artifact, version or comment IDs. Purpose/state share a revision: the latest creation/purpose/state proof sequence. Participation revisions belong to each project/person pair; placement revisions belong to each artifact. `predecessor` is that observed sequence, or null for an absent pair/pointer. It must precede the new proof. Stale or no-op membership/state/placement changes conflict. State values are exactly `getting-started`, `active`, `looking-for-others` and `archived`; participants may choose any different value. Archive remains readable and can reopen; there is no delete control.
+
+Purpose is trimmed, nonempty plain text of at most 10,000 UTF-8 bytes. `purposeHash` is canonical base64 SHA-256 of the canonical JSON string, not plaintext or protection against guessing short purposes. Create/purpose encrypt exactly `{type:'project.content',typeVersion:1,body:{purpose}}`; other actions encrypt `{type:'project.marker',typeVersion:1,body:{}}`. The existing JSON cap, exact public shape, envelope/signature/epoch bindings and purpose commitment are checked before keyed content is returned. Missing project keys and payload extras fail. Public replay displays `[unavailable]` purpose text. Ciphertext cannot grant authority or supply another action.
+
+Production Bend decides creation/placement content authority, self-only live person participation, agents following their live adding person, removal invalidation, participant metadata authority, revisions and selectors. Creation does not join its signer. Read-only participants may edit purpose/state (D17), but cannot create/edit/comment/delete/place artifacts or stage blobs (D5). Pending rotation blocks those content writes, not authorized participation/metadata controls. Removing a person deactivates their pairs; readmission requires a fresh join. Agents never store independent participation. Guide status alone grants no metadata or content write.
+
+`artifact.project` changes one nullable pointer on an undeleted artifact, validating immutable author, actual signer and a project in that journey. It does not change content versions, comments, author or blob references. `selectProjectArtifacts` returns undeleted unassigned IDs for omitted/`main`, one project's IDs for a project ULID, or every undeleted artifact for `all`, including archived placements. Unknown/malformed selectors fail; callers intersect existing type/tag/text filters with the result. Project placement never changes journey read permission, export or deletion accounting.
+
+The `artifact-v1`/version-1 archive container and APIs are unchanged. Named-field projection retains all project controls and payloads; verified replay rebuilds project history, participation and placement. An archive cannot supply its own project index. Portable Node/workerd/browser tests exercise the production decisions; Node archive tests encrypt and import actual project history with live blob bytes. Bend proofs cover these production functions, not cryptographic certification.
+
 ### Versioned encrypted archives
 
 `exportArtifactJourney` and `importArtifactJourney` use one age-encrypted JSON object:

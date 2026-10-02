@@ -82,7 +82,7 @@ async function subject(c: AppContext): Promise<Subject | null> {
   const principal = c.req.header('x-principal');
   return auth !== null && auth.verifiedAt !== null && validString(principal, 128) ? { principal, accountHash: auth.accountHash, ...capability(c) } : null;
 }
-function capability(c: AppContext): Pick<Subject, 'clientVersion' | 'controlFormat' | 'artifactFormat'> { return { clientVersion: c.req.header('x-client-version'), controlFormat: c.req.header('x-control-format'), artifactFormat: c.req.header('x-artifact-format') }; }
+function capability(c: AppContext): Pick<Subject, 'clientVersion' | 'controlFormat' | 'artifactFormat' | 'projectFormat'> { return { clientVersion: c.req.header('x-client-version'), controlFormat: c.req.header('x-control-format'), artifactFormat: c.req.header('x-artifact-format'), projectFormat: c.req.header('x-project-format') }; }
 function control(value: unknown, journey: string): ControlInput | null {
   if (!object(value) || Object.keys(value).some(k => !['proof', 'envelope'].includes(k)) || !object(value.proof) || !object(value.envelope) || !object(value.envelope.outside)) return null;
   const p = value.proof, e = value.envelope;
@@ -583,7 +583,7 @@ app.get('/a/:secret', async c => {
   if (!row) return ended();
   if (row.limited) return linkResponse({ error: 'rate-limited', message: 'This link has been read too often. Try again later.', retryAfterSeconds: row.retryAfter }, 429, { 'Retry-After': String(row.retryAfter) });
   if (Number(row.expires) <= Date.now()) return linkResponse(expiredBody(c.env.ORIGIN, row.journeyId, row.memberId, Number(row.expires)), 410);
-  const subject: Subject = { principal: row.memberId, agent: true, clientVersion: CLIENT_VERSION, controlFormat: 'control-proof-v1', artifactFormat: 'artifact-v1' };
+  const subject: Subject = { principal: row.memberId, agent: true, clientVersion: CLIENT_VERSION, controlFormat: 'control-proof-v1', artifactFormat: 'artifact-v1', projectFormat: 'project-v1' };
   const call: Enclave = message => enclave(c.env, row.journeyId, { ...message, journeyId: row.journeyId, subject });
   try {
     const pages = await readLink({ journeyId: row.journeyId, memberId: row.memberId, blob: row.blob, expires: Number(row.expires), since: Number(row.since) }, secret, c.env.ORIGIN, call);

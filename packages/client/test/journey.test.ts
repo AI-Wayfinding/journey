@@ -46,7 +46,7 @@ describe('journey client guard', () => {
   it('fails closed with an update message for unsupported controls and newer signed minimum', async () => {
     const f = await fixture(); f.controls[1]!.proof.type = 'future.control';
     await expect(new JourneyClient(f.session, { fetch: f.fetcher }).list()).rejects.toThrow('npm install -g @ai-wayfinding/client@latest');
-    const newer = await fixture(); await newer.append('client.minVersion', { version: '0.1.6' });
+    const newer = await fixture(); await newer.append('client.minVersion', { version: '0.1.7' });
     await expect(new JourneyClient(newer.session, { fetch: newer.fetcher }).add({ type: 'note', title: 'No', body: 'No', tags: [] })).rejects.toThrow('newer format');
     expect(newer.requests.some(value => value.startsWith('POST '))).toBe(false);
   });

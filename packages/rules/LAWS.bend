@@ -423,3 +423,134 @@ law blob_deleted_not_reusable:
   for versions: +List<R.ArtifactVersion>
   for blob: Nat
   {R.blob_reuse(Some{R.Artifact{id, author, kind, head, True{}, versions}}, blob) == False{} : Bool}
+
+# Stage 2: the production entry points and their metadata/content split.
+law project_self_only:
+  for +members: +List<R.Member>
+  for +actor: Nat
+  for +member: Nat
+  {R.project_self(members, actor, member) == (Nat.is_eq(actor, member) && R.is_person(R.find(members, actor)) && R.access_read(R.member_access(R.find(members, actor), members))) : Bool}
+
+law project_agents_follow_live_people:
+  for +members: +List<R.Member>
+  for +pairs: +List<R.Participation>
+  for +project: Nat
+  for id: Nat
+  for role: R.Role
+  for guide: Bool
+  for +owner: Nat
+  for support: Bool
+  for +live: Bool
+  {R.project_follower(Some{R.Member{id, R.Agent{}, role, guide, owner, support, live}}, members, pairs, project) == (live && R.project_person(R.find(members, owner), pairs, project)) : Bool}
+
+law project_agent_cannot_be_person_participant:
+  for id: Nat
+  for role: R.Role
+  for guide: Bool
+  for owner: Nat
+  for support: Bool
+  for live: Bool
+  for pairs: +List<R.Participation>
+  for project: Nat
+  {R.project_person(Some{R.Member{id, R.Agent{}, role, guide, owner, support, live}}, pairs, project) == False{} : Bool}
+
+law project_removed_pair_does_not_resurrect:
+  {R.project_remove(R.Participation{2n, 3n, 4n, True{}} <> Nil{}, 3n, 5n) == R.Participation{2n, 3n, 5n, False{}} <> Nil{} : +List<R.Participation>}
+
+law project_readonly_metadata_not_content:
+  {R.project_participant(R.Member{3n, R.Person{}, R.ReadOnly{}, True{}, 0n, False{}, True{}} <> Nil{}, R.Participation{2n, 3n, 4n, True{}} <> Nil{}, 2n, 3n) == True{} : Bool}
+
+law project_readonly_creation_denied:
+  {R.project_authority(R.Member{3n, R.Person{}, R.ReadOnly{}, True{}, 0n, False{}, True{}} <> Nil{}, 3n, Nil{}, False{}, R.ProjectCreate{2n}) == False{} : Bool}
+
+law project_readonly_placement_denied:
+  {R.project_authority(R.Member{3n, R.Person{}, R.ReadOnly{}, True{}, 0n, False{}, True{}} <> Nil{}, 3n, Nil{}, False{}, R.ArtifactProject{4n, 2n, 3n, 3n, 0n}) == False{} : Bool}
+
+law project_content_still_blocked_by_rotation:
+  for +members: +List<R.Member>
+  for +actor: Nat
+  for pairs: +List<R.Participation>
+  for id: Nat
+  {R.project_authority(members, actor, pairs, True{}, R.ProjectCreate{id}) == False{} : Bool}
+
+law project_initial_state_and_no_auto_join:
+  {R.project_action(R.ProjectIndex{Nil{}, Nil{}, Nil{}}, R.ArtifactIndex{Nil{}, Nil{}}, 3n, 4n, R.ProjectCreate{2n}) == R.ProjectAccepted{R.ProjectIndex{R.ProjectInfo{2n, 4n, R.GettingStarted{}} <> Nil{}, Nil{}, Nil{}}} : R.ProjectTransition}
+
+law project_state_allows_archive:
+  {R.project_metadata(Some{R.ProjectInfo{2n, 4n, R.Active{}}}, R.ProjectInfo{2n, 4n, R.Active{}} <> Nil{}, Nil{}, Nil{}, 4n, 5n, Some{R.Archived{}}) == R.ProjectAccepted{R.ProjectIndex{R.ProjectInfo{2n, 5n, R.Archived{}} <> Nil{}, Nil{}, Nil{}}} : R.ProjectTransition}
+
+law project_archive_reopens:
+  {R.project_metadata(Some{R.ProjectInfo{2n, 4n, R.Archived{}}}, R.ProjectInfo{2n, 4n, R.Archived{}} <> Nil{}, Nil{}, Nil{}, 4n, 5n, Some{R.LookingForOthers{}}) == R.ProjectAccepted{R.ProjectIndex{R.ProjectInfo{2n, 5n, R.LookingForOthers{}} <> Nil{}, Nil{}, Nil{}}} : R.ProjectTransition}
+
+law project_archive_remains_selectable:
+  {R.project_selector(R.ProjectInfo{2n, 4n, R.Archived{}} <> Nil{}, 2n) == True{} : Bool}
+
+law project_stale_metadata_conflicts:
+  {R.project_metadata(Some{R.ProjectInfo{2n, 4n, R.Active{}}}, Nil{}, Nil{}, Nil{}, 3n, 5n, None{}) == R.ProjectConflict{} : R.ProjectTransition}
+
+law project_repeated_participation_conflicts:
+  {R.project_membership(R.ProjectInfo{2n, 4n, R.Active{}} <> Nil{}, R.Participation{2n, 3n, 5n, True{}} <> Nil{}, Nil{}, 2n, 3n, 5n, 6n, True{}) == R.ProjectConflict{} : R.ProjectTransition}
+
+law project_placement_preserves_artifact_identity:
+  for +items: +List<R.ProjectInfo>
+  for +pairs: +List<R.Participation>
+  for +placements: +List<R.Placement>
+  for +id: Nat
+  for +project: Nat
+  for +author: Nat
+  for +writer: Nat
+  for +actor: Nat
+  for +predecessor: Nat
+  for +revision: Nat
+  for +previous: Nat
+  for +old: Nat
+  for +creator: Nat
+  for +deleted: Bool
+  for kind: Nat
+  for head: Nat
+  for versions: +List<R.ArtifactVersion>
+  {R.project_placement_value(R.Placement{id, previous, old}, Some{R.Artifact{id, creator, kind, head, deleted, versions}}, items, pairs, placements, id, project, author, writer, actor, predecessor, revision) == R.project_guard(Bool.not(deleted) && Nat.is_eq(author, creator) && Nat.is_eq(writer, actor) && Nat.is_eq(old, predecessor) && Bool.not(Nat.is_eq(previous, project)) && (Nat.is_eq(project, 0n) || R.project_exists(R.project_find(items, project))), R.ProjectIndex{items, pairs, R.placement_put(placements, R.Placement{id, project, revision})}) : R.ProjectTransition}
+
+law project_deleted_placement_conflicts:
+  for +items: +List<R.ProjectInfo>
+  for pairs: +List<R.Participation>
+  for +placements: +List<R.Placement>
+  for +id: Nat
+  for +project: Nat
+  for author: Nat
+  for writer: Nat
+  for actor: Nat
+  for predecessor: Nat
+  for revision: Nat
+  for creator: Nat
+  for kind: Nat
+  for head: Nat
+  for versions: +List<R.ArtifactVersion>
+  {R.project_placement(Some{R.Artifact{id, creator, kind, head, True{}, versions}}, items, pairs, placements, id, project, author, writer, actor, predecessor, revision) == R.ProjectConflict{} : R.ProjectTransition}
+
+law project_lists_do_not_elevate_read_scope:
+  for +placements: +List<R.Placement>
+  for selector: Nat
+  for +id: Nat
+  {R.project_selected(None{}, placements, selector, id) == False{} : Bool}
+
+law project_client_requires_capability:
+  for client: R.Version
+  for minimum: R.Version
+  for control: Bool
+  for artifact: Bool
+  {R.project_client(client, minimum, control, artifact, False{}) == False{} : Bool}
+
+law project_replay_uses_authority_version_and_revision:
+  for +members: +List<R.Member>
+  for +actor: Nat
+  for +minimum: R.Version
+  for +pending: Bool
+  for +index: R.ProjectIndex
+  for +artifacts: R.ArtifactIndex
+  for +revision: Nat
+  for +action: R.ProjectAction
+  for +pairs: +List<R.Participation>
+  for items: +List<R.ProjectInfo>
+  for placements: +List<R.Placement>
+  {R.project_apply(members, actor, minimum, pending, R.ProjectIndex{items, pairs, placements}, artifacts, revision, action) == R.project_authorized(R.project_ready(minimum) && R.project_previous(action, revision) && R.project_authority(members, actor, pairs, pending, action), R.ProjectIndex{items, pairs, placements}, artifacts, actor, revision, action) : R.ProjectTransition}

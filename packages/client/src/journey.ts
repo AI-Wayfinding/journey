@@ -26,7 +26,7 @@ export class JourneyClient {
     const body = binary ? new Uint8Array(data) : data === undefined ? '' : JSON.stringify(data);
     const route = '/v1' + path;
     const headers = await signedHeaders(this.session.signingPrivateKey, method, route, body);
-    const result = await this.fetcher(this.session.server + route, { method, headers: { ...headers, 'X-Client-Version': CLIENT_VERSION, 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': ARTIFACT_FORMAT, 'X-Agent-Session': this.session.sessionId, ...(data === undefined ? {} : { 'Content-Type': binary ? 'application/octet-stream' : 'application/json', Origin: new URL(this.session.server).origin, 'X-Wayfinding': '1' }), ...extra }, ...(data === undefined ? {} : { body }) });
+    const result = await this.fetcher(this.session.server + route, { method, headers: { ...headers, 'X-Client-Version': CLIENT_VERSION, 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': ARTIFACT_FORMAT, 'X-Project-Format': 'project-v1', 'X-Agent-Session': this.session.sessionId, ...(data === undefined ? {} : { 'Content-Type': binary ? 'application/octet-stream' : 'application/json', Origin: new URL(this.session.server).origin, 'X-Wayfinding': '1' }), ...extra }, ...(data === undefined ? {} : { body }) });
     if (!result.ok) {
       const error = await result.json().catch(() => null) as { error?: { code?: string } } | null;
       const code = error?.error?.code ?? String(result.status);
@@ -39,8 +39,8 @@ export class JourneyClient {
   }
   private async request<T>(path: string, method = 'GET', data?: Record<string, unknown>): Promise<T> { return (await this.response(path, method, data)).json() as Promise<T>; }
   private async verified(): Promise<Verified> {
-    const protocol = await this.request<{ minClientVersion: string; controlFormat: string; artifactFormat?: string }>(`/journeys/${this.session.journeyId}/protocol`);
-    if (protocol.controlFormat !== 'control-proof-v1' || (protocol.artifactFormat !== undefined && protocol.artifactFormat !== ARTIFACT_FORMAT) || !meetsMinClientVersion(CLIENT_VERSION, protocol.minClientVersion)) throw new Error(updateError());
+    const protocol = await this.request<{ minClientVersion: string; controlFormat: string; artifactFormat?: string; projectFormat?: string }>(`/journeys/${this.session.journeyId}/protocol`);
+    if ((protocol.projectFormat !== undefined && protocol.projectFormat !== 'project-v1') || protocol.controlFormat !== 'control-proof-v1' || (protocol.artifactFormat !== undefined && protocol.artifactFormat !== ARTIFACT_FORMAT) || !meetsMinClientVersion(CLIENT_VERSION, protocol.minClientVersion)) throw new Error(updateError());
     const cached = this.options.cacheRoot ? await readCache(this.options.cacheRoot, this.session.journeyId).catch(() => null) : null;
     // Fetch all public proofs. A legacy cache is never a Stage 0 trust anchor.
     const rows: { seq: number; proof: ControlProof; envelope: Envelope }[] = [];
@@ -84,7 +84,7 @@ export class JourneyClient {
       const versions: ArtifactView['versions'] = [], comments: ArtifactComment[] = [];
       for (const row of verified.log) {
         const { proof, envelope } = JSON.parse(Buffer.from(row.entry, 'base64url').toString()) as { proof: ControlProof; envelope: Envelope };
-        if (proof.body.artifact !== state.id || proof.type === 'artifact.delete') continue;
+        if (proof.body.artifact !== state.id || proof.type === 'artifact.delete' || proof.type === 'artifact.project') continue;
         const key = verified.epochs.get(envelope.outside.epoch);
         if (!key) throw new Error('An earlier artifact key is unavailable.');
         const record = await readArtifactPayload(proof, envelope, key);

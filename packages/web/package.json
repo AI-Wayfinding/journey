@@ -10,7 +10,7 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
-    "@ai-wayfinding/core": "0.1.5",
+    "@ai-wayfinding/core": "0.1.6",
     "@ai-wayfinding/rules": "0.1.0",
     "@fontsource/ibm-plex-mono": "^5.2.8",
     "@fontsource/ibm-plex-sans": "^5.2.8",

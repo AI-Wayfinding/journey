@@ -13,3 +13,5 @@ export * from './rules.js';
 export * from './controlProof.js';
 export * from './artifacts.js';
 export * from './blobs.js';
+
+export * from './projects.js';
