@@ -249,6 +249,11 @@ describe('signed project-v1 contracts', () => {
     await artifactAppend(old, old.guide, 'client.minVersion', { version: '0.1.6' });
     await artifactAppend(old, old.guide, 'project.create', body, { purpose: 'A private purpose 🌱' }); expect((await checked(old)).projects!.items).toHaveProperty(body.project);
     await artifactAppend(f, f.guide, 'client.minVersion', { version: '0.1.7' });
-    expect((await artifactResult(f)).ok).toBe(false);
+    const unsupported = await artifactResult(f);
+    expect(unsupported.ok).toBe(false); expect(unsupported).not.toHaveProperty('state');
+    // Existing nonproject readers need the signed minimum to display their update message.
+    const legacy = await artifactFixture('0.1.5');
+    await artifactAppend(legacy, legacy.guide, 'client.minVersion', { version: '0.1.7' });
+    expect((await checked(legacy)).minClientVersion).toBe('0.1.7');
   });
 });
