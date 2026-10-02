@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { CLIENT_VERSION, copyArtifactPublic, isArtifactAction, validateArtifactPublic, validateBlobDescriptor, MAX_BLOB_BYTES, LINK_SECRET_PATTERN, isId, linkLookupHash, newId, validAgentName, controlDefinitions, type ControlProof, type JsonObject, type Envelope } from '@ai-wayfinding/core';
+import { projectSelector, copyProjectPublic, isProjectAction, validateProjectPublic, CLIENT_VERSION, copyArtifactPublic, isArtifactAction, validateArtifactPublic, validateBlobDescriptor, MAX_BLOB_BYTES, LINK_SECRET_PATTERN, isId, linkLookupHash, newId, validAgentName, controlDefinitions, type ControlProof, type JsonObject, type Envelope } from '@ai-wayfinding/core';
 import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse } from '@simplewebauthn/server';
 import { appPrfSalt, base64url, digest, emailHash, equalSecret, randomToken, unbase64url, verifyAgentSignature } from './crypto.js';
 import { ENDED_MESSAGE, LINK_RATE_LIMIT, LinkEnded, LinkExpired, expiredBody, linkResponse, readLink } from './agentLink.js';
@@ -91,7 +91,7 @@ function control(value: unknown, journey: string): ControlInput | null {
   if (Object.keys(e).some(k => !['outside', 'nonce', 'ciphertext'].includes(k)) || Object.keys(o).some(k => !['v', 'id', 'journey', 'seq', 'epoch', 'size', 'createdAt'].includes(k))) return null;
   if (Object.keys(p).sort().join(',') !== 'actor,at,body,envelopeHash,journey,prev,seq,sig,type,v' || p.v !== 1 || p.journey !== journey || !validSeq(p.seq) || !(p.prev === null || validString(p.prev, 64)) || !validString(p.at, 64) || !validString(p.actor, 128) || !validString(p.type, 64) || !object(p.body) || !validString(p.sig, 128) || !validString(p.envelopeHash, 64)) return null;
   const definition = controlDefinitions.find(d => d.name === p.type);
-  if (!definition || Object.keys(p.body).some(k => !definition.fields.includes(k)) || isArtifactAction(p.type) && !validateArtifactPublic(p.type, p.body as JsonObject).ok) return null;
+  if (!definition || Object.keys(p.body).some(k => !definition.fields.includes(k)) || isArtifactAction(p.type) && !validateArtifactPublic(p.type, p.body as JsonObject).ok || isProjectAction(p.type) && !validateProjectPublic(p.type, p.body as JsonObject).ok) return null;
   const body: JsonObject = {};
   for (const field of definition.fields) if (Object.hasOwn(p.body, field)) {
     const v = p.body[field];
@@ -105,7 +105,7 @@ function control(value: unknown, journey: string): ControlInput | null {
   }
   if (o.v !== 1 || !validString(o.id, 128) || o.journey !== journey || o.seq !== p.seq || !validEpoch(o.epoch) || !validSeq(o.size) || o.size > 1_048_576 || !validString(o.createdAt, 64) || !validString(e.nonce, 64) || !encrypted(e.ciphertext, 1_400_000)) return null;
   try { if (unbase64url(e.nonce).length !== 12 || unbase64url(e.ciphertext).length !== o.size + 16) return null; } catch { return null; }
-  const proof: ControlProof = { v: 1, journey, seq: p.seq, prev: p.prev, at: p.at, actor: p.actor, type: p.type, body: isArtifactAction(p.type) ? copyArtifactPublic(p.type, body) : body, envelopeHash: p.envelopeHash, sig: p.sig };
+  const proof: ControlProof = { v: 1, journey, seq: p.seq, prev: p.prev, at: p.at, actor: p.actor, type: p.type, body: isProjectAction(p.type) ? copyProjectPublic(p.type, body) : isArtifactAction(p.type) ? copyArtifactPublic(p.type, body) : body, envelopeHash: p.envelopeHash, sig: p.sig };
   return { proof, envelope: { outside: { v: 1, id: o.id, journey, seq: p.seq, epoch: o.epoch, size: o.size, createdAt: o.createdAt }, nonce: e.nonce, ciphertext: e.ciphertext } };
 }
 function wraps(value: unknown, epoch: number, historical = false): EpochWrap[] | null {
@@ -350,6 +350,7 @@ app.get('/v1/journeys', async c => {
   const visible = [];
   for (const row of rows) {
     const response = await enclave(c.env, row.id, { op: 'access', journeyId: row.id, subject: { principal: row.principal, accountHash: auth.accountHash, ...capability(c) } });
+    if (response.status === 426) return response;
     if (response.ok) visible.push({ id: row.id, name: row.name, created: row.created, lastActive: row.lastActive, memberCount: row.memberCount, storageBytes: row.storageBytes, visibility: row.visibility, mode: row.mode, minClientVersion: row.minClientVersion, principal: row.principal });
   }
   return json({ journeys: visible });
@@ -421,7 +422,7 @@ app.post('/v1/journeys/:id/log', async c => {
   const b = await payload(c).catch(() => null), id = c.req.param('id'), s = journeySubject(c);
   if (!b || b.entry !== undefined || b.accessChanges !== undefined || b.epoch !== undefined || b.memberWraps !== undefined) return failure('invalid-request', 400);
   const signed = control(b.control, id);
-  if (!signed || isArtifactAction(signed.proof.type) && Object.keys(b).some(k => !['control', 'wraps'].includes(k))) return failure('invalid-request', 400);
+  if (!signed || (isArtifactAction(signed.proof.type) || isProjectAction(signed.proof.type)) && Object.keys(b).some(k => !['control', 'wraps'].includes(k))) return failure('invalid-request', 400);
   let admission: Admission | undefined;
   if (signed.proof.type === 'member.add') {
     const member = signed.proof.body.member;
@@ -576,6 +577,8 @@ app.get('/a/:secret', async c => {
   const secret = c.req.param('secret');
   const ended = () => linkResponse({ error: 'ended', message: ENDED_MESSAGE }, 404);
   if (!LINK_SECRET_PATTERN.test(secret)) return ended();
+  let selection: string;
+  try { selection = projectSelector(c.req.query('project')); } catch { return linkResponse({ error: 'invalid-project', message: 'Use main, all or a project ID.' }, 400); }
   const page = c.req.query('page') === undefined ? 1 : Number(c.req.query('page'));
   if (!Number.isSafeInteger(page) || page < 1) return linkResponse({ error: 'invalid-page', message: 'The page must be a whole number starting at 1.' }, 400);
   const hash = await linkLookupHash(secret);
@@ -586,12 +589,13 @@ app.get('/a/:secret', async c => {
   const subject: Subject = { principal: row.memberId, agent: true, clientVersion: CLIENT_VERSION, controlFormat: 'control-proof-v1', artifactFormat: 'artifact-v1', projectFormat: 'project-v1' };
   const call: Enclave = message => enclave(c.env, row.journeyId, { ...message, journeyId: row.journeyId, subject });
   try {
-    const pages = await readLink({ journeyId: row.journeyId, memberId: row.memberId, blob: row.blob, expires: Number(row.expires), since: Number(row.since) }, secret, c.env.ORIGIN, call);
+    const pages = await readLink({ journeyId: row.journeyId, memberId: row.memberId, blob: row.blob, expires: Number(row.expires), since: Number(row.since) }, secret, c.env.ORIGIN, call, Date.now(), c.req.query('project') === undefined ? undefined : selection);
     const found = pages[page - 1];
     return found ? linkResponse(found.body) : linkResponse({ error: 'no-such-page', message: `This journey has ${pages.length} page${pages.length === 1 ? '' : 's'}.`, page: { number: page, of: pages.length } }, 404);
   } catch (error) {
     if (error instanceof LinkExpired) return linkResponse(expiredBody(c.env.ORIGIN, row.journeyId, row.memberId, error.expires), 410);
     if (error instanceof LinkEnded) return ended();
+    if (error instanceof Error && error.message === 'Unknown project') return linkResponse({ error: 'not-found', message: 'No such project in this journey.' }, 404);
     // Never include decrypted content or the cause in the reply or the logs.
     return linkResponse({ error: 'unavailable', message: error instanceof Error && error.message.startsWith('This journey') ? error.message : 'The journey could not be read right now. Try again later.' }, 502);
   }

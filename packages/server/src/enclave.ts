@@ -1,6 +1,6 @@
 import rules from '@ai-wayfinding/rules';
 import type { Maybe, Role } from '@ai-wayfinding/rules';
-import { copyBlobDescriptor, isArtifactAction, liveArtifactBlobIds, MAX_BLOB_BYTES, newId, normalizedArtifacts, replayArtifact, verifyBlob, type ArtifactArchive, type BlobDescriptor, canonical, contentRole, isPersonGuide, readControlProof, replayControl, normalizedMembers, ruleVersion, verifyControlProofs, type LogState, type Member } from '@ai-wayfinding/core';
+import { isProjectAction, replayProject, copyBlobDescriptor, isArtifactAction, liveArtifactBlobIds, MAX_BLOB_BYTES, newId, normalizedArtifacts, replayArtifact, verifyBlob, type ArtifactArchive, type BlobDescriptor, canonical, contentRole, isPersonGuide, readControlProof, replayControl, normalizedMembers, ruleVersion, verifyControlProofs, type LogState, type Member } from '@ai-wayfinding/core';
 import type { Env } from './index.js';
 import { failure } from './types.js';
 import type { Admission, ControlInput, EnclaveMessage, Subject } from './types.js';
@@ -37,7 +37,7 @@ export class EnclaveObject {
     return !!member && (subject.agent ? member.kind === 'agent' : member.kind === 'person' && !!subject.accountHash && row?.accountHash === subject.accountHash);
   }
   private version(state: LogState, subject: Subject): boolean {
-    try { return rules.artifact_ready(ruleVersion(state.minClientVersion)) ? rules.artifact_client(ruleVersion(subject.clientVersion ?? ''), ruleVersion(state.minClientVersion), subject.controlFormat === 'control-proof-v1', subject.artifactFormat === 'artifact-v1') : rules.server_version(ruleVersion(subject.clientVersion ?? ''), ruleVersion(state.minClientVersion), subject.controlFormat === 'control-proof-v1'); } catch { return false; }
+    try { return rules.project_ready(ruleVersion(state.minClientVersion)) ? rules.project_client(ruleVersion(subject.clientVersion ?? ''), ruleVersion(state.minClientVersion), subject.controlFormat === 'control-proof-v1', subject.artifactFormat === 'artifact-v1', subject.projectFormat === 'project-v1') : rules.artifact_ready(ruleVersion(state.minClientVersion)) ? rules.artifact_client(ruleVersion(subject.clientVersion ?? ''), ruleVersion(state.minClientVersion), subject.controlFormat === 'control-proof-v1', subject.artifactFormat === 'artifact-v1') : rules.server_version(ruleVersion(subject.clientVersion ?? ''), ruleVersion(state.minClientVersion), subject.controlFormat === 'control-proof-v1'); } catch { return false; }
   }
   private access(state: LogState, subject: Subject, write = false, checkVersion = true): boolean {
     const model = normalizedMembers(state, [subject.principal], Date.now());
@@ -65,7 +65,7 @@ export class EnclaveObject {
   }
   private stageAccess(state: LogState, subject: Subject, epoch: number): boolean {
     const model = normalizedMembers(state, [subject.principal], Date.now());
-    return rules.blob_stage(rules.member_access(rules.find(model.members, model.id(subject.principal)), model.members), this.identity(state, subject), this.artifactVersion(state, subject), state.pendingRotation === true, BigInt(epoch), BigInt(state.currentEpoch));
+    return rules.blob_stage(rules.member_access(rules.find(model.members, model.id(subject.principal)), model.members), this.identity(state, subject), this.artifactVersion(state, subject) && this.version(state, subject), state.pendingRotation === true, BigInt(epoch), BigInt(state.currentEpoch));
   }
   private uploadAccess(state: LogState, input: Extract<EnclaveMessage, { op: 'blobUpload' }>, completing = false): boolean {
     const row = this.one('SELECT * FROM blobs WHERE id=?', input.descriptor.id);
@@ -81,11 +81,11 @@ export class EnclaveObject {
       if (!meta || meta.id !== input.journeyId) return failure('not-found', 404);
       const state = this.current();
       if (!this.access(state, input.subject, false, false)) return failure('forbidden', 403);
-      if (!this.artifactVersion(state, input.subject)) return this.upgrade(state);
+      if (!this.artifactVersion(state, input.subject) || !this.version(state, input.subject)) return this.upgrade(state);
       if (!this.uploadAccess(state, input)) return failure('forbidden', 403);
       this.uploading.add(input.descriptor.id); return null;
     });
-    if (admitted) return admitted;
+    if (admitted) { await request.body?.cancel().catch(() => {}); return admitted; }
     const reader = request.body?.getReader();
     try {
       // Bound allocation and every streamed byte; never trust Content-Length.
@@ -137,7 +137,7 @@ export class EnclaveObject {
       if (!result.ok || creator.kind !== 'person' || creator.id !== data.creator.id || !data.creatorHash) return failure('invalid-request', 400);
       const state = result.state;
       if (data.control.envelope.outside.epoch !== 1 || data.wraps.length !== 1 || data.wraps[0]?.principal !== creator.id || data.wraps[0]?.epoch !== 1) return failure('invalid-request', 400);
-      const s: Subject = { principal: creator.id, accountHash: data.creatorHash, clientVersion: data.clientVersion, controlFormat: data.controlFormat, artifactFormat: data.artifactFormat };
+      const s: Subject = { principal: creator.id, accountHash: data.creatorHash, clientVersion: data.clientVersion, controlFormat: data.controlFormat, artifactFormat: data.artifactFormat, projectFormat: data.projectFormat };
       if (!this.version(state, s)) return this.upgrade(state);
       this.state.storage.transactionSync(() => {
         this.sql.exec('INSERT INTO meta VALUES(?,?,?,?,?)', data.id, 1, 1, 1, 0);
@@ -155,7 +155,7 @@ export class EnclaveObject {
     const state: LogState = JSON.parse(String(authority.state));
     const subject = input.subject;
     if (!subject || !this.access(state, subject, false, false)) return failure('forbidden', 403);
-    if (input.op === 'protocol') return Response.json({ minClientVersion: state.minClientVersion, controlFormat: 'control-proof-v1', ...(rules.artifact_ready(ruleVersion(state.minClientVersion)) ? { artifactFormat: 'artifact-v1' } : {}) });
+    if (input.op === 'protocol') return Response.json(this.protocol(state));
     if (!this.version(state, subject)) return this.upgrade(state);
     if (!this.access(state, subject)) return failure('forbidden', 403);
     switch (input.op) {
@@ -192,7 +192,7 @@ export class EnclaveObject {
         });
         return Response.json({ seq: envelope.outside.seq }, { status: 201 });
       }
-      case 'controlWrite': return isArtifactAction(input.control.proof.type) ? this.artifact(state, JSON.parse(String(authority.creator)) as Member, subject, input) : this.control(state, JSON.parse(String(authority.creator)) as Member, subject, input, now);
+      case 'controlWrite': return isProjectAction(input.control.proof.type) ? this.project(state, JSON.parse(String(authority.creator)) as Member, subject, input) : isArtifactAction(input.control.proof.type) ? this.artifact(state, JSON.parse(String(authority.creator)) as Member, subject, input) : this.control(state, JSON.parse(String(authority.creator)) as Member, subject, input, now);
       case 'records': return Response.json({ records: this.sql.exec('SELECT envelope FROM records WHERE seq>? ORDER BY seq LIMIT ?', input.after, input.limit).toArray().map(row => JSON.parse(String(row.envelope))) });
       case 'log': return Response.json({ log: this.sql.exec('SELECT seq,entry FROM log WHERE seq>? ORDER BY seq LIMIT 1000', input.after).toArray().map(row => ({ seq: row.seq, ...JSON.parse(String(row.entry)) as ControlInput })) });
       case 'wraps': return Response.json({ wraps: this.sql.exec('SELECT epoch,wrap FROM wraps WHERE principal=? ORDER BY epoch', subject.principal).toArray() });
@@ -200,7 +200,32 @@ export class EnclaveObject {
       default: return failure('invalid-request', 400); // No opaque legacy writes or remove/re-add renewal.
     }
   }
-  private upgrade(state: LogState): Response { return Response.json({ error: { code: 'client-too-old' }, minClientVersion: state.minClientVersion, controlFormat: 'control-proof-v1', ...(rules.artifact_ready(ruleVersion(state.minClientVersion)) ? { artifactFormat: 'artifact-v1' } : {}) }, { status: 426 }); }
+  private protocol(state: LogState) { return { minClientVersion: state.minClientVersion, controlFormat: 'control-proof-v1', ...(rules.artifact_ready(ruleVersion(state.minClientVersion)) ? { artifactFormat: 'artifact-v1' } : {}), ...(rules.project_ready(ruleVersion(state.minClientVersion)) ? { projectFormat: 'project-v1' } : {}) }; }
+  private upgrade(state: LogState): Response { return Response.json({ error: { code: 'client-too-old' }, ...this.protocol(state) }, { status: 426 }); }
+  private async project(state: LogState, creator: Member, subject: Subject, input: Extract<EnclaveMessage, { op: 'controlWrite' }>): Promise<Response> {
+    const control = input.control, proof = control.proof;
+    if (!isProjectAction(proof.type)) return failure('invalid-request', 400);
+    if (!rules.project_client(ruleVersion(subject.clientVersion ?? ''), ruleVersion(state.minClientVersion), subject.controlFormat === 'control-proof-v1', subject.artifactFormat === 'artifact-v1', subject.projectFormat === 'project-v1')) return this.upgrade(state);
+    if (proof.actor !== subject.principal || input.wraps !== undefined || input.admission !== undefined) return failure('forbidden', 403);
+    const prior = this.one('SELECT entry FROM log WHERE seq=?', proof.seq);
+    if (prior) return canonical(JSON.parse(String(prior.entry))) === canonical(control) ? Response.json({ seq: proof.seq, memberDelta: 0, removed: [], minClientVersion: state.minClientVersion, retry: true }) : failure('conflict', 409);
+    if (proof.seq !== state.lastSeq + 1 || proof.prev !== state.lastHash) return failure('conflict', 409);
+    if (Math.abs(Date.parse(proof.at) - Date.now()) > 60_000) return failure('invalid-request', 400);
+    if (control.envelope.outside.epoch !== state.currentEpoch) return failure('old-epoch', 409);
+    const live = replayProject(state, proof.type, proof.body, subject.principal, Date.now());
+    if (live.transition.$ !== 'ProjectAccepted') return failure(live.transition.$ === 'ProjectDenied' ? 'forbidden' : 'conflict', live.transition.$ === 'ProjectDenied' ? 403 : 409);
+    const controls = this.sql.exec('SELECT entry FROM log ORDER BY seq').toArray().map(row => JSON.parse(String(row.entry)) as ControlInput);
+    const verified = await verifyControlProofs([...controls.map(c => c.proof), proof], [...controls.map(c => c.envelope), control.envelope], { journey: state.journey, creator });
+    if (!verified.ok) return failure('invalid-request', 400);
+    // Verification yields; live expiry, identity, capabilities and participation still apply at commit.
+    if (!this.access(state, subject) || replayProject(state, proof.type, proof.body, subject.principal, Date.now()).transition.$ !== 'ProjectAccepted') return failure('forbidden', 403);
+    this.state.storage.transactionSync(() => {
+      this.sql.exec('INSERT INTO log VALUES(?,?,?)', proof.seq, JSON.stringify(control), Date.now());
+      this.sql.exec('UPDATE authority SET state=?', JSON.stringify(verified.state));
+      this.sql.exec('UPDATE meta SET nextLog=?', proof.seq + 1);
+    });
+    return Response.json({ seq: proof.seq, memberDelta: 0, removed: [], minClientVersion: verified.state.minClientVersion }, { status: 201 });
+  }
   private async exportArtifacts(state: LogState, subject: Subject, creator: Member): Promise<Response> {
     const live = liveArtifactBlobIds(state), blobs: ArtifactArchive['blobs'] = [];
     for (const id of live) {
@@ -265,6 +290,7 @@ export class EnclaveObject {
     const result = await verifyControlProofs([...controls.map(c => c.proof), proof], [...controls.map(c => c.envelope), input.control.envelope], { journey: state.journey, creator });
     if (!result.ok) return failure(result.error.code === 'unauthorized' || result.error.code === 'last-holder' ? 'forbidden' : 'invalid-request', result.error.code === 'unauthorized' || result.error.code === 'last-holder' ? 403 : 400);
     const next = result.state;
+    if (!this.version(next, subject)) return this.upgrade(next);
     const target = typeof proof.body.member === 'string' ? proof.body.member : typeof proof.body.id === 'string' ? proof.body.id : undefined;
     const live = replayControl(state, subject.principal, operation, target, operation === 'Add' ? next.members[(proof.body.member as Member).id]?.member : undefined, proof.type === 'grant.add' || operation === 'Add' && (proof.body.grants as string[]).includes('members.manage'), { $: proof.body.role === 'read-only' ? 'ReadOnly' : 'ReadWrite' }, now);
     if (live.transition.$ !== 'Accepted') return failure('forbidden', 403);

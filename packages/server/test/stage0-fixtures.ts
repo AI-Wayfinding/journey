@@ -16,12 +16,12 @@ export async function proof(j: Journey, actor: Pick<Person, 'principal' | 'signi
   const envelope = await sealControlLabels(entry, { id: newId(), journey: j.id, seq: entry.seq, epoch: key.epoch, createdAt: entry.at }, key);
   return { proof: await signControlProof(entry, envelope, j.id, await importSigningKey(actor.signing.privateKey)), envelope };
 }
-export async function submit(j: Journey, actor: Person, control: ControlInput, extra: object = {}) {
-  const response = await request(`/v1/journeys/${j.id}/log`, 'POST', { control, ...extra }, as(actor));
+export async function submit(j: Journey, actor: Person, control: ControlInput, extra: object = {}, headers: Record<string, string> = {}) {
+  const response = await request(`/v1/journeys/${j.id}/log`, 'POST', { control, ...extra }, { ...as(actor), ...headers });
   if (response.ok) j.controls.push(control);
   return response;
 }
-export async function change(j: Journey, actor: Person, type: string, body: JsonObject) { return submit(j, actor, await proof(j, actor, type, body)); }
+export async function change(j: Journey, actor: Person, type: string, body: JsonObject, headers: Record<string, string> = {}) { return submit(j, actor, await proof(j, actor, type, body), {}, headers); }
 export async function state(j: Journey) {
   const result = await verifyControlProofs(j.controls.map(c => c.proof), j.controls.map(c => c.envelope), { journey: j.id, creator: j.controls[0]!.proof.body.creator as Member });
   if (!result.ok) throw new Error(result.error.message);

@@ -22,7 +22,7 @@ it('live links show signed settings, stay read-only and require an update rather
   const wraps = { wraps: await keyWraps(j, [agent.member]) };
   await expect(readLink({ journeyId: j.id, memberId: agent.principal, blob, expires: agent.expiresAt, since: Date.now() }, secret, 'https://example.org', message => message.op === 'wraps' ? Promise.resolve(Response.json(wraps)) : call(message))).rejects.toThrow('Update the server');
   expect(recordRequests).toBe(0);
-  expect((await change(j, owner, 'client.minVersion', { version: '0.1.7' })).status).toBe(201);
+  expect((await change(j, owner, 'client.minVersion', { version: '0.1.7' }, { 'X-Client-Version': '0.1.7' })).status).toBe(201);
   recordRequests = 0;
   await expect(readLink({ journeyId: j.id, memberId: agent.principal, blob, expires: agent.expiresAt, since: Date.now() }, secret, 'https://example.org', async message => {
     if (message.op === 'log') return Response.json({ log: j.controls.map(control => ({ seq: control.proof.seq, proof: control.proof, envelope: control.envelope })) });

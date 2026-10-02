@@ -50,7 +50,7 @@ it('keeps the existing paged link overview read-only with artifact text/metadata
   expect((await submit(j, owner, await artifact(j, owner, 'artifact.delete', { format: 'artifact-v1', artifact: b.artifact, author: owner.principal, actor: owner.principal }))).status).toBe(201);
   const hidden = await (await request('/a/' + secret)).text();
   expect(hidden).not.toContain('LONG ARTIFACT TEXT'); expect(hidden).not.toContain('Whole artifact comment');
-  expect((await change(j, owner, 'client.minVersion', { version: '0.1.7' })).status).toBe(201);
+  expect((await change(j, owner, 'client.minVersion', { version: '0.1.7' }, { 'X-Client-Version': '0.1.7' })).status).toBe(201);
   const incompatible = await request('/a/' + secret); expect(incompatible.status).toBe(502);
   expect(await incompatible.text()).toContain('Update the server');
 });

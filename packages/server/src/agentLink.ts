@@ -1,4 +1,4 @@
-import { isArtifactAction, readArtifactPayload, type ArtifactPayload, CLIENT_VERSION, canReadContent, controlDefinitions, deriveRecipient, itemVersions, meetsMinClientVersion, open, openLinkIdentity, parseRecord, unwrapJourneyKey, verifyControlProofs, readControlProof } from '@ai-wayfinding/core';
+import { effectiveProjectParticipants, selectProjectArtifacts, isArtifactAction, readArtifactPayload, type ArtifactPayload, CLIENT_VERSION, canReadContent, controlDefinitions, deriveRecipient, itemVersions, meetsMinClientVersion, open, openLinkIdentity, parseRecord, unwrapJourneyKey, verifyControlProofs, readControlProof } from '@ai-wayfinding/core';
 import type { ControlProof, Member, Envelope, JourneyKey, LogEntry, LogState, ProtocolRecord } from '@ai-wayfinding/core';
 
 /**
@@ -103,7 +103,7 @@ async function readJourney(identity: string, memberId: string, journeyId: string
 }
 
 interface Person { name: string; kind: 'person' | 'agent'; email?: string }
-interface Fields { id: string; type: string; title: string; body: string; tags: string[]; createdAt: string; updatedAt: string; author: Person; writer?: Person; version?: string }
+interface Fields { id: string; type: string; title: string; body: string; tags: string[]; createdAt: string; updatedAt: string; author: Person; writer?: Person; version?: string; project?: string | null }
 const bytes = (value: unknown): number => new TextEncoder().encode(JSON.stringify(value, null, 2)).length;
 
 /** Longest prefix of text (never splitting a character) for which fits(prefix) holds. */
@@ -119,9 +119,11 @@ function fitPrefix(text: string, fits: (prefix: string) => boolean): string {
 
 export interface Page { number: number; of: number; body: Record<string, unknown> }
 /** Builds every page of the journey, each under PAGE_LIMIT bytes. Long bodies continue across pages with a `part` marker. */
-export async function readLink(row: LinkRow, secret: string, origin: string, call: Enclave, now = Date.now()): Promise<Page[]> {
+export async function readLink(row: LinkRow, secret: string, origin: string, call: Enclave, now = Date.now(), selector?: string): Promise<Page[]> {
+  const selection = selector ?? 'main';
   const identity = await openLinkIdentity(secret, row.blob, row.journeyId, row.memberId);
   const { state, genesis, records, artifacts } = await readJourney(identity, row.memberId, row.journeyId, call);
+  const selected = new Set(selectProjectArtifacts(state, selection));
   const mine = state.members[row.memberId]!.member;
   const expires = Math.min(row.expires, mine.expiresAt ? Date.parse(mine.expiresAt) : row.expires);
   if (expires <= now) throw new LinkExpired(expires, row.journeyId, row.memberId);
@@ -132,8 +134,9 @@ export async function readLink(row: LinkRow, secret: string, origin: string, cal
     return { name: derived.profile?.name || 'Journey member', kind: 'person', ...(derived.profile?.email ? { email: derived.profile.email } : {}) };
   };
   const shown = itemVersions(records).filter(view => !view.deleted && view.item.itemType !== 'recovery');
-  const entries: Fields[] = shown.map(view => ({ id: view.root, type: view.item.itemType, title: view.item.title, body: view.item.body, tags: view.item.tags, createdAt: view.versions[0]!.created, updatedAt: view.item.created, author: who(view.versions[0]!.author) }));
-  entries.push(...artifacts.map(a => ({ ...a, author: who(a.author.name), writer: who(a.writer!.name) })));
+  const entries: Fields[] = (selection === 'main' || selection === 'all' ? shown : []).map(view => ({ id: view.root, type: view.item.itemType, title: view.item.title, body: view.item.body, tags: view.item.tags, createdAt: view.versions[0]!.created, updatedAt: view.item.created, author: who(view.versions[0]!.author), project: null }));
+  entries.push(...artifacts.filter(a => selected.has(a.id)).map(a => ({ ...a, author: who(a.author.name), writer: who(a.writer!.name), project: state.projects?.placements[a.id]?.project ?? null })));
+  const projects = Object.values(state.projects?.items ?? {}).map(project => ({ id: project.id, purpose: project.purpose, state: project.state, revision: project.revision, participants: effectiveProjectParticipants(state, project.id, now).map(id => ({ id, ...who(id) })) }));
   const people = Object.values(state.members).filter(({ member }) => member.id !== row.memberId).map(({ member }) => who(member.id));
   const genesisBody = genesis.body as { name?: string; description?: string; journeyKind?: string };
   const remaining = expires - now;
@@ -141,43 +144,61 @@ export async function readLink(row: LinkRow, secret: string, origin: string, cal
   const url = renewUrl(origin, row.journeyId, row.memberId);
   const header = (number: number, of: number, next: string | null): Record<string, unknown> => ({
     about: ABOUT,
-    journey: { id: row.journeyId, name: state.settings?.name ?? genesisBody.name ?? '', description: state.settings?.description ?? genesisBody.description ?? '', kind: genesisBody.journeyKind ?? 'individual' },
-    access: { agentName: mine.name ?? 'Agent', scope: 'read', expiresAt: new Date(expires).toISOString(), expiresInHours: Math.max(0, Math.floor(remaining / 3_600_000)), expiringSoon: remaining < 86_400_000 || remaining < total * 0.2, renewUrl: url, renewHint: `Access ends ${utc(expires)}. To continue, ask the person to open ${url} and extend it with their passkey; the link stays the same.` },
+    journey: { id: row.journeyId, name: (state.settings?.name ?? genesisBody.name ?? '').slice(0, 256), description: (state.settings?.description ?? genesisBody.description ?? '').slice(0, 512), kind: genesisBody.journeyKind ?? 'individual' },
+    access: { agentName: (mine.name ?? 'Agent').slice(0, 256), scope: 'read', expiresAt: new Date(expires).toISOString(), expiresInHours: Math.max(0, Math.floor(remaining / 3_600_000)), expiringSoon: remaining < 86_400_000 || remaining < total * 0.2, renewUrl: url, renewHint: `Access ends ${utc(expires)}. To continue, ask the person to open ${url} and extend it with their passkey; the link stays the same.` },
     page: { number, of, next },
+    selection,
     howToWrite: HOW_TO_WRITE,
     ...(artifacts.length ? { attachments: 'Attachments require the member interface. This link does not offer downloads.' } : {}),
   });
-  const next = (n: number): string => `${origin}/a/${secret}?page=${n}`;
+  const next = (n: number): string => `${origin}/a/${secret}?page=${n}${selector === undefined ? '' : `&project=${encodeURIComponent(selector)}`}`;
   // Measure with the widest page markers so a later `of` or `next` cannot push a page over the limit.
-  const overhead = bytes({ ...header(9999, 9999, next(9999)), items: [], people: [] });
-  const budget = PAGE_LIMIT - 400;
-  const pages: { items: Record<string, unknown>[]; people: Person[] }[] = [{ items: [], people: [] }];
-  let used = overhead;
-  const room = () => budget - used;
-  const fresh = () => { pages.push({ items: [], people: [] }); used = overhead; };
-  for (const person of people) {
-    const size = bytes(person) + 4;
-    if (size > room()) fresh();
-    pages.at(-1)!.people.push(person); used += size;
-  }
-  for (const entry of entries) {
-    const full = { ...entry };
-    const size = bytes(full) + 4;
-    if (size <= room()) { pages.at(-1)!.items.push(full); used += size; continue; }
-    if (size <= budget - overhead) { fresh(); pages.at(-1)!.items.push(full); used += size; continue; }
-    // Too long for any page: continue the body across pages.
-    if (used > overhead + 200) fresh();
-    let rest = entry.body; const parts: Record<string, unknown>[] = [];
+  type Collection = 'items' | 'people' | 'projects';
+  type Rows = Record<Collection, Record<string, unknown>[]>;
+  const empty = (): Rows => ({ items: [], people: [], projects: [] });
+  const pages: Rows[] = [empty()];
+  const fits = (collection: Collection, value: Record<string, unknown>) => bytes({ ...header(999999, 999999, next(999999)), ...pages.at(-1), [collection]: [...pages.at(-1)![collection], value] }) <= PAGE_LIMIT;
+  const fresh = () => { pages.push(empty()); };
+  const append = (collection: Collection, value: Record<string, unknown>) => {
+    if (!fits(collection, value)) fresh();
+    if (!fits(collection, value)) throw new Error(historyError);
+    pages.at(-1)![collection].push(value);
+  };
+  const text = (collection: Collection, value: Record<string, unknown>, field: string) => {
+    if (fits(collection, value)) { append(collection, value); return; }
+    fresh();
+    if (fits(collection, value)) { append(collection, value); return; }
+    let rest = String(value[field]); const parts: Record<string, unknown>[] = [];
     while (rest.length) {
-      const piece = fitPrefix(rest, prefix => bytes({ ...entry, body: prefix, part: { number: 999, of: 999 } }) + 4 <= room()) || rest.slice(0, 1);
-      const part = { ...entry, body: piece, part: { number: 0, of: 0 } };
-      parts.push(part); pages.at(-1)!.items.push(part); rest = rest.slice(piece.length);
-      used += bytes(part) + 4;
+      const piece = fitPrefix(rest, prefix => fits(collection, { ...value, [field]: prefix, part: { number: 999999, of: 999999 } }));
+      if (!piece) throw new Error(historyError);
+      const part = { ...value, [field]: piece, part: { number: 999999, of: 999999 } };
+      append(collection, part); parts.push(part); rest = rest.slice(piece.length);
       if (rest.length) fresh();
     }
     parts.forEach((part, index) => { part.part = { number: index + 1, of: parts.length }; });
+  };
+  for (const person of people) text('people', { ...person }, 'name');
+  for (const project of projects) {
+    const { participants, ...summary } = project;
+    text('projects', { ...summary, participants: [] }, 'purpose');
+    const roster: Record<string, unknown>[] = [];
+    for (const participant of participants) {
+      const part = roster.at(-1);
+      const value = { id: project.id, participants: [...(part?.participants as unknown[] ?? []), participant], part: { number: 999999, of: 999999 } };
+      // Extend only the current page's roster; every append measures actual UTF-8 JSON.
+      if (part && pages.at(-1)!.projects.at(-1) === part) {
+        pages.at(-1)!.projects.pop();
+        if (fits('projects', value)) { Object.assign(part, value); pages.at(-1)!.projects.push(part); continue; }
+        pages.at(-1)!.projects.push(part);
+      }
+      const row = { id: project.id, participants: [participant], part: { number: 999999, of: 999999 } };
+      append('projects', row); roster.push(row);
+    }
+    roster.forEach((part, index) => { part.part = { number: index + 1, of: roster.length }; });
   }
-  const filled = pages.filter((page, index) => index === 0 || page.items.length || page.people.length);
-  return filled.map((page, index) => ({ number: index + 1, of: filled.length, body: { ...header(index + 1, filled.length, index + 1 < filled.length ? next(index + 2) : null), items: page.items, people: page.people } }));
+  for (const entry of entries) text('items', { ...entry }, 'body');
+  const filled = pages.filter((page, index) => index === 0 || page.items.length || page.people.length || page.projects.length);
+  return filled.map((page, index) => ({ number: index + 1, of: filled.length, body: { ...header(index + 1, filled.length, index + 1 < filled.length ? next(index + 2) : null), ...page } }));
 }
 export class LinkExpired extends Error { constructor(readonly expires: number, readonly journeyId: string, readonly memberId: string) { super('expired'); } }
