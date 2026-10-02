@@ -33,7 +33,7 @@ export async function controls(page: Page, id: string): Promise<{ proof: Control
   const response = await page.request.get(`/v1/journeys/${id}/log`, { headers: { ...headers, 'X-Principal': await principal(page, id) } });
   expect(response.ok()).toBeTruthy(); return (await response.json()).log.map((row: { proof: ControlProof; envelope: Envelope }) => ({ proof: row.proof, envelope: row.envelope }));
 }
-export async function change(page: Page, id: string, type: string, body: JsonObject) {
+export async function change(page: Page, id: string, type: string, body: JsonObject, extraHeaders: Record<string, string> = {}) {
   const actor = await principal(page, id), secrets = await personSecrets(page), rows = await controls(page, id);
   const verified = await verifyControlProofs(rows.map(c => c.proof), rows.map(c => c.envelope), { journey: id, creator: rows[0]!.proof.body.creator as Member });
   if (!verified.ok) throw new Error(verified.error.message);
@@ -43,7 +43,7 @@ export async function change(page: Page, id: string, type: string, body: JsonObj
   const at = new Date().toISOString(), entry = { v: 1 as const, seq: verified.state.lastSeq + 1, prev: verified.state.lastHash, at, actor, type, body };
   const envelope = await sealControlLabels(entry, { id: newId(), journey: id, seq: entry.seq, epoch: key.epoch, createdAt: at }, key);
   const proof = await signControlProof(entry, envelope, id, await importSigningKey(secrets.signing));
-  const response = await page.request.post(`/v1/journeys/${id}/log`, { headers: { ...headers, 'X-Wayfinding': '1', Origin: 'http://localhost:18787', 'X-Principal': actor }, data: { control: { proof, envelope } } });
+  const response = await page.request.post(`/v1/journeys/${id}/log`, { headers: { ...headers, ...extraHeaders, 'X-Wayfinding': '1', Origin: 'http://localhost:18787', 'X-Principal': actor }, data: { control: { proof, envelope } } });
   expect(response.status(), await response.text()).toBe(201);
 }
 export async function joinTrip(owner: Page, guest: Page, path: string) {
