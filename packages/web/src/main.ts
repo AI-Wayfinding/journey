@@ -11,6 +11,9 @@ import type { JourneyContext, JourneyListing } from './journey.js';
 import { ARTIFACT_TYPES, MAX_ARTIFACT_ATTACHMENTS, MAX_BLOB_BYTES, suggestedArtifact, validPackagePath } from '@ai-wayfinding/core';
 import { artifactViews, artifactText, attachmentBytes, commentArtifact, deleteArtifact, downloadAttachment, saveArtifact, uploadAttachment } from './artifacts.js';
 import { mountArtifactViewer } from './artifact-viewer.js';
+import { PROJECT_STATES, canEditProject, effectiveProjectParticipants, projectSelector, selectProjectArtifacts } from '@ai-wayfinding/core';
+import type { ProjectState } from '@ai-wayfinding/core';
+import { canCreateProject, canParticipate, createProject, participateProject, placeArtifact, purposeProject, stateProject } from './projects.js';
 import './style.css';
 
 const root = document.querySelector<HTMLDivElement>('#app')!;
@@ -349,15 +352,49 @@ function agentPromptScreen(id: string): void {
 async function journeyHome(id: string): Promise<void> {
   const ctx = await context(id); if (!ctx) return;
   const artifacts = await artifactViews(ctx), readOnly = !canWriteContent(ctx.state, ctx.principal);
-  render(`<section class="panel"><p class="eyebrow">JOURNEY</p><h1>${escape(ctx.state.settings?.name ?? 'Journey')}</h1>${ctx.state.settings?.description ? `<p>${escape(ctx.state.settings.description)}</p>` : ''}<div class="actions">${readOnly ? '<p class="meta">Your access is read-only or a key update is pending.</p>' : `<a class="button" href="/journeys/${id}/add">Add an artifact</a>`}<a class="button" href="/journeys/${id}/agent">Add your agent</a><a class="button" href="/journeys/${id}/members">Share this journey</a><a class="button" href="/journeys/${id}/export">Export</a></div></section><section class="panel"><h2>Artifacts</h2><div class="grid"><div><label for="filter">Filter by type</label><select id="filter"><option value="">All types</option>${ARTIFACT_TYPES.map(t => `<option value="${t}">${t}</option>`).join('')}</select></div><div><label for="search">Search your artifacts</label><input id="search" type="search" placeholder="Search titles, tags and text" /></div></div><div id="artifacts" class="cards"></div></section>`);
+  render(`<section class="panel"><p class="eyebrow">JOURNEY</p><h1>${escape(ctx.state.settings?.name ?? 'Journey')}</h1>${ctx.state.settings?.description ? `<p>${escape(ctx.state.settings.description)}</p>` : ''}<div class="actions">${readOnly ? '<p class="meta">Your access is read-only or a key update is pending.</p>' : `<a class="button" href="/journeys/${id}/add">Add an artifact</a>`}<a class="button" href="/journeys/${id}/agent">Add your agent</a><a class="button" href="/journeys/${id}/members">Share this journey</a><a class="button" href="/journeys/${id}/export">Export</a><a class="button" href="/journeys/${id}/projects">Projects</a></div></section><section class="panel"><h2>Artifacts</h2><label for="project-filter">Artifact list</label><select id="project-filter"><option value="main">Main (unassigned)</option><option value="all">All artifacts</option>${projectOptions(ctx)}</select><p id="artifact-count" class="meta"></p><div class="grid"><div><label for="filter">Filter by type</label><select id="filter"><option value="">All types</option>${ARTIFACT_TYPES.map(t => `<option value="${t}">${t}</option>`).join('')}</select></div><div><label for="search">Search your artifacts</label><input id="search" type="search" placeholder="Search titles, tags and text" /></div></div><div id="artifacts" class="cards"></div></section>`);
+  const selector = root.querySelector<HTMLSelectElement>('#project-filter')!;
+  selector.value = projectSelector(sessionStorage.getItem(`wayfinding-project-filter:${id}`) ?? undefined);
+  // Fail closed for a stored unknown project; never fall back to all artifacts.
+  selectProjectArtifacts(ctx.state, selector.value);
   const show = () => {
+    const selected = selectProjectArtifacts(ctx.state, selector.value);
+    sessionStorage.setItem(`wayfinding-project-filter:${id}`, selector.value);
     const filter = root.querySelector<HTMLSelectElement>('#filter')!.value, query = root.querySelector<HTMLInputElement>('#search')!.value.toLocaleLowerCase();
-    root.querySelector('#artifacts')!.innerHTML = artifacts.filter(view => {
+    const matching = artifacts.filter(view => {
+      if (!selected.includes(view.state.id)) return false;
       const p = view.versions.at(-1)!.payload;
       return (!filter || p.content.kind === filter) && (!query || `${p.title} ${p.tags.join(' ')} ${artifactText(p)} ${p.attachments.map(a => a.name).join(' ')}`.toLocaleLowerCase().includes(query));
-    }).map(view => { const p = view.versions.at(-1)!.payload; return `<article class="card"><p class="meta">${escape(p.content.kind)} · ${escape(p.tags.join(', '))}</p><h3><a href="/journeys/${id}/artifacts/${view.state.id}">${escape(p.title)}</a></h3><p>${escape(artifactText(p).slice(0, 160))}</p></article>`; }).join('') || '<p>No matching artifacts.</p>';
+    });
+    root.querySelector('#artifact-count')!.textContent = `${matching.length} matching artifacts in this list`;
+    root.querySelector('#artifacts')!.innerHTML = matching.map(view => { const p = view.versions.at(-1)!.payload; return `<article class="card"><p class="meta">${escape(p.content.kind)} · ${escape(p.tags.join(', '))}</p><h3><a href="/journeys/${id}/artifacts/${view.state.id}">${escape(p.title)}</a></h3><p>${escape(artifactText(p).slice(0, 160))}</p></article>`; }).join('') || '<p>No matching artifacts.</p>';
   };
+  selector.addEventListener('change', show);
   root.querySelector('#search')?.addEventListener('input', show); root.querySelector('#filter')?.addEventListener('change', show); show();
+}
+function stateLabel(state: string): string { return state.replace(/-/g, ' '); }
+function projectOptions(ctx: JourneyContext, selected?: string): string {
+  return Object.values(ctx.state.projects?.items ?? {}).map(p => `<option value="${p.id}" ${p.id === selected ? 'selected' : ''}>${escape(p.purpose.slice(0, 100))} · ${escape(stateLabel(p.state))}</option>`).join('');
+}
+async function projectsScreen(id: string): Promise<void> {
+  const ctx = await context(id); if (!ctx) return;
+  const projects = Object.values(ctx.state.projects?.items ?? {});
+  render(`<section class="panel"><p><a href="/journeys/${id}">← Back to journey</a></p><h1>Projects</h1><p>Projects group work, not access. Creating a project does not join it. Agents follow the person who added them.</p><ul id="projects" class="list">${projects.map(p => `<li><a href="/journeys/${id}/projects/${p.id}">${escape(p.purpose.slice(0, 100))}</a><p class="meta">${escape(stateLabel(p.state))} · ${effectiveProjectParticipants(ctx.state, p.id).length} participants · ${selectProjectArtifacts(ctx.state, p.id).length} project artifacts</p></li>`).join('') || '<li>No projects yet.</li>'}</ul></section>${canCreateProject(ctx) ? '<section class="panel"><h2>Create a project</h2><form id="project-create"><label for="project-purpose">Purpose</label><textarea id="project-purpose" name="project-purpose" required></textarea><p>Plain text, up to 10,000 UTF-8 bytes. Starts getting started, with no participants.</p><button type="submit">Create project</button></form></section>' : '<p>Read-only access or a key update prevents project creation.</p>'}`);
+  form('project-create', async f => { const project = await createProject(ctx, input(f, 'project-purpose')); navigate(`/journeys/${id}/projects/${project}`); });
+}
+async function projectScreen(id: string, projectId: string): Promise<void> {
+  const ctx = await context(id); if (!ctx) return;
+  const project = ctx.state.projects?.items[projectId];
+  if (!project) throw new Error('Project not found.');
+  const participants = effectiveProjectParticipants(ctx.state, projectId);
+  const canEdit = canEditProject(ctx.state, ctx.principal, projectId);
+  const selected = selectProjectArtifacts(ctx.state, projectId);
+  const artifacts = (await artifactViews(ctx)).filter(v => selected.includes(v.state.id));
+  const purposeAt = (seq: number) => { const text = ctx.log.find(e => e.seq === seq)?.body.purpose; return typeof text === 'string' ? `<p class="project-purpose">${escape(text)}</p>` : ''; };
+  render(`<section class="panel"><p><a href="/journeys/${id}/projects">← Back to projects</a></p><h1>Project</h1><p id="project-purpose-text" class="project-purpose">${escape(project.purpose)}</p><p id="project-state" class="meta">${escape(stateLabel(project.state))} · Revision ${project.revision}</p><p>Created ${escape(project.at)} by ${escape(attribution(ctx, project.creator))}. Creation does not imply participation.</p><div class="actions">${canParticipate(ctx, 'project.join', projectId) ? '<button id="project-join">Join project</button>' : ''}${canParticipate(ctx, 'project.leave', projectId) ? '<button id="project-leave" class="secondary">Leave project</button>' : ''}</div>${canEdit ? `<form id="project-purpose-form"><label for="project-purpose">Purpose</label><textarea id="project-purpose" name="project-purpose" required>${escape(project.purpose)}</textarea><button type="submit">Save purpose</button></form><form id="project-state-form"><label for="project-state-choice">${project.state === 'archived' ? 'Reopen or change state' : 'Project state'}</label><select id="project-state-choice" name="project-state-choice">${PROJECT_STATES.map(s => `<option value="${s}" ${s === project.state ? 'selected' : ''}>${escape(stateLabel(s))}</option>`).join('')}</select><button type="submit">Save state</button></form>` : '<p>Join this project to edit its purpose and state. Reading its artifacts does not require participation.</p>'}</section><section class="panel"><h2>Participants</h2><p>Agents inherit their adding person’s participation; they do not join separately.</p><ul id="project-participants" class="list">${participants.map(actor => `<li>${escape(attribution(ctx, actor))}${ctx.state.members[actor]?.member.kind === 'agent' ? ' · inherited participation' : ''}</li>`).join('') || '<li>No participants.</li>'}</ul></section><section class="panel"><h2>Project artifacts</h2><p class="meta">${artifacts.length} project artifacts. Everyone in this journey can read, download and export them, including when archived.</p><ul id="project-artifacts" class="list">${artifacts.map(v => `<li><a href="/journeys/${id}/artifacts/${v.state.id}">${escape(v.versions.at(-1)!.payload.title)}</a></li>`).join('') || '<li>No artifacts in this project.</li>'}</ul></section><section class="panel"><h2>Project history</h2><ul id="project-history" class="list">${project.history.map(c => `<li>${escape(c.at)} · ${escape(attribution(ctx, c.actor))} · ${escape(c.type)}${c.from && c.to ? ` · ${escape(stateLabel(c.from))} → ${escape(stateLabel(c.to))}` : ''} · Revision ${c.seq}${purposeAt(c.seq)}</li>`).join('')}</ul></section>`);
+  for (const type of ['join', 'leave'] as const) root.querySelector(`#project-${type}`)?.addEventListener('click', () => perform(async () => { await participateProject(ctx, `project.${type}`, projectId); await projectScreen(id, projectId); }));
+  form('project-purpose-form', async f => { await purposeProject(ctx, project, input(f, 'project-purpose')); await projectScreen(id, projectId); });
+  form('project-state-form', async f => { await stateProject(ctx, project, input(f, 'project-state-choice') as ProjectState); await projectScreen(id, projectId); });
 }
 function attribution(ctx: JourneyContext, actor: string): string {
   const member = ctx.state.members[actor]?.member ?? ctx.log.flatMap(e => [e.body.creator, e.body.member]).find(m => m && typeof m === 'object' && !Array.isArray(m) && m.id === actor) as Member | undefined;
@@ -368,9 +405,14 @@ async function artifactScreen(id: string, artifactId: string): Promise<void> {
   const view = (await artifactViews(ctx)).find(v => v.state.id === artifactId);
   if (!view) throw new Error('Artifact not found. It may have been deleted.');
   const payload = view.versions.at(-1)!.payload, readOnly = !canWriteContent(ctx.state, ctx.principal);
+  const placement = ctx.state.projects?.placements[artifactId];
+  const project = placement?.project ? ctx.state.projects?.items[placement.project] : undefined;
+  const placementPanel = `<section class="panel"><h2>Project placement</h2><p id="placement-current">${project ? `<a href="/journeys/${id}/projects/${project.id}">${escape(project.purpose.slice(0, 100))}</a> · ${escape(stateLabel(project.state))}` : 'Main (unassigned)'}</p><p>Projects group artifacts; everyone in this journey can still read them.</p>${readOnly ? '<p>Read-only access or a key update prevents placement changes.</p>' : `<form id="placement-form"><label for="placement-project">Place saved artifact in</label><select id="placement-project" name="placement-project"><option value="">Main (unassigned)</option>${projectOptions(ctx, placement?.project ?? undefined)}</select><button type="submit">Save placement</button></form>`}<h3>Placement history</h3><ul id="placement-history" class="list">${placement?.history.map(c => `<li>${escape(c.at)} · ${escape(attribution(ctx, c.actor))} · ${escape(c.from ?? 'main')} → ${escape(c.to ?? 'main')} · Revision ${c.seq}</li>`).join('') || '<li>No placement changes.</li>'}</ul></section>`;
   const downloads: ArtifactAttachment[] = [];
   const attachments = (p: ArtifactPayload) => `<ul class="list">${p.attachments.map(a => { const n = downloads.push(a) - 1; return `<li>${escape(a.path ?? a.name)} · ${a.blob.size} bytes <button class="secondary" data-download="${n}">Download ${escape(a.name)}</button></li>`; }).join('')}</ul>`;
   render(`<section class="panel"><p><a href="/journeys/${id}">← Back to journey</a></p><p class="eyebrow">${escape(payload.content.kind)}</p><h1>${escape(payload.title)}</h1><p class="meta" id="artifact-author">Author: ${escape(attribution(ctx, view.state.author))}</p><p class="meta">Tags: ${escape(payload.tags.join(', ') || 'none')}</p><div id="artifact-viewer"></div>${attachments(payload)}${readOnly ? '' : `<div class="actions"><a href="/journeys/${id}/artifacts/${artifactId}/edit" class="button">Edit artifact</a><button class="secondary" id="delete-artifact">Delete artifact</button></div>`}</section><section class="panel"><h2>Versions</h2><ul class="list" id="versions">${view.versions.map(v => `<li><p class="meta">${escape(v.id)} · ${escape(v.at)} · Writer: ${escape(attribution(ctx, v.actor))}</p><h3>${escape(v.payload.title)}</h3><p>Tags: ${escape(v.payload.tags.join(', '))}</p><pre>${escape(artifactText(v.payload))}</pre>${attachments(v.payload)}</li>`).join('')}</ul></section><section class="panel"><h2>Comments</h2><p>Comments belong to the whole artifact; a version is recorded for context.</p><ul class="list" id="comments">${view.comments.map(c => `<li><p class="meta">${escape(c.at)} · Writer: ${escape(attribution(ctx, c.actor))} · Version: ${escape(c.onVersion ?? 'none')}</p><p>${escape(c.text)}</p></li>`).join('')}</ul>${readOnly ? '<p>Your access is read-only or a key update is pending.</p>' : '<form id="comment-form"><label for="comment">Add a comment</label><textarea id="comment" name="comment" required></textarea><button type="submit">Add comment</button></form>'}</section>`);
+  root.querySelector('main')!.insertAdjacentHTML('beforeend', placementPanel);
+  form('placement-form', async f => { await placeArtifact(ctx, view.state, input(f, 'placement-project') || null); await artifactScreen(id, artifactId); });
   disposeViewer = mountArtifactViewer(root.querySelector<HTMLElement>('#artifact-viewer')!, payload, (attachment, signal) => attachmentBytes(ctx, attachment, signal));
   root.querySelectorAll<HTMLButtonElement>('[data-download]').forEach(button => button.addEventListener('click', () => perform(async () => { const a = downloads[Number(button.dataset.download)]!; downloadAttachment(a.name, await attachmentBytes(ctx, a)); })));
   form('comment-form', async f => { await commentArtifact(ctx, view, input(f, 'comment')); await artifactScreen(id, artifactId); });
@@ -605,6 +647,7 @@ window.addEventListener('pagehide', lockPersonKeys);
 async function route(): Promise<void> {
   disposeViewer?.(); disposeViewer = undefined;
   const path = location.pathname;
+  render('<section class="panel"><p role="status">Loading…</p></section>');
   if (path === '/auth/verify') return verifyEmail();
   if (path === '/sign-in') return signIn();
   if (path === '/continue') return continueScreen();
@@ -622,6 +665,9 @@ async function route(): Promise<void> {
     if (sub === 'agent') return agentPromptScreen(id);
     if (sub === 'export') return exportScreen(id);
     if (sub === 'add') return artifactForm(id);
+    if (sub === 'projects') return projectsScreen(id);
+    const project = /^projects\/([0-7][0-9A-HJKMNP-TV-Z]{25})$/.exec(sub);
+    if (project) return projectScreen(id, project[1]!);
     const artifact = /^artifacts\/([0-7][0-9A-HJKMNP-TV-Z]{25})(?:\/(edit))?$/.exec(sub);
     if (artifact) return artifact[2] ? artifactForm(id, artifact[1]) : artifactScreen(id, artifact[1]!);
     if (!sub) return journeyHome(id);

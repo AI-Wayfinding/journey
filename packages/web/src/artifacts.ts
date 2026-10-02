@@ -15,7 +15,7 @@ export async function artifactViews(ctx: JourneyContext): Promise<ArtifactView[]
     if (state.deleted) continue;
     const versions: ArtifactVersion[] = [], comments: ArtifactComment[] = [];
     for (const { proof, envelope } of ctx.controls) {
-      if (proof.body.artifact !== state.id || proof.type === 'artifact.delete') continue;
+      if (proof.body.artifact !== state.id || !['artifact.create', 'artifact.version', 'artifact.comment'].includes(proof.type)) continue;
       const key = ctx.epochs.get(envelope.outside.epoch);
       if (!key) throw new Error('An earlier artifact key is unavailable.');
       const record = await readArtifactPayload(proof, envelope, key);

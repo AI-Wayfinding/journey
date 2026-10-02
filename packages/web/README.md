@@ -22,7 +22,7 @@ A guide manages people independently of their read-only or read-write content ro
 
 Read-only people can change their own name and email choice, approve and manage their own agents, create and renew read-only agent links, and leave. The last guide cannot leave or give up guide authority. Removal revokes the removed person's agents too. A remaining guide completes key rotation before further content writes.
 
-The browser verifies signed controls bound to their encrypted labels before showing settings or access. Unknown controls or a newer required version clear the view and show an update message; approval is not needed again. Server schema v2 purges legacy journeys rather than reading or migrating them. New journeys require client/interface version `0.1.5`, `control-proof-v1` and `artifact-v1`. A remembered, account-scoped principal ID in this tab lets the authenticated protocol check show an update message when the server omits an incompatible journey from listings. This ID is not a key or an access grant.
+The browser verifies signed controls bound to their encrypted labels before showing settings or access. Unknown controls or a newer required version clear the view and show an update message; approval is not needed again. Server schema v2 purges legacy journeys rather than reading or migrating them. New journeys require client/interface version `0.1.6`, `control-proof-v1`, `artifact-v1` and `project-v1`. A remembered, account-scoped principal ID in this tab lets the authenticated protocol check show an update message when the server omits an incompatible journey from listings. This ID is not a key or an access grant.
 
 ## Artifacts and files
 
@@ -33,6 +33,14 @@ Files are encrypted in the browser before staging and binary upload to private R
 Data views parse JSON, CSV, TOML, YAML and SQLite locally in a cancellable worker. Tables show the first 100 rows and 100 columns; structures allow 1,000 nodes, 100,000 displayed UTF-8 bytes and at most 64 levels. Input is capped at 25,000,000 bytes and each worker stops after ten seconds or cancellation. SQLite uses generated read-only queries and a 128 MiB engine memory limit, not user SQL, extensions or external access. YAML tags/aliases, malformed data and unsupported formats fall back to original-byte download. Formula-like CSV cells remain text.
 
 Read-only access or a pending key rotation stops writes, including staged uploads. Current access is checked again before upload and commit through the shared Bend rules. Deletion hides the artifact, versions, comments and downloads, but retains signed proofs and encrypted metadata. It is not secure erasure and cannot recall downloaded copies. Exports include surviving files and explicit unavailable-deleted-blob IDs; the signed archive is verified before encrypting it to the person and their recovery recipient.
+
+## Projects
+
+Open Projects from a journey to create a grouping with a plain-text purpose. Creation starts at getting started and does not join you. Each person explicitly joins or leaves; their current agents follow without separate joins. Empty and archived projects remain visible. Participants of either content role can edit purpose and state, archive and reopen. These metadata controls do not permit ordinary artifact, comment, placement or file writes. Pending key rotation blocks those ordinary writes and project creation, but not authorized participation or metadata controls.
+
+A saved artifact has a separate Project placement form. Assign, move or clear its single project without changing its author, versions, comments or files. Lists default to Main (unassigned). Choose one project or All artifacts; the choice stays in this tab across navigation and reload and intersects the existing type/text/tag search. Project counts are separate from the matching-list count. Participation never limits reading, versions, downloads or encrypted export, even in archived projects.
+
+Purpose/state, participation and placement use the revision loaded with the page. A stale change fails with a reload instruction rather than overwriting newer work. Signed history records who changed what and when. The browser verifies the entire history before displaying content; unknown controls, bad payloads, missing capabilities or newer minimums cannot leave a partial project view. Purpose text is escaped, not interpreted as markup or fetched.
 
 ## Local tests
 
@@ -47,6 +55,7 @@ npm run build -w @ai-wayfinding/web
 npm run test:e2e -w @ai-wayfinding/web
 npm run test -w @ai-wayfinding/web -- src/stage1-viewer.test.ts
 npm run test:e2e -w @ai-wayfinding/web -- e2e/stage1-artifacts.spec.ts e2e/stage1-viewer.spec.ts
+npm run test:e2e -w @ai-wayfinding/web -- e2e/stage2-projects.spec.ts
 ```
 
 Playwright builds the app and starts `wrangler dev` on `localhost:18787` with the test-only `packages/server/test/wrangler.jsonc` and local Durable Objects and R2 in `.scratch/`. Its wrapper fakes email delivery and rate limits but uses real Worker routes, WebAuthn verification, signed journey requests and encrypted records. The Chromium CDP authenticator is configured with `hasPrf: true` for the full journey and `hasPrf: false` for the no-PRF stop. The tests count WebAuthn create/get calls, not physical touches on a real device. No test identity is compiled into production. The full journey covers sign-up, sign-in, invite admission, agent approval and signed write, comments, support read-only access, and removal with a rotated key. It does not contact a Cloudflare account.
