@@ -1059,9 +1059,9 @@ type PrivateHeaderDecision is Data:
 def private_header(+retained: Nat, +incoming: Nat, private_same: Bool, +predecessor: Bool, +paired: Bool) -> PrivateHeaderDecision:
   match retained:
     case 0n:
-      Bool.pick(PrivateHeaderDecision, paired, PrivateVerifiedFreshness{}, PrivateUnverifiedFreshness{})
+      Bool.pick(PrivateHeaderDecision, predecessor, Bool.pick(PrivateHeaderDecision, paired, PrivateVerifiedFreshness{}, PrivateUnverifiedFreshness{}), PrivateHeaderConflict{})
     case _:
-      Bool.pick(PrivateHeaderDecision, Nat.is_lt(incoming, retained), PrivateRollback{}, Bool.pick(PrivateHeaderDecision, Nat.is_eq(incoming, retained), Bool.pick(PrivateHeaderDecision, private_same, Bool.pick(PrivateHeaderDecision, paired, PrivateVerifiedFreshness{}, PrivateUnverifiedFreshness{}), Bool.pick(PrivateHeaderDecision, predecessor, PrivateMergeRequired{}, PrivateHeaderConflict{})), Bool.pick(PrivateHeaderDecision, predecessor, Bool.pick(PrivateHeaderDecision, paired, PrivateVerifiedFreshness{}, PrivateUnverifiedFreshness{}), PrivateHeaderConflict{})))
+      Bool.pick(PrivateHeaderDecision, Nat.is_lt(incoming, retained), PrivateRollback{}, Bool.pick(PrivateHeaderDecision, predecessor, Bool.pick(PrivateHeaderDecision, Nat.is_eq(incoming, retained) && Bool.not(private_same), PrivateMergeRequired{}, Bool.pick(PrivateHeaderDecision, paired, PrivateVerifiedFreshness{}, PrivateUnverifiedFreshness{})), PrivateHeaderConflict{}))
 
 type PrivateMergeChoice is Data:
   PrivateLeft{}
@@ -1077,3 +1077,16 @@ def private_capacity(bytes: U32) -> Bool:
 
 def private_sync_due(open: Bool, elapsed: Nat) -> Bool:
   open || Bool.not(Nat.is_lt(elapsed, 300000n))
+
+# Candidate order is sampled outside Bend. Invalid/duplicate slots never count.
+def private_slot_take(xs: +List<Nat>, fuel: Nat, +selected: +List<Nat>) -> +List<Nat>:
+  match xs:
+    case Nil{}: selected
+    case Con{+slot, rest}:
+      match fuel:
+        case 0n: selected
+        case 1n+ +n:
+          private_slot_take(rest, Bool.pick(Nat, Nat.is_lt(slot, 64n) && Bool.not(nat_has(selected, slot)), n, (1n+n : Nat)), Bool.pick(+List<Nat>, Nat.is_lt(slot, 64n) && Bool.not(nat_has(selected, slot)), slot <> selected, selected))
+
+def private_slots(dirty: +List<Nat>, randomOrder: +List<Nat>) -> +List<Nat>:
+  private_slot_take(List.append(&2, Nat, dirty, randomOrder), 2n, Nil{})

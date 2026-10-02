@@ -264,6 +264,7 @@ function ruleCopy(value: PrivateCopyState, id: (s: string | null | undefined) =>
 export async function verifyPrivateRecords(records: readonly PrivateRecord[], payloads: readonly PrivatePayload[], authorities: readonly PrivateContext[], trust: { vault: string; author: PrivateIdentity }, options: { sessions?: readonly PrivateSession[]; source?: PrivateView; historical?: boolean } = {}): Promise<PrivateView> {
   if (!validPrivateId(trust.vault) || !validatePrivateIdentity(trust.author)) throw new Error('Invalid private trust');
   const copies = new Map<string, PrivateCopyState>(), operations = new Map<string, string>();
+  const historicalSources = new Map<string, Map<string, PrivateCopyState>>();
   const payloadMap = new Map<string, ProtocolRecord>();
   for (const row of payloads) {
     if (!exact(row, ['record', 'payload']) || !isId(row.record) || payloadMap.has(row.record)) throw new Error('Duplicate private payload'); payloadMap.set(row.record, row.payload);
@@ -298,7 +299,13 @@ export async function verifyPrivateRecords(records: readonly PrivateRecord[], pa
     const strings = [r.copy, r.body.artifact as string, canonical(trust.author), canonical(r.actor), r.authority.journey, r.sig, r.prev ?? '', ...Object.keys(data.state.projects?.items ?? {})];
     for (const c of [...copies.values(), ...(sourceCopies?.values() ?? [])]) strings.push(...ruleCopyStrings(c));
     for (const key of ['version', 'typeHash', 'predecessor', 'comment', 'onVersion', 'project']) if (typeof r.body[key] === 'string') strings.push(r.body[key]);
-    if (r.type === 'private.copy') strings.push((r.body.origin as JsonObject).version as string);
+    if (r.type === 'private.copy') {
+      // SAFETY: validatePrivateRecord above checks the exact origin fields.
+      const origin = r.body.origin as unknown as PrivateOrigin;
+      strings.push(origin.version);
+      const historicalSource = options.historical ? historicalSources.get(origin.copy)?.get(origin.version) : undefined;
+      if (historicalSource) strings.push(...ruleCopyStrings(historicalSource));
+    }
     for (const b of (r.body.blobs as PrivateBlob[] | undefined) ?? []) strings.push(b.id);
     const { id } = namespace(strings);
     const previous = old ? old.records.at(-1)! : undefined;
@@ -310,7 +317,13 @@ export async function verifyPrivateRecords(records: readonly PrivateRecord[], pa
     let transition: ReturnType<typeof rules.private_apply>;
     if (r.type === 'private.copy') {
       // SAFETY: copyPrivateRecord validated the exact private.copy origin fields.
-      const o = r.body.origin as unknown as PrivateOrigin, source = sourceCopies?.get(o.copy);
+      const o = r.body.origin as unknown as PrivateOrigin;
+      let source = sourceCopies?.get(o.copy);
+      // A complete author backup carries the independently signed source history.
+      // Replay only its origin prefix: later edits/deletion cannot invalidate a
+      // snapshot already copied into another journey. Live proposals still need
+      // the explicitly supplied current source and current write sessions.
+      if (options.historical && !source) source = historicalSources.get(o.copy)?.get(o.version);
       if (!source || source.journey !== o.journey || source.artifact !== o.artifact || !rules.private_origin_version(id(source.head), id(o.version)) || !sameIdentity(source.author, trust.author)) throw new Error('Private copy origin mismatch');
       const versionRecord = source.records.find(v => v.body.version === o.version)!;
       const sourcePayload = source.payloads.find(v => v.record === versionRecord.id)!.payload;
@@ -336,6 +349,10 @@ export async function verifyPrivateRecords(records: readonly PrivateRecord[], pa
     const names = (n: bigint) => namespace(strings).ids[Number(n) - 2]!;
     const value: PrivateCopyState = { copy: r.copy, artifact: r.body.artifact as string, author: copyPrivateIdentity(trust.author), journey: context.journey, typeHash: names(next.typeHash), head: names(next.head), deleted: next.deleted, project: names(next.project) ?? null, placement: names(next.placement) ?? null, records: [...(old?.records ?? []), r], payloads: [...(old?.payloads ?? []), { record: r.id, payload: cleanPayload }] };
     copies.set(r.copy, value);
+    if (options.historical && typeof r.body.version === 'string') {
+      const versions = historicalSources.get(r.copy) ?? new Map<string, PrivateCopyState>();
+      versions.set(r.body.version, value); historicalSources.set(r.copy, versions);
+    }
   }
   if (payloadMap.size !== operations.size) throw new Error('Unreferenced private payload');
   const view = Object.freeze({ vault: trust.vault }); views.set(view, { vault: trust.vault, copies }); return view;
@@ -375,29 +392,18 @@ export async function signPrivateHeader(h: Omit<PrivateHeader, 'sig'>, key: Cryp
   const clean = copyPrivateHeader({ format: h.format, v: h.v, vault: h.vault, author: h.author, version: h.version, prev: h.prev, contentsHash: h.contentsHash, slots: h.slots, sig: encode(new Uint8Array(64)) });
   clean.sig = await signPrivateMessage(unsignedHeader(clean), key); return clean;
 }
-export async function verifyPrivateHeader(value: PrivateHeader, trust: { vault: string; author: PrivateIdentity }, options: { checkpoint?: PrivateCheckpoint; paired?: PrivateCheckpoint; contentsHash: string; predecessors?: readonly PrivateHeader[] }): Promise<{ header: PrivateHeader; checkpoint: PrivateCheckpoint; decision: 'verified' | 'unverified' | 'merge' }> {
+export async function verifyPrivateHeader(value: PrivateHeader, trust: { vault: string; author: PrivateIdentity }, options: { checkpoint?: PrivateCheckpoint; paired?: PrivateCheckpoint; contentsHash: string }): Promise<{ header: PrivateHeader; checkpoint: PrivateCheckpoint; decision: 'verified' | 'unverified' | 'merge' }> {
   const h = copyPrivateHeader(value);
   if (h.vault !== trust.vault || !sameIdentity(h.author, trust.author) || h.contentsHash !== options.contentsHash) throw new Error('Private header binding/digest mismatch');
   await verifySignature(h.author, unsignedHeader(h), h.sig);
-  const retained = options.checkpoint ?? options.paired;
+  // The trusted input comes from a paired device, not the journey server. A
+  // signature authorizes skipped versions; no unbounded ancestry is transported.
+  for (const retained of [options.checkpoint, options.paired]) if (retained && (!exact(retained, ['vault', 'author', 'version', 'head', 'prev', 'freshness']) || retained.vault !== h.vault || !sameIdentity(retained.author, h.author) || !positive(retained.version) || !validDigest(retained.head) || !(retained.prev === null || validDigest(retained.prev)) || !['paired', 'unverified'].includes(retained.freshness))) throw new Error('Invalid retained private checkpoint');
   if (options.paired && options.paired.freshness !== 'paired') throw new Error('Unverified pairing checkpoint');
-  if (options.checkpoint && options.paired) {
-    const { id } = namespace([options.checkpoint.vault, options.checkpoint.head, options.paired.vault, options.paired.head]);
-    if (!rules.private_authority_snapshot(id(options.checkpoint.vault), id(options.checkpoint.head), id(options.paired.vault), id(options.paired.head)) || options.checkpoint.version !== options.paired.version || !sameIdentity(options.checkpoint.author, options.paired.author)) throw new Error('Private pairing checkpoint conflict');
-  }
-  if (retained && (!exact(retained, ['vault', 'author', 'version', 'head', 'prev', 'freshness']) || retained.vault !== h.vault || !sameIdentity(retained.author, h.author) || !positive(retained.version) || !validDigest(retained.head) || !(retained.prev === null || validDigest(retained.prev)) || !['paired', 'unverified'].includes(retained.freshness))) throw new Error('Invalid retained private checkpoint');
+  if (options.checkpoint && options.paired && options.checkpoint.version === options.paired.version && canonical(options.checkpoint.head) !== canonical(options.paired.head)) throw new Error('Private pairing checkpoint conflict');
+  const retained = options.paired && (!options.checkpoint || options.paired.version > options.checkpoint.version) ? options.paired : options.checkpoint ?? options.paired;
   const head = await privateHash(h);
-  let predecessor = retained ? h.prev === retained.head && h.version === retained.version + 1 : h.version === 1 && h.prev === null;
-  if (retained && h.version > retained.version + 1) {
-    let previous = retained.head, version = retained.version;
-    for (const input of options.predecessors ?? []) {
-      const p = copyPrivateHeader(input);
-      if (p.vault !== trust.vault || !sameIdentity(p.author, trust.author) || p.prev !== previous || p.version !== version + 1) throw new Error('Missing private header predecessor');
-      await verifySignature(p.author, unsignedHeader(p), p.sig); previous = await privateHash(p); version = p.version;
-    }
-    predecessor = h.prev === previous && h.version === version + 1;
-  }
-  if (retained && h.version === retained.version) predecessor = h.prev === retained.prev;
+  const predecessor = h.version === 1 ? h.prev === null : h.prev !== null;
   const result = rules.private_header(BigInt(retained?.version ?? 0), BigInt(h.version), canonical(retained?.head ?? null) === canonical(head), predecessor, !!options.paired || retained?.freshness === 'paired');
   if (result.$ === 'PrivateRollback' || result.$ === 'PrivateHeaderConflict') throw new Error(result.$ === 'PrivateRollback' ? 'Private vault rollback' : 'Private header predecessor conflict');
   return { header: h, checkpoint: { vault: h.vault, author: copyPrivateIdentity(h.author), version: h.version, head, prev: h.prev, freshness: options.paired || retained?.freshness === 'paired' ? 'paired' : 'unverified' }, decision: result.$ === 'PrivateMergeRequired' ? 'merge' : result.$ === 'PrivateUnverifiedFreshness' ? 'unverified' : 'verified' };

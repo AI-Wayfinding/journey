@@ -1,6 +1,6 @@
 // Local Playwright-only entry. The production Worker never imports this module.
-import worker, { EnclaveObject, Registry, type Env } from '../src/index.js';
-export { EnclaveObject, Registry };
+import worker, { EnclaveObject, Registry, PrivateVaultObject, type Env } from '../src/index.js';
+export { EnclaveObject, Registry, PrivateVaultObject };
 
 const messages = new Map<string, string>();
 const agentRates = new Map<string, { count: number; since: number }>();

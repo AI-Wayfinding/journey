@@ -326,13 +326,15 @@ def Laws.private_unauthorized_selection(copy, selector):
     case R.PrivateCopy{_, _, _, _, _, _, _, _, _, _, _, _, _}: {==}
 def Laws.private_unfinished_reference(own, digest, staged):
   Equal.cong(Bool, Bool, b => b && digest && staged, own && False{}, False{}, and_false(own))
-def Laws.private_unpaired_freshness(incoming, same, predecessor):
+def Laws.private_unpaired_freshness(incoming, same):
   {==}
-def Laws.private_paired_freshness(incoming, same, predecessor):
+def Laws.private_paired_freshness(incoming, same):
   {==}
 def Laws.private_signed_fork_requires_merge():
   {==}
 def Laws.private_fork_bad_predecessor_denied():
+  {==}
+def Laws.private_signed_skipped_versions():
   {==}
 def Laws.private_bundle_handoff_not_person(same):
   {==}
@@ -352,3 +354,11 @@ def Laws.private_save_waits_for_sync():
   {==}
 def Laws.private_client_requires_all_formats(client, minimum, control, artifact, project):
   Equal.cong(Bool, Bool, b => b && R.private_ready(client) && R.version_ge(client, minimum), (control && artifact && project) && False{}, False{}, and_false(control && artifact && project))
+
+def Laws.private_slots_dirty_first(): {==}
+def Laws.private_slots_random_when_clean(): {==}
+def Laws.private_slots_reject_duplicate_and_range(): {==}
+def Laws.private_slots_two_only(rest):
+  match rest:
+    case Nil{}: {==}
+    case Con{_, _}: {==}

@@ -14,6 +14,7 @@ import { mountArtifactViewer } from './artifact-viewer.js';
 import { PROJECT_STATES, canEditProject, effectiveProjectParticipants, projectSelector, selectProjectArtifacts } from '@ai-wayfinding/core';
 import type { ProjectState } from '@ai-wayfinding/core';
 import { canCreateProject, canParticipate, createProject, participateProject, placeArtifact, purposeProject, stateProject } from './projects.js';
+import { closePrivateVaults, openJourneyVault } from './private-store.js';
 import './style.css';
 
 const root = document.querySelector<HTMLDivElement>('#app')!;
@@ -342,6 +343,7 @@ async function context(id: string): Promise<JourneyContext | null> {
     try { await rotatePending(ctx); return verifiedJourney(id, principal, keys); }
     catch { render('<section class="panel"><h1>Key update pending</h1><p>A person who manages people can complete it on the next visit.</p></section>'); return null; }
   }
+  await openJourneyVault(ctx);
   return ctx;
 }
 function agentPromptScreen(id: string): void {
@@ -647,6 +649,7 @@ window.addEventListener('pagehide', lockPersonKeys);
 async function route(): Promise<void> {
   disposeViewer?.(); disposeViewer = undefined;
   const path = location.pathname;
+  if (!/^\/journeys\//.test(path)) closePrivateVaults();
   render('<section class="panel"><p role="status">Loading…</p></section>');
   if (path === '/auth/verify') return verifyEmail();
   if (path === '/sign-in') return signIn();

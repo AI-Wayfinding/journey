@@ -21,7 +21,7 @@ export function limitNumber(value: string | undefined, fallback: number): number
 export function sequenceCursor(value: string | undefined, fallback: number): number | null { if (value === undefined) return fallback; const n = Number(value); return /^\d+$/.test(value) && Number.isSafeInteger(n) ? n : null; }
 
 // Only the Worker calls these objects; the public JSON boundary validates and copies named fields first.
-export interface Subject { principal: string; accountHash?: string; agent?: boolean; clientVersion?: string; controlFormat?: string; artifactFormat?: string; projectFormat?: string; privateFormat?: string }
+export interface Subject { principal: string; accountHash?: string; agent?: boolean; privateCredential?: 'authenticated' | 'link'; clientVersion?: string; controlFormat?: string; artifactFormat?: string; projectFormat?: string; privateFormat?: string }
 export type RegistryMessage =
   | { op: 'emailStart'; ipHash: string; emailHash: string; tokenHash: string; email: string }
   | { op: 'emailVerify'; tokenHash: string; sessionHash: string }
@@ -62,7 +62,7 @@ type JourneyMessage = { journeyId: string; subject: Subject };
 export type EnclaveMessage =
   | { op: 'create'; data: CreateJourney }
   | (JourneyMessage & (
-      { op: 'access' | 'inviteAccess' | 'reserve' | 'wraps' | 'export' | 'protocol' }
+      { op: 'access' | 'inviteAccess' | 'reserve' | 'wraps' | 'export' | 'protocol' | 'privateAccess' }
     | { op: 'blobBegin'; size: number }
     | { op: 'blobUpload'; descriptor: BlobDescriptor }
     | { op: 'blobRead'; id: string }

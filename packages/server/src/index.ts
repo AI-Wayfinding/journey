@@ -9,13 +9,15 @@ import { invitationEmail, magicLinkEmail } from './email.js';
 import { Registry } from './registry.js';
 import { failure, limitNumber, object, sequenceCursor, validEpoch, validExpiry, validKind, validScope, validSeq, validString } from './types.js';
 import type { Admission, ControlInput, CreateJourney, EnclaveMessage, EpochWrap, RegistryMessage, Subject } from './types.js';
-export { EnclaveObject, Registry };
+import { PrivateVaultObject } from './private-vault.js';
+export { EnclaveObject, Registry, PrivateVaultObject };
 export class EnclaveFresh extends EnclaveObject {}
 export class RegistryFresh extends Registry {}
 
 export interface Env {
   REGISTRY: DurableObjectNamespace;
   ENCLAVES: DurableObjectNamespace;
+  PRIVATE_VAULTS: DurableObjectNamespace;
   ASSETS: Fetcher;
   ARTIFACT_BLOBS: R2Bucket;
   MAGIC_EMAIL: SendEmail;
@@ -70,11 +72,11 @@ async function agent(c: AppContext): Promise<Subject | null> {
   try {
     const url = new URL(c.req.url);
     path = url.pathname + url.search;
-    body = c.req.method === 'PUT' && /\/blobs\//.test(url.pathname) ? await boundedBytes(c.req.raw.clone().body, MAX_BLOB_BYTES + 16) : await c.req.raw.clone().text();
+    body = c.req.method === 'PUT' && /\/(blobs\/|private-vault$)/.test(url.pathname) ? await boundedBytes(c.req.raw.clone().body, MAX_BLOB_BYTES + 16) : await c.req.raw.clone().text();
   } catch { return null; }
   if (!await verifyAgentSignature(row.signingKey, c.req.method, path, body, timestamp, nonce, signature)) return null;
   if (!await registry(c.env, { op: 'nonce', id, nonce })) return null;
-  return { principal: row.principal, agent: true, ...capability(c) };
+  return { principal: row.principal, agent: true, privateCredential: row.keyStorage === 'link' ? 'link' : 'authenticated', ...capability(c) };
 }
 async function subject(c: AppContext): Promise<Subject | null> {
   if (c.req.header('x-agent-session')) return agent(c);
@@ -377,6 +379,19 @@ app.use('/v1/journeys/:id/*', async (c, next) => {
   await next();
 });
 function journeySubject(c: AppContext): Subject { return c.get('subject'); }
+async function privateVaultRoute(c: AppContext): Promise<Response> {
+  const id = c.req.param('id')!, s = journeySubject(c);
+  const access = await enclave(c.env, id, { op: 'privateAccess', journeyId: id, subject: s });
+  if (!access.ok) return access;
+  const query = new URL(c.req.url).search;
+  const url = new URL('https://internal/' + query);
+  if (c.req.method === 'GET' && (url.searchParams.size !== 1 || !url.searchParams.has('slots'))) return failure('invalid-request', 400);
+  if (c.req.method === 'PUT' && query) return failure('invalid-request', 400);
+  const stub = c.env.PRIVATE_VAULTS.get(c.env.PRIVATE_VAULTS.idFromName(JSON.stringify([id, s.principal])));
+  return stub.fetch(url.toString(), { method: c.req.method, ...(c.req.method === 'PUT' ? { body: c.req.raw.body } : {}) });
+}
+app.get('/v1/journeys/:id/private-vault', privateVaultRoute);
+app.put('/v1/journeys/:id/private-vault', privateVaultRoute);
 app.get('/v1/journeys/:id/protocol', async c => enclave(c.env, c.req.param('id'), { op: 'protocol', journeyId: c.req.param('id'), subject: journeySubject(c) }));
 // Byte counter is independent of Content-Length, including signed binary requests.
 async function boundedBytes(body: ReadableStream<Uint8Array> | null, max: number): Promise<Uint8Array> {

@@ -737,17 +737,17 @@ law private_unfinished_reference:
 law private_unpaired_freshness:
   for incoming: Nat
   for same: Bool
-  for predecessor: Bool
-  {R.private_header(0n, incoming, same, predecessor, False{}) == R.PrivateUnverifiedFreshness{} : R.PrivateHeaderDecision}
+  {R.private_header(0n, incoming, same, True{}, False{}) == R.PrivateUnverifiedFreshness{} : R.PrivateHeaderDecision}
 law private_paired_freshness:
   for incoming: Nat
   for same: Bool
-  for predecessor: Bool
-  {R.private_header(0n, incoming, same, predecessor, True{}) == R.PrivateVerifiedFreshness{} : R.PrivateHeaderDecision}
+  {R.private_header(0n, incoming, same, True{}, True{}) == R.PrivateVerifiedFreshness{} : R.PrivateHeaderDecision}
 law private_signed_fork_requires_merge:
   {R.private_header(2n, 2n, False{}, True{}, True{}) == R.PrivateMergeRequired{} : R.PrivateHeaderDecision}
 law private_fork_bad_predecessor_denied:
   {R.private_header(2n, 2n, False{}, False{}, True{}) == R.PrivateHeaderConflict{} : R.PrivateHeaderDecision}
+law private_signed_skipped_versions:
+  {R.private_header(2n, 999n, False{}, True{}, True{}) == R.PrivateVerifiedFreshness{} : R.PrivateHeaderDecision}
 law private_bundle_handoff_not_person:
   for same: Bool
   {R.private_bundle_recipient(R.PrivateHandoff{}, R.Person{}, same) == False{} : Bool}
@@ -778,3 +778,13 @@ law private_client_requires_all_formats:
   for artifact: Bool
   for project: Bool
   {R.private_client(client, minimum, control, artifact, project, False{}) == False{} : Bool}
+
+law private_slots_dirty_first:
+  {R.private_slots([3n, 7n, 9n], [1n, 2n]) == [7n, 3n] : +List<Nat>}
+law private_slots_random_when_clean:
+  {R.private_slots(Nil{}, [11n, 42n, 3n]) == [42n, 11n] : +List<Nat>}
+law private_slots_reject_duplicate_and_range:
+  {R.private_slots([64n, 3n, 3n], [3n, 63n, 4n]) == [63n, 3n] : +List<Nat>}
+law private_slots_two_only:
+  for rest: +List<Nat>
+  {R.private_slot_take(rest, 0n, [1n, 2n]) == [1n, 2n] : +List<Nat>}

@@ -6,8 +6,9 @@
   "r2_buckets": [{ "binding": "ARTIFACT_BLOBS", "bucket_name": "wayfinding-artifact-blobs" }],
   "durable_objects": { "bindings": [
     { "name": "REGISTRY", "class_name": "Registry" },
-    { "name": "ENCLAVES", "class_name": "EnclaveObject" }
+    { "name": "ENCLAVES", "class_name": "EnclaveObject" },
+    { "name": "PRIVATE_VAULTS", "class_name": "PrivateVaultObject" }
   ] },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Registry", "EnclaveObject"] }],
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Registry", "EnclaveObject", "PrivateVaultObject"] }],
   "vars": { "RP_ID": "localhost", "ORIGIN": "http://localhost:18787", "EMAIL_HASH_KEY": "local-e2e-only" }
 }

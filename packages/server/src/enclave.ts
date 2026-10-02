@@ -127,6 +127,11 @@ export class EnclaveObject {
     if (!stored) return failure('not-found', 404);
     return new Response(stored.body, { headers: { 'Content-Type': 'application/octet-stream', 'Content-Disposition': `attachment; filename="${id}.encrypted"`, 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store', 'X-Blob-Descriptor': String(row!.descriptor) } });
   }
+  private async provision(journey: string, principal: string): Promise<void> {
+    const stub = this.env.PRIVATE_VAULTS.get(this.env.PRIVATE_VAULTS.idFromName(JSON.stringify([journey, principal])));
+    const result = await stub.fetch('https://internal/allocate', { method: 'POST' });
+    if (!result.ok) throw new Error('Member allocation failed');
+  }
   private async handle(input: EnclaveMessage): Promise<Response> {
     const now = Date.now();
     if (input.op === 'create') {
@@ -139,6 +144,7 @@ export class EnclaveObject {
       if (data.control.envelope.outside.epoch !== 1 || data.wraps.length !== 1 || data.wraps[0]?.principal !== creator.id || data.wraps[0]?.epoch !== 1) return failure('invalid-request', 400);
       const s: Subject = { principal: creator.id, accountHash: data.creatorHash, clientVersion: data.clientVersion, controlFormat: data.controlFormat, artifactFormat: data.artifactFormat, projectFormat: data.projectFormat };
       if (!this.version(state, s)) return this.upgrade(state);
+      await this.provision(data.id, creator.id);
       this.state.storage.transactionSync(() => {
         this.sql.exec('INSERT INTO meta VALUES(?,?,?,?,?)', data.id, 1, 1, 1, 0);
         this.sql.exec('INSERT INTO authority VALUES(?,?,?)', data.id, canonical(creator), JSON.stringify(state));
@@ -168,6 +174,11 @@ export class EnclaveObject {
         return Response.json({ id, journey: state.journey, epoch: state.currentEpoch, size: input.size, expiresAt }, { status: 201 });
       }
       case 'blobRead': return this.download(state, subject, input.id);
+      case 'privateAccess': {
+        const model = normalizedMembers(state, [subject.principal], now);
+        const allowed = rules.private_audience(model.members, model.id(subject.principal), model.id(subject.principal), { $: subject.agent ? subject.privateCredential === 'authenticated' ? 'PrivateAuthenticatedAgent' : 'PrivateUnknownCredential' : 'PrivatePersonCredential' });
+        return allowed ? Response.json({ allowed: true }) : failure('forbidden', 403);
+      }
       case 'access': return Response.json({ allowed: true, epoch: state.currentEpoch });
       case 'inviteAccess': return isPersonGuide(state, subject.principal) && !subject.agent ? Response.json({ allowed: true }) : failure('forbidden', 403);
       case 'linkAccess': return replayControl(state, subject.principal, 'Renew', input.member, undefined, false, undefined, now).transition.$ === 'Accepted' && !subject.agent ? Response.json({ allowed: true }) : failure('forbidden', 403);
@@ -304,6 +315,7 @@ export class EnclaveObject {
     const wrapCount = historical ? state.currentEpoch : expected.length;
     if (supplied.length !== wrapCount || new Set(supplied.map(w => JSON.stringify([w.principal, w.epoch]))).size !== wrapCount || supplied.some(w => !expected.includes(w.principal) || !Number.isSafeInteger(w.epoch) || (historical ? w.epoch < 1 || w.epoch > state.currentEpoch : w.epoch !== next.currentEpoch))) return failure('invalid-request', 400);
     const removed = Object.keys(state.members).filter(id => !next.members[id]);
+    if (admission) await this.provision(state.journey, admission.id);
     this.state.storage.transactionSync(() => {
       this.sql.exec('INSERT INTO log VALUES(?,?,?)', proof.seq, JSON.stringify(input.control), now);
       this.sql.exec('UPDATE authority SET state=?', JSON.stringify(next));

@@ -161,14 +161,19 @@ describe('fixed private header, schedule and fork contracts', () => {
     const verified = await verifyPrivateHeader(next, { vault: f.vault, author: f.identity }, { contentsHash: next.contentsHash, paired }); expect(verified.decision).toBe('verified');
     await expect(verifyPrivateHeader(h, { vault: f.vault, author: f.identity }, { contentsHash: h.contentsHash, checkpoint: verified.checkpoint })).rejects.toThrow('rollback');
     const wrongPrev = await header(f, 3, await privateHash('not previous'));
-    await expect(verifyPrivateHeader(wrongPrev, { vault: f.vault, author: f.identity }, { contentsHash: wrongPrev.contentsHash, checkpoint: verified.checkpoint })).rejects.toThrow('predecessor');
+    expect((await verifyPrivateHeader(wrongPrev, { vault: f.vault, author: f.identity }, { contentsHash: wrongPrev.contentsHash, checkpoint: verified.checkpoint })).decision).toBe('verified');
+    const missingPrev = await header(f, 3, null);
+    await expect(verifyPrivateHeader(missingPrev, { vault: f.vault, author: f.identity }, { contentsHash: missingPrev.contentsHash, checkpoint: verified.checkpoint })).rejects.toThrow('predecessor');
     for (const invalid of [{ ...next, sig: h.sig }, { ...next, version: 0 }, { ...next, slots: next.slots.slice(1) }, { ...next, privateCount: 1 }]) await expect(verifyPrivateHeader(invalid, { vault: f.vault, author: f.identity }, { contentsHash: next.contentsHash })).rejects.toThrow();
     await expect(verifyPrivateHeader(next, { vault: f.vault, author: f.identity }, { contentsHash: await privateHash('forged') })).rejects.toThrow('digest');
     await expect(verifyPrivateHeader(h, { vault: f.vault, author: f.identity }, { contentsHash: h.contentsHash, paired: first.checkpoint })).rejects.toThrow('Unverified');
     const fork = await header(f, 2, first.checkpoint.head, await privateHash('fork'));
     expect((await verifyPrivateHeader(fork, { vault: f.vault, author: f.identity }, { contentsHash: fork.contentsHash, checkpoint: verified.checkpoint })).decision).toBe('merge');
     const third = await header(f, 3, verified.checkpoint.head);
-    expect((await verifyPrivateHeader(third, { vault: f.vault, author: f.identity }, { contentsHash: third.contentsHash, checkpoint: paired, predecessors: [next] })).decision).toBe('verified');
+    expect((await verifyPrivateHeader(third, { vault: f.vault, author: f.identity }, { contentsHash: third.contentsHash, checkpoint: paired })).decision).toBe('verified');
+    const skipped = await header(f, 999, await privateHash('immediate predecessor only'));
+    expect((await verifyPrivateHeader(skipped, { vault: f.vault, author: f.identity }, { contentsHash: skipped.contentsHash, checkpoint: paired })).checkpoint.version).toBe(999);
+    expect((await verifyPrivateHeader(skipped, { vault: f.vault, author: f.identity }, { contentsHash: skipped.contentsHash, checkpoint: verified.checkpoint, paired })).checkpoint.version).toBe(999);
   });
   it('merges independently verified higher versions and ties, while tombstones beat longer live forks', async () => {
     const f = await privateFixture(), c = await created(f), trust = { vault: f.vault, author: f.identity }, options = { sessions: [f.session] };
