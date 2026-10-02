@@ -105,9 +105,9 @@ export async function control(trip: Fixture, actor: Owner, type: string, body: L
   await refresh(trip, actor);
   return signedControl(trip.key, trip.id, { v: 1, seq: trip.entries.length, prev: await hashControlProof(trip.entries.at(-1)!.proof), at: new Date().toISOString(), actor: actor.principal, type, body }, actor.signing.privateKey);
 }
-export async function change(trip: Fixture, actor: Owner, type: string, body: LogEntry['body'], extra: object = {}) {
+export async function change(trip: Fixture, actor: Owner, type: string, body: LogEntry['body'], extra: object = {}, headers: Record<string, string> = {}) {
   const next = await control(trip, actor, type, body);
-  const response = await request(`/v1/journeys/${trip.id}/log`, 'POST', { control: next, ...extra }, as(actor));
+  const response = await request(`/v1/journeys/${trip.id}/log`, 'POST', { control: next, ...extra }, { ...as(actor), ...headers });
   expect(response.status).toBe(201); trip.entries.push(next);
 }
 export async function addPerson(trip: Fixture, owner: Owner) {
