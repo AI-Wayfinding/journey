@@ -554,3 +554,227 @@ law project_replay_uses_authority_version_and_revision:
   for items: +List<R.ProjectInfo>
   for placements: +List<R.Placement>
   {R.project_apply(members, actor, minimum, pending, R.ProjectIndex{items, pairs, placements}, artifacts, revision, action) == R.project_authorized(R.project_ready(minimum) && R.project_previous(action, revision) && R.project_authority(members, actor, pairs, pending, action), R.ProjectIndex{items, pairs, placements}, artifacts, actor, revision, action) : R.ProjectTransition}
+
+# Stage 3: laws exercise the production private functions, not a parallel model.
+law private_link_excluded:
+  for kind: R.MemberKind
+  {R.private_credential(kind, R.PrivateLinkCredential{}) == False{} : Bool}
+law private_unknown_excluded:
+  for kind: R.MemberKind
+  {R.private_credential(kind, R.PrivateUnknownCredential{}) == False{} : Bool}
+law private_agent_author_not_parent:
+  for id: Nat
+  for parent: Nat
+  {R.private_related_kind(R.Agent{}, id, parent, R.Person{}, 0n) == Nat.is_eq(id, parent) : Bool}
+law private_person_agent_inheritance:
+  for id: Nat
+  for key: Nat
+  for owner: Nat
+  {R.private_related_kind(R.Person{}, id, key, R.Agent{}, owner) == (Nat.is_eq(id, key) || Nat.is_eq(owner, id)) : Bool}
+law private_write_requires_current:
+  for members: +List<R.Member>
+  for author: Nat
+  for actor: Nat
+  for credential: R.PrivateCredential
+  for minimum: R.Version
+  for pending: Bool
+  {R.private_write(members, author, actor, credential, minimum, pending, False{}) == False{} : Bool}
+law private_readonly_cannot_write:
+  for +id: Nat
+  for author: Nat
+  for credential: R.PrivateCredential
+  for guide: Bool
+  {R.private_write(R.Member{id, R.Person{}, R.ReadOnly{}, guide, 0n, False{}, True{}} <> Nil{}, author, id, credential, R.Version{0n, 1n, 7n}, False{}, True{}) == False{} : Bool}
+law private_pending_cannot_write:
+  for members: +List<R.Member>
+  for author: Nat
+  for actor: Nat
+  for credential: R.PrivateCredential
+  for minimum: R.Version
+  for current: Bool
+  {R.private_write(members, author, actor, credential, minimum, True{}, current) == False{} : Bool}
+law private_destination_visibility_grants_nothing:
+  for source: Bool
+  for destination: Bool
+  for different: Bool
+  {R.private_copy_access(source, destination, different, R.Public{}) == R.private_copy_access(source, destination, different, R.Private{}) : Bool}
+law private_destination_denial:
+  for source: Bool
+  for different: Bool
+  for visibility: R.Visibility
+  {R.private_copy_access(source, False{}, different, visibility) == False{} : Bool}
+law private_first_pins_author_and_actor:
+  for id: Nat
+  for actor: Nat
+  for record: Nat
+  for artifact: Nat
+  for author: Nat
+  for writer: Nat
+  for journey: Nat
+  for version: Nat
+  for kind: Nat
+  for blobs: +List<Nat>
+  {R.private_first(id, actor, record, R.PrivateCreate{artifact, author, writer, journey, version, kind, blobs}) == R.private_guard(Nat.is_eq(author, actor) && Nat.is_eq(writer, actor), R.PrivateCopy{id, artifact, author, journey, version, record, 0n, False{}, R.ArtifactVersion{version, actor, blobs} <> Nil{}, version <> Nil{}, 0n, 0n, kind}) : R.PrivateTransition}
+law private_deleted_edit_denied:
+  for id: Nat
+  for artifact: Nat
+  for author: Nat
+  for journey: Nat
+  for head: Nat
+  for old: Nat
+  for seq: Nat
+  for versions: +List<R.ArtifactVersion>
+  for used: +List<Nat>
+  for project: Nat
+  for placement: Nat
+  for kind: Nat
+  for actor: Nat
+  for record: Nat
+  for target: Nat
+  for creator: Nat
+  for writer: Nat
+  for version: Nat
+  for typeHash: Nat
+  for predecessor: Nat
+  for blobs: +List<Nat>
+  for projects: +List<R.ProjectInfo>
+  {R.private_action(R.PrivateCopy{id, artifact, author, journey, head, old, seq, True{}, versions, used, project, placement, kind}, actor, record, R.PrivateEdit{target, creator, writer, version, typeHash, predecessor, blobs}, projects) == R.PrivateConflict{} : R.PrivateTransition}
+law private_deleted_placement_denied:
+  for id: Nat
+  for artifact: Nat
+  for author: Nat
+  for journey: Nat
+  for head: Nat
+  for old: Nat
+  for seq: Nat
+  for versions: +List<R.ArtifactVersion>
+  for used: +List<Nat>
+  for project: Nat
+  for placement: Nat
+  for kind: Nat
+  for actor: Nat
+  for record: Nat
+  for target: Nat
+  for creator: Nat
+  for writer: Nat
+  for destination: Nat
+  for predecessor: Nat
+  for projects: +List<R.ProjectInfo>
+  {R.private_action(R.PrivateCopy{id, artifact, author, journey, head, old, seq, True{}, versions, used, project, placement, kind}, actor, record, R.PrivateProject{target, creator, writer, destination, predecessor}, projects) == R.PrivateConflict{} : R.PrivateTransition}
+law private_predecessor_and_seq:
+  for id: Nat
+  for artifact: Nat
+  for author: Nat
+  for journey: Nat
+  for head: Nat
+  for old: Nat
+  for seq: Nat
+  for versions: +List<R.ArtifactVersion>
+  for used: +List<Nat>
+  for project: Nat
+  for placement: Nat
+  for kind: Nat
+  for next: Nat
+  for previous: Nat
+  for deleted: Bool
+  {R.private_position(Some{R.PrivateCopy{id, artifact, author, journey, head, old, seq, deleted, versions, used, project, placement, kind}}, next, previous) == (Nat.is_eq(next, (seq + 1n : Nat)) && Nat.is_eq(previous, old)) : Bool}
+law private_placement_zero_or_one:
+  for id: Nat
+  for artifact: Nat
+  for author: Nat
+  for journey: Nat
+  for head: Nat
+  for old: Nat
+  for seq: Nat
+  for versions: +List<R.ArtifactVersion>
+  for used: +List<Nat>
+  for project: Nat
+  for placement: Nat
+  for kind: Nat
+  for actor: Nat
+  for record: Nat
+  for target: Nat
+  for creator: Nat
+  for writer: Nat
+  for destination: Nat
+  for predecessor: Nat
+  for projects: +List<R.ProjectInfo>
+  for deleted: Bool
+  {R.private_action(R.PrivateCopy{id, artifact, author, journey, head, old, seq, deleted, versions, used, project, placement, kind}, actor, record, R.PrivateProject{target, creator, writer, destination, predecessor}, projects) == R.private_guard(Bool.not(deleted) && R.private_same(target, creator, writer, artifact, author, actor) && Nat.is_eq(placement, predecessor) && Bool.not(Nat.is_eq(project, destination)) && (Nat.is_eq(destination, 0n) || R.project_exists(R.project_find(projects, destination))), R.PrivateCopy{id, artifact, author, journey, head, record, (seq + 1n : Nat), False{}, versions, used, destination, record, kind}) : R.PrivateTransition}
+law private_copy_preserves_author:
+  for sourceId: Nat
+  for artifact: Nat
+  for author: Nat
+  for sourceJourney: Nat
+  for head: Nat
+  for old: Nat
+  for seq: Nat
+  for versions: +List<R.ArtifactVersion>
+  for used: +List<Nat>
+  for project: Nat
+  for placement: Nat
+  for kind: Nat
+  for actor: Nat
+  for record: Nat
+  for id: Nat
+  for journey: Nat
+  for version: Nat
+  for blobs: +List<Nat>
+  for observed: Nat
+  for fresh: Bool
+  for allowed: Bool
+  for deleted: Bool
+  {R.private_copied(R.PrivateCopy{sourceId, artifact, author, sourceJourney, head, old, seq, deleted, versions, used, project, placement, kind}, id, actor, record, journey, version, blobs, observed, fresh, allowed) == R.private_guard(allowed && fresh && Bool.not(Nat.is_eq(sourceId, id)) && Bool.not(deleted || Nat.is_eq(sourceJourney, journey)) && Nat.is_eq(old, observed), R.PrivateCopy{id, artifact, author, journey, version, record, 0n, False{}, R.ArtifactVersion{version, actor, blobs} <> Nil{}, version <> Nil{}, 0n, 0n, kind}) : R.PrivateTransition}
+law private_unauthorized_selection:
+  for copy: R.PrivateCopy
+  for selector: Nat
+  {R.private_selected(copy, selector, False{}) == False{} : Bool}
+law private_unfinished_reference:
+  for own: Bool
+  for digest: Bool
+  for staged: Bool
+  {R.private_references(own, False{}, digest, staged) == False{} : Bool}
+law private_unpaired_freshness:
+  for incoming: Nat
+  for same: Bool
+  for predecessor: Bool
+  {R.private_header(0n, incoming, same, predecessor, False{}) == R.PrivateUnverifiedFreshness{} : R.PrivateHeaderDecision}
+law private_paired_freshness:
+  for incoming: Nat
+  for same: Bool
+  for predecessor: Bool
+  {R.private_header(0n, incoming, same, predecessor, True{}) == R.PrivateVerifiedFreshness{} : R.PrivateHeaderDecision}
+law private_signed_fork_requires_merge:
+  {R.private_header(2n, 2n, False{}, True{}, True{}) == R.PrivateMergeRequired{} : R.PrivateHeaderDecision}
+law private_fork_bad_predecessor_denied:
+  {R.private_header(2n, 2n, False{}, False{}, True{}) == R.PrivateHeaderConflict{} : R.PrivateHeaderDecision}
+law private_bundle_handoff_not_person:
+  for same: Bool
+  {R.private_bundle_recipient(R.PrivateHandoff{}, R.Person{}, same) == False{} : Bool}
+law private_bundle_backup_only_author:
+  for kind: R.MemberKind
+  for same: Bool
+  {R.private_bundle_recipient(R.PrivateBackup{}, kind, same) == same : Bool}
+law private_rollback_denied:
+  {R.private_header(2n, 1n, False{}, False{}, True{}) == R.PrivateRollback{} : R.PrivateHeaderDecision}
+law private_merge_higher:
+  {R.private_merge(1n, 2n, False{}, False{}, False{}) == R.PrivateRight{} : R.PrivateMergeChoice}
+law private_merge_tie:
+  {R.private_merge(2n, 2n, False{}, False{}, False{}) == R.PrivateBoth{} : R.PrivateMergeChoice}
+law private_tombstone_wins:
+  for left: Nat
+  for right: Nat
+  for same: Bool
+  for deleted: Bool
+  {R.private_merge(left, right, True{}, deleted, same) == R.PrivateTombstone{} : R.PrivateMergeChoice}
+law private_capacity_limit:
+  {R.private_capacity(67108865) == False{} : Bool}
+law private_save_waits_for_sync:
+  {R.private_sync_due(False{}, 299999n) == False{} : Bool}
+law private_client_requires_all_formats:
+  for client: R.Version
+  for minimum: R.Version
+  for control: Bool
+  for artifact: Bool
+  for project: Bool
+  {R.private_client(client, minimum, control, artifact, project, False{}) == False{} : Bool}

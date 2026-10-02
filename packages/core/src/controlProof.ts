@@ -188,6 +188,6 @@ export async function verifyControlProofs(proofs: readonly ControlProof[], envel
   }
   // Legacy consumers inspect the replayed minimum to show their existing update message.
   // Keyed project histories additionally refuse to expose a partial project view.
-  if (state && keys.length && proofs.some(proof => isProjectAction(proof.type)) && !stage0Rules.version_ge(ruleVersion('0.1.6'), ruleVersion(state.minClientVersion))) return { ok: false, error: { code: 'client-too-old', seq: state.lastSeq, message: 'Unsupported client minimum; update client' } };
+  if (state && keys.length && proofs.some(proof => isProjectAction(proof.type)) && !stage0Rules.version_ge(ruleVersion('0.1.7'), ruleVersion(state.minClientVersion))) return { ok: false, error: { code: 'client-too-old', seq: state.lastSeq, message: 'Unsupported client minimum; update client' } };
   return state ? { ok: true, state } : { ok: false, error: { code: 'invalid-entry', seq: 0, message: 'Missing creation proof' } };
 }

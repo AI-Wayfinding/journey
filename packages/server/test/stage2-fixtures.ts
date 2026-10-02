@@ -35,7 +35,7 @@ export async function persisted(j: Journey) {
 export async function freshRead(j: Journey, actor: Person) {
   return runInDurableObject(enclaveStub(j.id), async (_o, s) => {
     const accountHash = String(s.storage.sql.exec('SELECT accountHash FROM principals WHERE id=?', actor.principal).one().accountHash);
-    const response = await new EnclaveObject(s, env as unknown as Env).fetch(new Request('https://internal/', { method: 'POST', body: JSON.stringify({ op: 'log', journeyId: j.id, after: -1, subject: { principal: actor.principal, accountHash, clientVersion: '0.1.6', controlFormat: 'control-proof-v1', artifactFormat: 'artifact-v1', projectFormat: 'project-v1' } }) }));
+    const response = await new EnclaveObject(s, env as unknown as Env).fetch(new Request('https://internal/', { method: 'POST', body: JSON.stringify({ op: 'log', journeyId: j.id, after: -1, subject: { principal: actor.principal, accountHash, clientVersion: '0.1.7', controlFormat: 'control-proof-v1', artifactFormat: 'artifact-v1', projectFormat: 'project-v1', privateFormat: 'private-v1' } }) }));
     return { status: response.status, body: await response.json() };
   });
 }
@@ -49,7 +49,7 @@ export async function queued(j: Journey, actor: Person, controls: ControlInput[]
     const requests = controls.map((control, i) => {
       const currentActor = actors[i]!;
       const accountHash = String(s.storage.sql.exec('SELECT accountHash FROM principals WHERE id=?', currentActor.principal).one().accountHash);
-      return queue.fetch(new Request('https://internal/', { method: 'POST', body: JSON.stringify({ op: 'controlWrite', journeyId: j.id, control, subject: { principal: currentActor.principal, accountHash, clientVersion: '0.1.6', controlFormat: 'control-proof-v1', artifactFormat: 'artifact-v1', projectFormat: 'project-v1' } } satisfies EnclaveMessage) }));
+      return queue.fetch(new Request('https://internal/', { method: 'POST', body: JSON.stringify({ op: 'controlWrite', journeyId: j.id, control, subject: { principal: currentActor.principal, accountHash, clientVersion: '0.1.7', controlFormat: 'control-proof-v1', artifactFormat: 'artifact-v1', projectFormat: 'project-v1', privateFormat: 'private-v1' } } satisfies EnclaveMessage) }));
     });
     // Request JSON parsing yields; let each fetch enter the same queue before releasing it.
     await new Promise(r => setTimeout(r, 0)); release(); await held;

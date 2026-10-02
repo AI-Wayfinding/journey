@@ -67,7 +67,7 @@ const cases = [
   bend('capability: project required', 'control && artifact && project && project_ready(client)', 'control && artifact && True{} && project_ready(client)', versions, true),
   bend('capability: control required', 'control && artifact && project && project_ready(client)', 'True{} && artifact && project && project_ready(client)', versions),
   bend('capability: artifact required', 'control && artifact && project && project_ready(client)', 'control && True{} && project && project_ready(client)', versions),
-  mutation('version: no partial future keyed history', 'packages/core/src/controlProof.ts', "!stage0Rules.version_ge(ruleVersion('0.1.6'), ruleVersion(state.minClientVersion))", 'Boolean(false)', 'core', contract, versions),
+  mutation('version: no partial future keyed history', 'packages/core/src/controlProof.ts', "!stage0Rules.version_ge(ruleVersion('0.1.7'), ruleVersion(state.minClientVersion))", 'Boolean(false)', 'core', contract, versions),
   mutation('payload: ciphertext commitment', 'packages/core/src/projects.ts', 'await projectPurposeHash(record.body.purpose) !== body.purposeHash', 'false', 'core', contract, payload),
   mutation('payload: extra fields are not authority', 'packages/core/src/projects.ts', "!shape(record.body, ['purpose'])", 'false', 'core', contract, payload),
   mutation('public: exact named fields', 'packages/core/src/projects.ts', '!shape(body, projectFields(type))', 'false', 'core', contract, 'rejects unexpected fields, multiple/foreign shapes, unknown states and malformed references before replay'),

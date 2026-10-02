@@ -180,6 +180,60 @@ Stage 2 regression adds core project/archive tests in all three runtimes, server
 
 Full Stage 1 regression includes package typechecks/builds, both Bend proof modes, Node/workerd/browser core suites, server workerd/R2, web unit/end-to-end and built-client unit/integration suites, followed by the focused Stage 1 suites and negative controls. `packages/server/test/stage1-storage.test.ts` round-trips a server archive with another writer, comments, historic live attachments and tombstoned metadata. `packages/server/test/stage1-link.test.ts` reloads the read-only paged overview, checks real writer attribution and newer-minimum refusal, and excludes deleted/recovery content and attachment download routes.
 
+## Stage 3 private contracts
+
+Core/client/interface `0.1.7` adds `private-v1` and `X-Private-Format` alongside the three earlier capabilities. `supportsPrivate` calls Bend to check all four formats and the signed minimum. Private writes require a signed minimum of at least `0.1.7`; `0.1.4`–`0.1.6` histories remain valid. A future `0.1.8` minimum fails before private views are returned. Capability claims do not grant keys or access. These portable contracts do not implement vault transport, durable storage, browser workflows or CLI/MCP commands; those adapters must enforce the same rules before committing.
+
+### Separate signed history and audience
+
+`packages/core/src/private.ts` defines records entirely inside private encryption, never public `ControlProof`:
+
+```text
+{format:'private-v1',v:1,id,vault,copy,seq,prev,at,actor,authority,type,body,payloadHash,sig}
+```
+
+Vault, copy and stable artifact IDs are random 256-bit base64url values, without time bits. Record, version and comment IDs use ULIDs. `seq` counts records within one copy, starting at zero; `prev` hashes the complete previous signed record. Ed25519 signs canonical JSON omitting only `sig`. `payloadHash` commits to the exact decrypted content/comment/marker. Every body includes `artifact`, immutable `author` and actual `actor`. The exact additional fields are:
+
+| Action | Additional encrypted fields |
+| --- | --- |
+| `private.create`, `private.version` | `version`, `typeHash`, `blobs`, `predecessor` (null at creation) |
+| `private.comment` | `comment`, optional `onVersion` |
+| `private.delete` | current content `predecessor` |
+| `private.project` | nullable `project`, placement `predecessor` (null initially) |
+| `private.copy` | `version`, `typeHash`, `blobs`, `predecessor:null`, `origin`, `destination`, `snapshotHash` |
+
+Author/actor identities are exactly `{kind,signingKey,recipient}`. `authority` is `{journey,principal,admissionHash,head,epoch}`, binding both keys and member kind to independently verified genesis/member.add history and the cited current public head. Display names, account IDs and matching principal strings cannot establish identity. Opaque contexts, sessions and views are held in private WeakMaps: caller-created objects or imported indexes cannot substitute for verification. Detached named-field outputs prevent later mutation from changing accepted state.
+
+A person author's audience is that person plus live authenticated agents added by that person in the containing journey. An agent author keeps its own identity; its adding person does not gain access to its private content. Bend derives audience, inherited read/write limits, expiry/removal, pending-rotation denial and current-snapshot write authority. Guide status, project participation, direct recipients and link credentials grant nothing. Sessions require both admitted Ed25519 and age private-key possession. First handoff uses a one-use local 32-byte challenge, signed over the complete author/admission/recipient binding and opened with the admitted age key. A missing or unknown credential class fails closed. Offline historical verification is read-only and cannot authorize new proposals or handoffs.
+
+Production Bend checks immutable author/actual actor, content type, sequence/predecessor, fresh references, irreversible deletion and zero-or-one same-journey project placement. Stage 2 projects supply the verified project state and main/project/all selectors; participation never elevates private access. Private payloads reuse strict Stage 1 content syntax, limits and safe paths. Unknown fields/actions, grants, bad signatures/hashes and stale/deleted references fail without a partial view. Public replay rejects private actions, and shared archives keep their existing exact format with no private fields.
+
+### Private copies, attachments and encrypted bundles
+
+A private copy begins a new chain in a different journey with a fresh copy key and independent later versions, comments, deletion and placement. Its origin is `{journey,copy,artifact,version,recordHash}`; destination is `{journey,copy}`. `snapshotHash` binds the source current logical content and raw attachment hashes, independent of destination ciphertext handles. Source and destination both require current ordinary write access and the Stage 3 minimum. Both destination visibility models use the same private audience; these models do not enable public creation/join/read routes. Origin never enters public output.
+
+A private attachment descriptor is exactly `{v:1,vault,copy,id,generation,size,ciphertextSize,nonce,digest,contentHash}`. It remains inside encryption. Size limits match Stage 1; ciphertext size is raw size plus the 16-byte AES-GCM tag. `digest` hashes ciphertext and `contentHash` hashes raw bytes. HKDF-SHA256 derives history/blob keys from the 32-byte copy key with salt `wayfinding/private/v1` and canonical info `{purpose,vault,copy}`. Blob AAD is canonical `{format:'private-v1',v:1,vault,copy,id,generation,size}`. Copies re-encrypt attachments under fresh destination IDs/nonces, never reuse shared journey keys or source ciphertext.
+
+`packages/core/src/private-transfer.ts` verifies one separate age-encrypted bundle:
+
+```text
+{format:'private-v1',version:1,vault,author,scope,authorityHistories,
+ records,payloads,copyKeys:[{copy,key}],
+ blobs:[{descriptor,ciphertext}],unavailableDeletedBlobs}
+```
+
+Scopes are `author-backup`, `agent-handoff` and `agent-return`. Bend selects the single derived recipient; live audience checks still apply to every copy. No root/index key, arbitrary recipients, grants or caller index is accepted. Verification checks complete signed copy histories and independent membership histories, exact descriptors, authenticated decrypted bytes and every live reference before returning named fields. Historical recovery is author-backup only. Deleted histories remain verifiable while their unavailable bytes are listed; other copies remain independent. Bundle verification does not itself commit a vault or replace a checkpoint.
+
+### Fixed slots, scheduled patches and retained checkpoints
+
+The fixed container contract is 64 slots of 1,048,576 ciphertext bytes, allocated in full for every member at join, including empty vaults. It never grows. Capacity refusal must leave storage unchanged. On journey open and every 300,000 ms while open, adapters read a signed header plus two slots and upload exactly two re-encrypted slots plus the next signed header, including dummy commits when nothing changed. Dirty slots go first, otherwise random slots; saves wait for the next sync and cannot trigger traffic. A whole-container fetch occurs only on first open. Storage/traffic nodes must prove matched empty/populated traces; the portable schedule test is not a claim that transport is implemented.
+
+A header is exactly `{format:'private-v1',v:1,vault,author,version,prev,contentsHash,slots,sig}`, with 64 slot digests and a complete-contents digest. An atomic patch is `{format:'private-v1',v:1,vault,token,header,slots:[{index,ciphertext},{index,ciphertext}]}` with distinct valid slot indexes. The token is an opaque compare-and-swap token, not freshness authority. Header versions count scheduled commits, never private operations. Cryptographic adapters verify signatures, pinned identity, slot/contents digests and signed predecessors; Bend decides accepted freshness, rollback, conflict and merge.
+
+Retain the highest verified checkpoint separately from replaceable cache bytes. Pairing supplies a trusted head; without pairing a signature-verified server head remains explicitly `unverified`, including repeated reads. Lower versions cannot replace retained checkpoints. Verified same-version forks with the same predecessor require per-copy merging: higher content version wins, ties retain both branches, and a tombstone beats a live branch. Both histories must be independently verified before merge; adapters must sign the merged container at a higher version. Corrupt/unsigned forks and bad predecessors fail. Cache loss or backup import must never reset a trusted checkpoint.
+
+The Stage 3 suites exercise these contracts in Node, workerd and Chromium, plus Node encrypted bundle round-trips. Bend proofs cover production decisions, not cryptographic certification or downstream storage/traffic guarantees.
+
 ## Removal and export
 
 `removeAndRotate` produces legacy signed removal and next-epoch entries, a fresh key, and one age wrap per remaining member and agent when a remaining guide performs both operations. It refuses self-removal because that person could not sign rotation. `removeMemberEntry` lets a person of either role sign their own leave or removal of their own agent, and lets a guide remove another member. Removal cascades to a person's agents and cannot remove the last person guide. `completeRotation` lets a remaining guide of either role finish delivery. Personal removal authority never grants rotation authority. These helpers produce legacy entries; proof-based callers use the same verified state and effects, but seal only labels and sign `ControlProof` for each action.

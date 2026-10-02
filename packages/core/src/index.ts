@@ -15,3 +15,5 @@ export * from './artifacts.js';
 export * from './blobs.js';
 
 export * from './projects.js';
+export * from './private.js';
+export * from './private-transfer.js';

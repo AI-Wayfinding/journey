@@ -243,17 +243,19 @@ describe('signed project-v1 contracts', () => {
   });
 
   it('requires a signed Stage 2 barrier and all capabilities, while 0.1.5 remains supported for old histories', async () => {
-    expect(CLIENT_VERSION).toBe('0.1.6'); expect(CLIENT_CAPABILITIES).toContain('project-v1');
+    expect(CLIENT_VERSION).toBe('0.1.7'); expect(CLIENT_CAPABILITIES).toEqual(['control-proof-v1', 'artifact-v1', 'project-v1', 'private-v1']);
     for (const version of ['0.1.3', '0.1.5', '', 'bad']) expect(supportsProjects(version, '0.1.6', CLIENT_CAPABILITIES)).toBe(false);
-    expect(supportsProjects('0.1.6', '0.1.6', CLIENT_CAPABILITIES)).toBe(true);
+    for (const version of ['0.1.6', '0.1.7']) expect(supportsProjects(version, '0.1.6', CLIENT_CAPABILITIES)).toBe(true);
     expect(supportsProjects('0.1.6', '0.1.7', CLIENT_CAPABILITIES)).toBe(false);
-    for (const cap of CLIENT_CAPABILITIES) expect(supportsProjects('0.1.6', '0.1.6', CLIENT_CAPABILITIES.filter(v => v !== cap))).toBe(false);
+    for (const cap of ['control-proof-v1', 'artifact-v1', 'project-v1']) expect(supportsProjects('0.1.6', '0.1.6', CLIENT_CAPABILITIES.filter(v => v !== cap))).toBe(false);
     const { f, body } = await fixture();
     const old = await artifactFixture('0.1.5');
     await artifactAppend(old, old.guide, 'project.create', body, { purpose: 'A private purpose 🌱' }); await denied(old, 'unauthorized');
     await artifactAppend(old, old.guide, 'client.minVersion', { version: '0.1.6' });
     await artifactAppend(old, old.guide, 'project.create', body, { purpose: 'A private purpose 🌱' }); expect((await checked(old)).projects!.items).toHaveProperty(body.project);
     await artifactAppend(f, f.guide, 'client.minVersion', { version: '0.1.7' });
+    expect((await checked(f)).minClientVersion).toBe('0.1.7');
+    await artifactAppend(f, f.guide, 'client.minVersion', { version: '0.1.8' });
     const unsupported = await artifactResult(f);
     expect(unsupported.ok).toBe(false); expect(unsupported).not.toHaveProperty('state');
     // Existing nonproject readers need the signed minimum to display their update message.

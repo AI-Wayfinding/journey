@@ -897,3 +897,183 @@ def project_selected_value(value: Placement, target: Maybe<&2, Artifact>, placem
 
 def project_selected(target: Maybe<&2, Artifact>, +placements: +List<Placement>, selector: Nat, +id: Nat) -> Bool:
   project_selected_value(placement_find(placements, id), target, placements, selector, id)
+
+# Private authority consumes verified admission/key bindings, never account names.
+def private_ready(v: Version) -> Bool:
+  version_ge(v, Version{0n, 1n, 7n})
+
+def private_client(+version: Version, minimum: Version, control: Bool, artifact: Bool, project: Bool, private: Bool) -> Bool:
+  control && artifact && project && private && private_ready(version) && version_ge(version, minimum)
+
+type PrivateCredential is Data:
+  PrivatePersonCredential{}
+  PrivateAuthenticatedAgent{}
+  PrivateLinkCredential{}
+  PrivateUnknownCredential{}
+
+def private_credential(kind: MemberKind, value: PrivateCredential) -> Bool:
+  match kind:
+    case Person{}:
+      match value:
+        case PrivatePersonCredential{}: True{}
+        case _: False{}
+    case Agent{}:
+      match value:
+        case PrivateAuthenticatedAgent{}: True{}
+        case _: False{}
+
+def private_related_kind(kind: MemberKind, +id: Nat, key: Nat, actorKind: MemberKind, owner: Nat) -> Bool:
+  match kind:
+    case Agent{}: Nat.is_eq(id, key)
+    case Person{}: Nat.is_eq(id, key) || owned_agent(actorKind, owner, id)
+
+def private_related_actor(kind: MemberKind, id: Nat, live: Bool, actor: Maybe<&2, Member>) -> Bool:
+  match actor:
+    case None{}: False{}
+    case Some{Member{key, actorKind, _, _, owner, _, actorLive}}:
+      live && actorLive && private_related_kind(kind, id, key, actorKind, owner)
+
+def private_relation(author: Maybe<&2, Member>, actor: Maybe<&2, Member>) -> Bool:
+  match author:
+    case None{}: False{}
+    case Some{Member{id, kind, _, _, _, _, live}}: private_related_actor(kind, id, live, actor)
+
+def private_audience_value(+members: +List<Member>, +author: Maybe<&2, Member>, +actor: Maybe<&2, Member>, value: PrivateCredential) -> Bool:
+  match actor:
+    case None{}: False{}
+    case Some{Member{_, kind, _, _, _, _, _}}:
+      private_credential(kind, value) && private_relation(author, actor) && access_read(member_access(actor, members))
+
+def private_audience(+members: +List<Member>, author: Nat, actor: Nat, value: PrivateCredential) -> Bool:
+  private_audience_value(members, find(members, author), find(members, actor), value)
+
+def private_write(+members: +List<Member>, author: Nat, +actor: Nat, value: PrivateCredential, minimum: Version, pending: Bool, current: Bool) -> Bool:
+  current && private_ready(minimum) && private_audience(members, author, actor, value) && content_write(member_access(find(members, actor), members), pending)
+
+# Destination visibility deliberately grants no authority.
+def private_copy_access(source: Bool, destination: Bool, different: Bool, visibility: Visibility) -> Bool:
+  source && destination && different
+
+type PrivateCopy is Data:
+  PrivateCopy{id: Nat, artifact: Nat, author: Nat, journey: Nat, head: Nat, record: Nat, seq: Nat, deleted: Bool, versions: +List<ArtifactVersion>, used: +List<Nat>, project: Nat, placement: Nat, typeHash: Nat}
+type PrivateAction is Data:
+  PrivateCreate{artifact: Nat, author: Nat, writer: Nat, journey: Nat, version: Nat, typeHash: Nat, blobs: +List<Nat>}
+  PrivateEdit{artifact: Nat, author: Nat, writer: Nat, version: Nat, typeHash: Nat, predecessor: Nat, blobs: +List<Nat>}
+  PrivateComment{artifact: Nat, author: Nat, writer: Nat, comment: Nat, context: Nat}
+  PrivateDelete{artifact: Nat, author: Nat, writer: Nat, predecessor: Nat}
+  PrivateProject{artifact: Nat, author: Nat, writer: Nat, project: Nat, predecessor: Nat}
+type PrivateTransition is Data:
+  PrivateAccepted{value: PrivateCopy}
+  PrivateConflict{}
+  PrivateDenied{}
+
+def private_guard(valid: Bool, value: PrivateCopy) -> PrivateTransition:
+  match valid:
+    case True{}: PrivateAccepted{value}
+    case False{}: PrivateConflict{}
+
+def private_same(artifact: Nat, author: Nat, writer: Nat, id: Nat, creator: Nat, actor: Nat) -> Bool:
+  Nat.is_eq(artifact, id) && Nat.is_eq(author, creator) && Nat.is_eq(writer, actor)
+
+def private_action(value: PrivateCopy, +actor: Nat, +record: Nat, next: PrivateAction, projects: +List<ProjectInfo>) -> PrivateTransition:
+  PrivateCopy{+id, +artifact, +author, +journey, +head, _, +seq, +deleted, +versions, +used, +project, +placement, +kind} = value
+  match next:
+    case PrivateCreate{_, _, _, _, _, _, _}: PrivateConflict{}
+    case PrivateEdit{target, creator, writer, +version, typeHash, predecessor, +blobs}:
+      private_guard(Bool.not(deleted || nat_has(used, version)) && private_same(target, creator, writer, artifact, author, actor) && Nat.is_eq(kind, typeHash) && Nat.is_eq(head, predecessor), PrivateCopy{id, artifact, author, journey, version, record, (seq + 1n : Nat), False{}, ArtifactVersion{version, actor, blobs} <> versions, version <> used, project, placement, kind})
+    case PrivateComment{target, creator, writer, +comment, +context}:
+      private_guard(Bool.not(deleted || nat_has(used, comment)) && private_same(target, creator, writer, artifact, author, actor) && (Nat.is_eq(context, 0n) || artifact_version_has(versions, context)), PrivateCopy{id, artifact, author, journey, head, record, (seq + 1n : Nat), False{}, versions, comment <> used, project, placement, kind})
+    case PrivateDelete{target, creator, writer, predecessor}:
+      private_guard(Bool.not(deleted) && private_same(target, creator, writer, artifact, author, actor) && Nat.is_eq(head, predecessor), PrivateCopy{id, artifact, author, journey, head, record, (seq + 1n : Nat), True{}, versions, used, project, placement, kind})
+    case PrivateProject{target, creator, writer, +destination, predecessor}:
+      private_guard(Bool.not(deleted) && private_same(target, creator, writer, artifact, author, actor) && Nat.is_eq(placement, predecessor) && Bool.not(Nat.is_eq(project, destination)) && (Nat.is_eq(destination, 0n) || project_exists(project_find(projects, destination))), PrivateCopy{id, artifact, author, journey, head, record, (seq + 1n : Nat), False{}, versions, used, destination, record, kind})
+
+def private_first(id: Nat, +actor: Nat, record: Nat, next: PrivateAction) -> PrivateTransition:
+  match next:
+    case PrivateCreate{artifact, +author, writer, journey, +version, typeHash, blobs}:
+      private_guard(Nat.is_eq(author, actor) && Nat.is_eq(writer, actor), PrivateCopy{id, artifact, author, journey, version, record, 0n, False{}, ArtifactVersion{version, actor, blobs} <> Nil{}, version <> Nil{}, 0n, 0n, typeHash})
+    case _: PrivateConflict{}
+
+def private_position(value: Maybe<&2, PrivateCopy>, seq: Nat, previous: Nat) -> Bool:
+  match value:
+    case None{}: Nat.is_eq(seq, 0n) && Nat.is_eq(previous, 0n)
+    case Some{PrivateCopy{_, _, _, _, _, head, old, _, _, _, _, _, _}}: Nat.is_eq(seq, (old + 1n : Nat)) && Nat.is_eq(previous, head)
+
+def private_step(value: Maybe<&2, PrivateCopy>, id: Nat, actor: Nat, record: Nat, next: PrivateAction, projects: +List<ProjectInfo>) -> PrivateTransition:
+  match value:
+    case None{}: private_first(id, actor, record, next)
+    case Some{old}: private_action(old, actor, record, next, projects)
+
+def private_checked(allowed: Bool, positioned: Bool, value: Maybe<&2, PrivateCopy>, id: Nat, actor: Nat, record: Nat, next: PrivateAction, projects: +List<ProjectInfo>) -> PrivateTransition:
+  match allowed:
+    case False{}: PrivateDenied{}
+    case True{}:
+      match positioned:
+        case False{}: PrivateConflict{}
+        case True{}: private_step(value, id, actor, record, next, projects)
+
+def private_apply(allowed: Bool, +value: Maybe<&2, PrivateCopy>, id: Nat, actor: Nat, record: Nat, seq: Nat, previous: Nat, next: PrivateAction, projects: +List<ProjectInfo>) -> PrivateTransition:
+  private_checked(allowed, private_position(value, seq, previous), value, id, actor, record, next, projects)
+
+# Bundle scopes derive a single recipient; there is no arbitrary grant list.
+type PrivateBundleScope is Data:
+  PrivateBackup{}
+  PrivateHandoff{}
+  PrivateReturn{}
+
+def private_bundle_recipient(scope: PrivateBundleScope, kind: MemberKind, same: Bool) -> Bool:
+  match scope:
+    case PrivateBackup{}: same
+    case PrivateReturn{}: same
+    case PrivateHandoff{}:
+      match kind:
+        case Person{}: False{}
+        case Agent{}: True{}
+
+def private_origin_version(current: Nat, observed: Nat) -> Bool:
+  Nat.is_eq(current, observed)
+
+def private_authority_snapshot(journey: Nat, head: Nat, otherJourney: Nat, otherHead: Nat) -> Bool:
+  Nat.is_eq(journey, otherJourney) && Nat.is_eq(head, otherHead)
+
+# A cross-journey copy is a fresh snapshot, not creation by a new author.
+def private_copied(source: PrivateCopy, +id: Nat, +actor: Nat, record: Nat, +journey: Nat, +version: Nat, +blobs: +List<Nat>, observed: Nat, fresh: Bool, allowed: Bool) -> PrivateTransition:
+  PrivateCopy{sourceId, artifact, +author, sourceJourney, _, head, _, deleted, _, _, _, _, kind} = source
+  private_guard(allowed && fresh && Bool.not(Nat.is_eq(sourceId, id)) && Bool.not(deleted || Nat.is_eq(sourceJourney, journey)) && Nat.is_eq(head, observed), PrivateCopy{id, artifact, author, journey, version, record, 0n, False{}, ArtifactVersion{version, actor, blobs} <> Nil{}, version <> Nil{}, 0n, 0n, kind})
+
+def private_selected(value: PrivateCopy, +selector: Nat, allowed: Bool) -> Bool:
+  PrivateCopy{_, _, _, _, _, _, _, deleted, _, _, project, _, _} = value
+  allowed && Bool.not(deleted) && (Nat.is_eq(selector, 1n) || Nat.is_eq(selector, project))
+
+def private_references(own: Bool, complete: Bool, digest: Bool, staged: Bool) -> Bool:
+  own && complete && digest && staged
+
+# Checkpoints are retained independently of replaceable cache bytes.
+type PrivateHeaderDecision is Data:
+  PrivateUnverifiedFreshness{}
+  PrivateVerifiedFreshness{}
+  PrivateMergeRequired{}
+  PrivateHeaderConflict{}
+  PrivateRollback{}
+
+def private_header(+retained: Nat, +incoming: Nat, private_same: Bool, +predecessor: Bool, +paired: Bool) -> PrivateHeaderDecision:
+  match retained:
+    case 0n:
+      Bool.pick(PrivateHeaderDecision, paired, PrivateVerifiedFreshness{}, PrivateUnverifiedFreshness{})
+    case _:
+      Bool.pick(PrivateHeaderDecision, Nat.is_lt(incoming, retained), PrivateRollback{}, Bool.pick(PrivateHeaderDecision, Nat.is_eq(incoming, retained), Bool.pick(PrivateHeaderDecision, private_same, Bool.pick(PrivateHeaderDecision, paired, PrivateVerifiedFreshness{}, PrivateUnverifiedFreshness{}), Bool.pick(PrivateHeaderDecision, predecessor, PrivateMergeRequired{}, PrivateHeaderConflict{})), Bool.pick(PrivateHeaderDecision, predecessor, Bool.pick(PrivateHeaderDecision, paired, PrivateVerifiedFreshness{}, PrivateUnverifiedFreshness{}), PrivateHeaderConflict{})))
+
+type PrivateMergeChoice is Data:
+  PrivateLeft{}
+  PrivateRight{}
+  PrivateBoth{}
+  PrivateTombstone{}
+
+def private_merge(+left: Nat, +right: Nat, leftDeleted: Bool, rightDeleted: Bool, private_same: Bool) -> PrivateMergeChoice:
+  Bool.pick(PrivateMergeChoice, leftDeleted || rightDeleted, PrivateTombstone{}, Bool.pick(PrivateMergeChoice, Nat.is_lt(left, right), PrivateRight{}, Bool.pick(PrivateMergeChoice, Nat.is_lt(right, left) || private_same, PrivateLeft{}, PrivateBoth{})))
+
+def private_capacity(bytes: U32) -> Bool:
+  Bool.not(U32.is_lt(67108864, bytes))
+
+def private_sync_due(open: Bool, elapsed: Nat) -> Bool:
+  open || Bool.not(Nat.is_lt(elapsed, 300000n))

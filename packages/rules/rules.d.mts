@@ -23,7 +23,30 @@ export interface Placement { $: 'Placement'; artifact: bigint; project: bigint; 
 export interface ProjectIndex { $: 'ProjectIndex'; items: List<ProjectInfo>; pairs: List<Participation>; placements: List<Placement> }
 export type ProjectAction = { $: 'ProjectCreate'; id: bigint } | { $: 'ProjectPurpose'; id: bigint; predecessor: bigint } | { $: 'ProjectStateChange'; id: bigint; predecessor: bigint; phase: ProjectPhase } | { $: 'ProjectJoin' | 'ProjectLeave'; id: bigint; member: bigint; predecessor: bigint } | { $: 'ArtifactProject'; id: bigint; project: bigint; author: bigint; writer: bigint; predecessor: bigint };
 export type ProjectTransition = { $: 'ProjectAccepted'; index: ProjectIndex } | { $: 'ProjectDenied' | 'ProjectConflict' };
+export type PrivateBundleScope = { $: 'PrivateBackup' | 'PrivateHandoff' | 'PrivateReturn' };
+export type PrivateCredential = { $: 'PrivatePersonCredential' | 'PrivateAuthenticatedAgent' | 'PrivateLinkCredential' | 'PrivateUnknownCredential' };
+export interface PrivateCopy { $: 'PrivateCopy'; id: bigint; artifact: bigint; author: bigint; journey: bigint; head: bigint; record: bigint; seq: bigint; deleted: boolean; versions: List<ArtifactVersion>; used: List<bigint>; project: bigint; placement: bigint; typeHash: bigint }
+export type PrivateAction = { $: 'PrivateCreate'; artifact: bigint; author: bigint; writer: bigint; journey: bigint; version: bigint; typeHash: bigint; blobs: List<bigint> } | { $: 'PrivateEdit'; artifact: bigint; author: bigint; writer: bigint; version: bigint; typeHash: bigint; predecessor: bigint; blobs: List<bigint> } | { $: 'PrivateComment'; artifact: bigint; author: bigint; writer: bigint; comment: bigint; context: bigint } | { $: 'PrivateDelete'; artifact: bigint; author: bigint; writer: bigint; predecessor: bigint } | { $: 'PrivateProject'; artifact: bigint; author: bigint; writer: bigint; project: bigint; predecessor: bigint };
+export type PrivateTransition = { $: 'PrivateAccepted'; value: PrivateCopy } | { $: 'PrivateConflict' | 'PrivateDenied' };
+export type PrivateHeaderDecision = { $: 'PrivateUnverifiedFreshness' | 'PrivateVerifiedFreshness' | 'PrivateMergeRequired' | 'PrivateHeaderConflict' | 'PrivateRollback' };
+export type PrivateMergeChoice = { $: 'PrivateLeft' | 'PrivateRight' | 'PrivateBoth' | 'PrivateTombstone' };
 declare const rules: {
+  private_bundle_recipient(scope: PrivateBundleScope, kind: Kind, same: boolean): boolean;
+  private_origin_version(current: bigint, observed: bigint): boolean;
+  private_authority_snapshot(journey: bigint, head: bigint, otherJourney: bigint, otherHead: bigint): boolean;
+  private_ready(version: Version): boolean;
+  private_client(client: Version, minimum: Version, control: boolean, artifact: boolean, project: boolean, privateFormat: boolean): boolean;
+  private_audience(members: List<Member>, author: bigint, actor: bigint, credential: PrivateCredential): boolean;
+  private_write(members: List<Member>, author: bigint, actor: bigint, credential: PrivateCredential, minimum: Version, pending: boolean, current: boolean): boolean;
+  private_copy_access(source: boolean, destination: boolean, different: boolean, visibility: JourneySettings['visibility']): boolean;
+  private_apply(allowed: boolean, value: Maybe<PrivateCopy>, id: bigint, actor: bigint, record: bigint, seq: bigint, previous: bigint, next: PrivateAction, projects: List<ProjectInfo>): PrivateTransition;
+  private_copied(source: PrivateCopy, id: bigint, actor: bigint, record: bigint, journey: bigint, version: bigint, blobs: List<bigint>, observed: bigint, fresh: boolean, allowed: boolean): PrivateTransition;
+  private_selected(value: PrivateCopy, selector: bigint, allowed: boolean): boolean;
+  private_references(own: boolean, complete: boolean, digest: boolean, staged: boolean): boolean;
+  private_header(retained: bigint, incoming: bigint, same: boolean, predecessor: boolean, paired: boolean): PrivateHeaderDecision;
+  private_merge(left: bigint, right: bigint, leftDeleted: boolean, rightDeleted: boolean, same: boolean): PrivateMergeChoice;
+  private_capacity(bytes: number): boolean;
+  private_sync_due(open: boolean, elapsed: bigint): boolean;
   project_ready(version: Version): boolean;
   project_client(client: Version, minimum: Version, control: boolean, artifact: boolean, project: boolean): boolean;
   project_apply(members: List<Member>, actor: bigint, minimum: Version, pending: boolean, index: ProjectIndex, artifacts: ArtifactIndex, revision: bigint, action: ProjectAction): ProjectTransition;

@@ -281,3 +281,74 @@ def Laws.project_client_requires_capability(client, minimum, control, artifact):
   Equal.cong(Bool, Bool, b => b && R.project_ready(client) && R.version_ge(client, minimum), (control && artifact) && False{}, False{}, and_false(control && artifact))
 def Laws.project_replay_uses_authority_version_and_revision(members, actor, minimum, pending, index, artifacts, revision, action, pairs, items, placements):
   {==}
+
+def Laws.private_link_excluded(kind):
+  match kind:
+    case R.Person{}: {==}
+    case R.Agent{}: {==}
+def Laws.private_unknown_excluded(kind):
+  match kind:
+    case R.Person{}: {==}
+    case R.Agent{}: {==}
+def Laws.private_agent_author_not_parent(id, parent):
+  {==}
+def Laws.private_person_agent_inheritance(id, key, owner):
+  {==}
+def Laws.private_write_requires_current(members, author, actor, credential, minimum, pending):
+  {==}
+def Laws.private_readonly_cannot_write(id, author, credential, guide):
+  +id = id
+  Equal.trans(Bool, R.private_write(R.Member{id, R.Person{}, R.ReadOnly{}, guide, 0n, False{}, True{}} <> Nil{}, author, id, credential, R.Version{0n, 1n, 7n}, False{}, True{}), R.private_audience(R.Member{id, R.Person{}, R.ReadOnly{}, guide, 0n, False{}, True{}} <> Nil{}, author, id, credential) && False{}, False{}, Equal.cong(Bool, Bool, b => R.private_audience(R.Member{id, R.Person{}, R.ReadOnly{}, guide, 0n, False{}, True{}} <> Nil{}, author, id, credential) && R.content_write(R.member_access(Bool.pick(Maybe<&2, R.Member>, b, Some{R.Member{id, R.Person{}, R.ReadOnly{}, guide, 0n, False{}, True{}}}, None{}), R.Member{id, R.Person{}, R.ReadOnly{}, guide, 0n, False{}, True{}} <> Nil{}), False{}), Nat.is_eq(id, id), True{}, eq_refl(id)), and_false(R.private_audience(R.Member{id, R.Person{}, R.ReadOnly{}, guide, 0n, False{}, True{}} <> Nil{}, author, id, credential)))
+def Laws.private_pending_cannot_write(members, author, actor, credential, minimum, current):
+  +members = members
+  +actor = actor
+  +audience = current && R.private_ready(minimum) && R.private_audience(members, author, actor, credential)
+  +access = R.access_write(R.member_access(R.find(members, actor), members))
+  Equal.trans(Bool, audience && (access && False{}), audience && False{}, False{}, Equal.cong(Bool, Bool, b => audience && b, access && False{}, False{}, and_false(access)), and_false(audience))
+def Laws.private_destination_visibility_grants_nothing(source, destination, different):
+  {==}
+def Laws.private_destination_denial(source, different, visibility):
+  Equal.cong(Bool, Bool, b => b && different, source && False{}, False{}, and_false(source))
+def Laws.private_first_pins_author_and_actor(id, actor, record, artifact, author, writer, journey, version, kind, blobs):
+  {==}
+def Laws.private_deleted_edit_denied(id, artifact, author, journey, head, old, seq, versions, used, project, placement, kind, actor, record, target, creator, writer, version, typeHash, predecessor, blobs, projects):
+  {==}
+def Laws.private_deleted_placement_denied(id, artifact, author, journey, head, old, seq, versions, used, project, placement, kind, actor, record, target, creator, writer, destination, predecessor, projects):
+  {==}
+def Laws.private_predecessor_and_seq(id, artifact, author, journey, head, old, seq, versions, used, project, placement, kind, next, previous, deleted):
+  {==}
+def Laws.private_placement_zero_or_one(id, artifact, author, journey, head, old, seq, versions, used, project, placement, kind, actor, record, target, creator, writer, destination, predecessor, projects, deleted):
+  {==}
+def Laws.private_copy_preserves_author(sourceId, artifact, author, sourceJourney, head, old, seq, versions, used, project, placement, kind, actor, record, id, journey, version, blobs, observed, fresh, allowed, deleted):
+  {==}
+def Laws.private_unauthorized_selection(copy, selector):
+  match copy:
+    case R.PrivateCopy{_, _, _, _, _, _, _, _, _, _, _, _, _}: {==}
+def Laws.private_unfinished_reference(own, digest, staged):
+  Equal.cong(Bool, Bool, b => b && digest && staged, own && False{}, False{}, and_false(own))
+def Laws.private_unpaired_freshness(incoming, same, predecessor):
+  {==}
+def Laws.private_paired_freshness(incoming, same, predecessor):
+  {==}
+def Laws.private_signed_fork_requires_merge():
+  {==}
+def Laws.private_fork_bad_predecessor_denied():
+  {==}
+def Laws.private_bundle_handoff_not_person(same):
+  {==}
+def Laws.private_bundle_backup_only_author(kind, same):
+  {==}
+def Laws.private_rollback_denied():
+  {==}
+def Laws.private_merge_higher():
+  {==}
+def Laws.private_merge_tie():
+  {==}
+def Laws.private_tombstone_wins(left, right, same, deleted):
+  {==}
+def Laws.private_capacity_limit():
+  {==}
+def Laws.private_save_waits_for_sync():
+  {==}
+def Laws.private_client_requires_all_formats(client, minimum, control, artifact, project):
+  Equal.cong(Bool, Bool, b => b && R.private_ready(client) && R.version_ge(client, minimum), (control && artifact && project) && False{}, False{}, and_false(control && artifact && project))
