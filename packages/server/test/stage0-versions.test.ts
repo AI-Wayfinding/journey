@@ -34,7 +34,7 @@ describe('Stage 0 version and format barrier', () => {
       expect(await snapshot(j)).toBe(before);
     }
     expect((await change(j, owner, 'client.minVersion', { version: '0.1.7' }, { 'X-Client-Version': '0.1.7' })).status).toBe(201);
-    expect((await request(`/v1/journeys/${j.id}/export`, 'GET', undefined, as(owner))).status).toBe(426);
+    expect((await request(`/v1/journeys/${j.id}/export`, 'GET', undefined, { ...as(owner), 'X-Client-Version': '0.1.6' })).status).toBe(426);
     const headers = { ...as(owner), 'X-Client-Version': '0.1.7' };
     expect((await request(`/v1/journeys/${j.id}/export`, 'GET', undefined, headers)).status).toBe(200);
     const lower = await proof(j, owner, 'client.minVersion', { version: '0.1.3' });

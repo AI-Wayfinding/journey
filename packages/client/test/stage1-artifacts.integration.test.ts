@@ -204,7 +204,7 @@ describe('Stage 1 real CLI and stdio MCP artifacts', () => {
       const item = await tool(sdk, 'add', { type: 'document', title: 'Before upgrade', body: 'Private content' });
       for (const mode of ['action','format','minimum']) {
         gate = mode;
-        if (mode === 'minimum') await change(trip, owner, 'client.minVersion', { version: '0.1.7' }, {}, { 'X-Client-Version': '0.1.7' });
+        if (mode === 'minimum') await change(trip, owner, 'client.minVersion', { version: '0.1.8' }, {}, { 'X-Client-Version': '0.1.8' });
         transport.requests.length = 0;
         await failedCommand(file, 'do not need to connect or be approved again', 'show', item.id);
         await failedCommand(file, 'npm install -g @ai-wayfinding/client@latest', 'add', '--type', 'document', '--title', 'No', '--body', 'No');

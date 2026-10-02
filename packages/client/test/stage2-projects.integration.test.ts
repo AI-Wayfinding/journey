@@ -170,8 +170,8 @@ it('unsupported capability, signed future minimum and unknown actions fail witho
     await failedCommand(mf,'Update the client','project','list');
     await failedCommand(uf,'Update the client','project','show',p.id);
     await failedTool(sdk,'project_list','Update the client');
-    const future=await control(trip,owner,'client.minVersion',{version:'0.1.7'});
-    expect((await request(`/v1/journeys/${trip.id}/log`,'POST',{control:future},{...as(owner),'X-Client-Version':'0.1.7'})).status).toBe(201);
+    const future=await control(trip,owner,'client.minVersion',{version:'0.1.8'});
+    expect((await request(`/v1/journeys/${trip.id}/log`,'POST',{control:future},{...as(owner),'X-Client-Version':'0.1.8'})).status).toBe(201);
     await failedCommand(good,'Update the client','project','list');
     await failedTool(sdk,'project_show','Update the client',{id:p.id});
     expect(await readFile(good)).toEqual(before); expect(missing.requests.every(r=>r.method==='GET')).toBe(true); expect(unknown.requests.every(r=>r.method==='GET')).toBe(true);

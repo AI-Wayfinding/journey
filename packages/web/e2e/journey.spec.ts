@@ -5,7 +5,7 @@ import { agentWritesItem, requestAgent } from './agent.js';
 
 import { browserPerson, signUp } from './person.js';
 const calls = (page: Page) => page.evaluate(() => window.__passkeyCalls);
-const journeyHeaders = { 'X-Client-Version': '0.1.6', 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': 'artifact-v1', 'X-Project-Format': 'project-v1' };
+const journeyHeaders = { 'X-Client-Version': '0.1.7', 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': 'artifact-v1', 'X-Project-Format': 'project-v1' };
 test('account name and per-journey email visibility are shared only when chosen', async ({ browser }) => {
   const owner = await browserPerson(browser), guest = await browserPerson(browser);
   try {

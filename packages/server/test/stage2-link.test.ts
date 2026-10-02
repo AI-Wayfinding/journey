@@ -127,8 +127,8 @@ describe('Stage 2 read-only verified project link pages', () => {
     try { const expired = await request(`/a/${secret}?project=${p.id}`); expect(expired.status).toBe(410); expect(await expired.text()).not.toContain('UPDATED PURPOSE'); } finally { clock.mockRestore(); }
     expect((await change(j, owner, 'member.renew', { id: agent.principal, expiresAt: new Date(Date.now() + 7_200_000).toISOString() })).status).toBe(201);
     expect((await pages(secret, p.id)).raw).toContain('UPDATED PURPOSE');
-    const future = await proof(j, owner, 'client.minVersion', { version: '0.1.7' });
-    expect((await request(`/v1/journeys/${j.id}/log`, 'POST', { control: future }, { ...as(owner), 'X-Client-Version': '0.1.7' })).status).toBe(201); j.controls.push(future);
+    const future = await proof(j, owner, 'client.minVersion', { version: '0.1.8' });
+    expect((await request(`/v1/journeys/${j.id}/log`, 'POST', { control: future }, { ...as(owner), 'X-Client-Version': '0.1.8' })).status).toBe(201); j.controls.push(future);
     const unavailable = await request(`/a/${secret}?project=all`); expect(unavailable.status).toBe(502); const message = await unavailable.text(); expect(message).toContain('Update the server'); expect(message).not.toContain('UPDATED PURPOSE');
     // A separate current journey exercises revocation independently of the update gate.
     const live = await linked(); expect((await change(live.j, live.owner, 'member.remove', { member: live.agent.principal })).status).toBe(201);

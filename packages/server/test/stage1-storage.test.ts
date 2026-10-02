@@ -192,7 +192,7 @@ describe('Stage 1 authenticated local R2 lifecycle', () => {
         j.key = key;
       }
     }
-    if (scenario === 'version') expect((await change(j, owner, 'client.minVersion', { version: '0.1.7' }, { 'X-Client-Version': '0.1.7' })).status).toBe(201);
+    if (scenario === 'version') expect((await change(j, owner, 'client.minVersion', { version: '0.1.8' }, { 'X-Client-Version': '0.1.8' })).status).toBe(201);
     if (scenario === 'expiry') await expireStage(j, blob.descriptor.id);
     release();
     try {

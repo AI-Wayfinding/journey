@@ -179,7 +179,7 @@ test('placement assign/move/clear, selector intersection, loaded revisions, rota
     await guest.page.route('**/v1/journeys/*/log*', async route => { const response = await route.fetch(), data = await response.json(); data.log.at(-1).proof.sig = 'bad'; await route.fulfill({ response, json: data }); });
     await guest.page.goto(one.path); await expect(guest.page.getByRole('alert')).toContainText('Journey history could not be verified'); await expect(guest.page.locator('#project-purpose-text, #project-artifacts')).toHaveCount(0);
     await guest.page.unroute('**/v1/journeys/*/log*');
-    await change(owner.page, trip.id, 'client.minVersion', { version: '0.1.7' }, { 'X-Client-Version': '0.1.7' });
+    await change(owner.page, trip.id, 'client.minVersion', { version: '0.1.8' }, { 'X-Client-Version': '0.1.8' });
     await guest.page.goto(trip.path); await expect(guest.page.getByRole('heading', { name: 'Update Wayfinding' })).toBeVisible(); await expect(guest.page.getByRole('alert')).toContainText('do not ask for approval again'); await expect(guest.page.locator('#artifacts, #project-purpose-text')).toHaveCount(0);
     await expect(guest.page.locator('header .brand')).toHaveText('AI Wayfinding Journeys'); await expect(guest.page.locator('footer')).toContainText('Wayfinding is how you move when the destination is uncertain.');
   } finally { await owner.context.close(); await guest.context.close(); }

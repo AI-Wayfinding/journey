@@ -170,7 +170,7 @@ test('downgrade and pending rotation stop staged uploads and writes; signed newe
     await guest.page.goto(storedPath); await guest.page.reload(); await expect(guest.page.getByRole('link', { name: 'Edit artifact' })).toHaveCount(0);
     await guest.page.goto(trip.path + '/add'); await expect(guest.page.getByRole('alert')).toContainText('key update is pending');
     await owner.page.goto(trip.path); await expect(owner.page.getByRole('heading', { name: 'Artifacts journey', exact: true })).toBeVisible(); // guide finishes rotation
-    await change(owner.page, trip.id, 'client.minVersion', { version: '0.1.7' }, { 'X-Client-Version': '0.1.7' });
+    await change(owner.page, trip.id, 'client.minVersion', { version: '0.1.8' }, { 'X-Client-Version': '0.1.8' });
     await guest.page.goto(trip.path); await expect(guest.page.getByRole('heading', { name: 'Update Wayfinding' })).toBeVisible(); await expect(guest.page.getByRole('alert')).toContainText('do not ask for approval again');
     await expect(guest.page.getByText('Existing artifact', { exact: true })).toHaveCount(0);
   } finally { await owner.context.close(); await guest.context.close(); }
