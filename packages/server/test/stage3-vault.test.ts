@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { env, runInDurableObject } from 'cloudflare:test';
-import { PRIVATE_SLOT_BYTES, PRIVATE_HEADER_BYTES, decodeVaultWire, encodeVaultPatch, privateRandomBytes, privateEncode } from '@ai-wayfinding/core';
+import { PRIVATE_SLOT_BYTES, PRIVATE_HEADER_BYTES, decodeVaultWire, encodeVaultPatch, privateRandomBytes, privateEncode, importSigningKey, newId } from '@ai-wayfinding/core';
 import type { VaultPatch } from '@ai-wayfinding/core';
 import worker, { type Env, PrivateVaultObject } from '../src/index.js';
 import { fixture, as, addPerson, addAgent, agentHeaders, change, snapshot } from './stage0-fixtures.js';
@@ -42,9 +42,9 @@ describe('dedicated fixed ciphertext member vault in workerd SQLite', () => {
     expect(new Set([...original.fingerprints, ...second.fingerprints]).size).toBe(2048);
     expect(second.head).not.toEqual(original.head);
   });
-  it('allocates all 64 MiB at every admission, isolates authenticated members/agents and never enters shared tables/R2', async () => {
+  it('allocates all 64 MiB at every person admission, isolates authenticated members and never enters shared tables/R2', async () => {
     const { owner, j } = await fixture(), guest = await addPerson(j, owner), agent = await addAgent(j, owner, 'readwrite');
-    for (const p of [owner, guest, agent]) {
+    for (const p of [owner, guest]) {
       const rows = await runInDurableObject(vault(j.id, p.principal), (_o, s) => s.storage.sql.exec<{ n: number; min: number; max: number }>('SELECT COUNT(*) AS n,MIN(length(ciphertext)) AS min,MAX(length(ciphertext)) AS max FROM slots').one());
       expect(rows).toEqual({ n: 64, min: PRIVATE_SLOT_BYTES, max: PRIVATE_SLOT_BYTES });
     }
@@ -64,6 +64,45 @@ describe('dedicated fixed ciphertext member vault in workerd SQLite', () => {
     expect(before).not.toContain('private-v1');
     expect((await change(j, owner, 'member.remove', { member: guest.principal })).status).toBe(201); expect((await request(path, as(guest))).status).toBe(403);
   }, 60000);
+  it('admits authenticated and link agents without allocating any vault storage', async () => {
+    const { owner, j } = await fixture();
+    const before = await runInDurableObject(vault(j.id, owner.principal), (_o, s) => s.storage.sql.exec('SELECT id,hex(substr(ciphertext,1,32)) AS fingerprint FROM slots ORDER BY id').toArray());
+    for (const link of [false, true]) {
+      const agent = await addAgent(j, owner, link ? 'read' : 'readwrite', link);
+      await runInDurableObject(vault(j.id, agent.principal), (_o, s) => {
+        expect(s.storage.sql.exec('SELECT COUNT(*) AS n FROM slots').one()).toEqual({ n: 0 });
+        expect(s.storage.sql.exec('SELECT COUNT(*) AS n FROM head').one()).toEqual({ n: 0 });
+      });
+    }
+    expect(await runInDurableObject(vault(j.id, owner.principal), (_o, s) => s.storage.sql.exec('SELECT id,hex(substr(ciphertext,1,32)) AS fingerprint FROM slots ORDER BY id').toArray())).toEqual(before);
+  });
+  it('routes an authenticated agent to its person for reads and writes, denying foreign agents and link credentials', async () => {
+    const { owner, j } = await fixture(), agent = await addAgent(j, owner, 'readwrite');
+    const path = `/v1/journeys/${j.id}/private-vault?slots=00,01`, putPath = `/v1/journeys/${j.id}/private-vault`;
+    const read = async (auth: Record<string, string>) => {
+      const response = await request(path, auth); expect(response.status).toBe(200);
+      return decodeVaultWire(new Uint8Array(await response.arrayBuffer()), [0, 1]);
+    };
+    const own = await read(as(owner)), delegated = await read(await agentHeaders(agent, 'GET', path));
+    expect(delegated).toEqual(own);
+    const patch = { token: own.token, frame: privateEncode(privateRandomBytes(PRIVATE_HEADER_BYTES)), slots: own.slots };
+    const bytes = encodeVaultPatch(patch), timestamp = String(Date.now()), nonce = newId();
+    const hash = base64url(new Uint8Array(await crypto.subtle.digest('SHA-256', Uint8Array.from(bytes).buffer)));
+    const signature = base64url(new Uint8Array(await crypto.subtle.sign('Ed25519', await importSigningKey(agent.signing.privateKey), new TextEncoder().encode(['PUT', putPath, hash, timestamp, nonce].join('\n')))));
+    const signed = { 'X-Agent-Session': agent.id, 'X-Agent-Timestamp': timestamp, 'X-Agent-Nonce': nonce, 'X-Agent-Signature': signature };
+    expect((await request(putPath, signed, bytes)).status).toBe(200);
+    const committed = await read(as(owner)); expect(committed.frame).toBe(patch.frame);
+    expect(await read(await agentHeaders(agent, 'GET', path))).toEqual(committed);
+    const foreign = await fixture(), foreignAgent = await addAgent(foreign.j, foreign.owner, 'readwrite');
+    expect((await request(path, await agentHeaders(foreignAgent, 'GET', path))).status).toBe(403);
+    const guest = await addPerson(j, owner), guestAgent = await addAgent(j, guest, 'readwrite');
+    const guestWire = await read(await agentHeaders(guestAgent, 'GET', path)); expect(guestWire.frame).toBeNull(); expect(guestWire.token).not.toBe(committed.token);
+    const forged = path + '&vault=' + owner.principal;
+    expect((await request(forged, await agentHeaders(guestAgent, 'GET', forged))).status).toBe(400);
+    const link = await addAgent(j, owner, 'read', true);
+    expect((await request(path, await agentHeaders(link, 'GET', path))).status).toBe(403);
+    expect(await read(as(owner))).toEqual(committed);
+  });
   it('CAS replaces only two slots plus header; stale, truncated, oversized and repeated-slot commits cannot partially mutate', async () => {
     const { owner, j } = await fixture(), stub = vault(j.id, owner.principal);
     const wire = decodeVaultWire(new Uint8Array(await (await request(`/v1/journeys/${j.id}/private-vault?slots=00,01`, as(owner))).arrayBuffer()), [0, 1]);

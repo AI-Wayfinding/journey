@@ -175,9 +175,12 @@ export class EnclaveObject {
       }
       case 'blobRead': return this.download(state, subject, input.id);
       case 'privateAccess': {
-        const model = normalizedMembers(state, [subject.principal], now);
-        const allowed = rules.private_audience(model.members, model.id(subject.principal), model.id(subject.principal), { $: subject.agent ? subject.privateCredential === 'authenticated' ? 'PrivateAuthenticatedAgent' : 'PrivateUnknownCredential' : 'PrivatePersonCredential' });
-        return allowed ? Response.json({ allowed: true }) : failure('forbidden', 403);
+        const member = state.members[subject.principal]!.member;
+        const principal = member.kind === 'agent' ? member.addedBy : member.id;
+        if (!principal || state.members[principal]?.member.kind !== 'person') return failure('forbidden', 403);
+        const model = normalizedMembers(state, [subject.principal, principal], now);
+        const allowed = rules.private_audience(model.members, model.id(principal), model.id(subject.principal), { $: subject.agent ? subject.privateCredential === 'authenticated' ? 'PrivateAuthenticatedAgent' : 'PrivateUnknownCredential' : 'PrivatePersonCredential' });
+        return allowed ? Response.json({ allowed: true, principal }) : failure('forbidden', 403);
       }
       case 'access': return Response.json({ allowed: true, epoch: state.currentEpoch });
       case 'inviteAccess': return isPersonGuide(state, subject.principal) && !subject.agent ? Response.json({ allowed: true }) : failure('forbidden', 403);
@@ -315,7 +318,7 @@ export class EnclaveObject {
     const wrapCount = historical ? state.currentEpoch : expected.length;
     if (supplied.length !== wrapCount || new Set(supplied.map(w => JSON.stringify([w.principal, w.epoch]))).size !== wrapCount || supplied.some(w => !expected.includes(w.principal) || !Number.isSafeInteger(w.epoch) || (historical ? w.epoch < 1 || w.epoch > state.currentEpoch : w.epoch !== next.currentEpoch))) return failure('invalid-request', 400);
     const removed = Object.keys(state.members).filter(id => !next.members[id]);
-    if (admission) await this.provision(state.journey, admission.id);
+    if (admission?.kind === 'person') await this.provision(state.journey, admission.id);
     this.state.storage.transactionSync(() => {
       this.sql.exec('INSERT INTO log VALUES(?,?,?)', proof.seq, JSON.stringify(input.control), now);
       this.sql.exec('UPDATE authority SET state=?', JSON.stringify(next));

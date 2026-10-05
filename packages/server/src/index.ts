@@ -387,7 +387,8 @@ async function privateVaultRoute(c: AppContext): Promise<Response> {
   const url = new URL('https://internal/' + query);
   if (c.req.method === 'GET' && (url.searchParams.size !== 1 || !url.searchParams.has('slots'))) return failure('invalid-request', 400);
   if (c.req.method === 'PUT' && query) return failure('invalid-request', 400);
-  const stub = c.env.PRIVATE_VAULTS.get(c.env.PRIVATE_VAULTS.idFromName(JSON.stringify([id, s.principal])));
+  const { principal } = await access.json() as { principal: string };
+  const stub = c.env.PRIVATE_VAULTS.get(c.env.PRIVATE_VAULTS.idFromName(JSON.stringify([id, principal])));
   return stub.fetch(url.toString(), { method: c.req.method, ...(c.req.method === 'PUT' ? { body: c.req.raw.body } : {}) });
 }
 app.get('/v1/journeys/:id/private-vault', privateVaultRoute);
