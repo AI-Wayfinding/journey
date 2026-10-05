@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { PrivateVault, PRIVATE_SLOT_BYTES, PRIVATE_HEADER_BYTES, privateDecode, privateHash, privateAuthorityHistory, privateRandomBytes, selectPrivateSlots, verifyVaultCacheAdvance, validateVaultCache, openPrivateFrame, sealPrivateFrame, signPrivateHeader, encodeVaultPatch, newId, newPrivateId, privatePersonSession, privateSnapshotHash } from '../src/index.js';
+import { PrivateVault, PRIVATE_SLOT_BYTES, PRIVATE_HEADER_BYTES, privateDecode, privateHash, privateAuthorityHistory, privateRandomBytes, selectPrivateSlots, verifyVaultCacheAdvance, validateVaultCache, openPrivateFrame, sealPrivateFrame, signPrivateHeader, encodeVaultPatch, newId, newPrivateId, privatePersonSession, privateAgentSession, privateIdentity, privateSnapshotHash } from '../src/index.js';
 import type { PrivateBundle, PrivateRecord, PrivatePayload, VaultOptions, VaultCacheRecord, VaultPatch, VaultWire } from '../src/index.js';
 import { encode } from '../src/codec.js';
-import { privateFixture, created, record, content, artifactFixture, artifactAppend, contextFor, marker } from './stage0-fixture.js';
+import { privateFixture, created, record, content, artifactFixture, artifactAppend, contextFor, marker, agent, now } from './stage0-fixture.js';
 
 async function fixture() {
   const f = await privateFixture(), c = await created(f);
@@ -18,6 +18,36 @@ async function fixture() {
 }
 
 describe('scheduled fixed member vault controller', () => {
+  it.each(['expiry', 'removal'] as const)('person reopens agent-signed head on a fresh device after signer %s', async reason => {
+    const f = await fixture(), writer = await agent(f.f.author.member.id);
+    writer.member.expiresAt = new Date(Date.now() + 60000).toISOString();
+    await artifactAppend(f.f.f, f.f.author, 'member.add', { member: writer.member, kind: 'agent', grants: [] });
+    const live = await contextFor(f.f.f);
+    f.options.contexts = [live];
+    f.options.sessions = [await privatePersonSession(live, f.f.identity, f.f.author.key, f.f.author.identity)];
+    await f.controller.open(); await f.controller.stage(f.bundle); f.time(300000); await f.controller.tick();
+    const contentIdentity = f.controller.agentContentIdentity;
+    const actor = privateIdentity(writer.member), session = await privateAgentSession(live, actor, writer.key, writer.identity, 'authenticated');
+    f.controller.close();
+    const delegated = new PrivateVault({ ...f.options, cache: undefined, identity: writer.identity, signingKey: writer.key, contentIdentity, actor, sessions: [session] });
+    await delegated.open();
+    const agentHead = delegated.retainedCheckpoint!;
+    const frame = await openPrivateFrame(f.head()!, f.f.author.identity, f.f.identity.recipient) as { header: import('../src/index.js').PrivateHeader };
+    expect(frame.header.writer).toEqual(actor);
+    delegated.close();
+    if (reason === 'removal') await artifactAppend(f.f.f, f.f.author, 'member.remove', { member: writer.member.id });
+    const current = await contextFor(f.f.f, { now: reason === 'expiry' ? Date.parse(writer.member.expiresAt!) + 1 : now });
+    const personSession = await privatePersonSession(current, f.f.identity, f.f.author.key, f.f.author.identity);
+    const reopened = new PrivateVault({ ...f.options, cache: undefined, contexts: [current], sessions: [personSession] });
+    try {
+      await expect(reopened.open()).resolves.toBeUndefined();
+      expect(reopened.branches[0]!.bundle).toEqual(f.bundle);
+      expect(reopened.retainedCheckpoint!.version).toBe(agentHead.version + 1);
+      const next = await openPrivateFrame(f.head()!, f.f.author.identity, f.f.identity.recipient) as { header: import('../src/index.js').PrivateHeader };
+      expect(next.header.writer).toBeUndefined();
+      expect(next.header.prev).toBe(agentHead.head);
+    } finally { reopened.close(); }
+  }, 60000);
   it('uses Bend dirty-first unique in-range two-slot selection', () => {
     expect(selectPrivateSlots([70, 4, 4, 7, 8], [2, 2, 63, 64])).toEqual([4, 7]);
     expect(selectPrivateSlots([], [63, 63, 64, 2])).toEqual([63, 2]);

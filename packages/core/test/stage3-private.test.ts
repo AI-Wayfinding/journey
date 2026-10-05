@@ -128,7 +128,7 @@ describe('private-v1 verified audience and records', () => {
 });
 
 describe('fixed private header, schedule and fork contracts', () => {
-  it('accepts own write-agent headers under one owner/version chain, never foreign, read-only, removed or expired signers', async () => {
+  it('verifies agent heads at bound log positions, preserving owner access without admitting ineligible signers', async () => {
     const f = await privateFixture(), trust = { vault: f.vault, author: f.identity }, first = await header(f);
     const checkpoint = (await verifyPrivateHeader(first, trust, { contentsHash: first.contentsHash })).checkpoint;
     const signed = async (actor: typeof f.writer, context = f.context, version = 2) => signPrivateHeader({ format: first.format, v: 1, vault: f.vault, author: f.identity, version, prev: checkpoint.head, contentsHash: first.contentsHash, slots: first.slots, writer: privateIdentity(actor.member), authority: privateAuthority(context, privateIdentity(actor.member)) }, actor.key);
@@ -142,12 +142,26 @@ describe('fixed private header, schedule and fork contracts', () => {
     await expect(verifyPrivateHeader({ ...own, vault: newPrivateId() }, trust, { contentsHash: own.contentsHash, contexts: [f.context] })).rejects.toThrow('binding');
     await expect(verifyPrivateHeader({ ...own, sig: first.sig }, trust, { contentsHash: own.contentsHash, contexts: [f.context] })).rejects.toThrow('signature');
     await expect(verifyPrivateHeader(own, trust, { contentsHash: own.contentsHash })).rejects.toThrow('authority');
+    const { sig: _sig, ...unsigned } = own;
+    const resign = (authority: typeof unsigned.authority) => signPrivateHeader({ ...unsigned, authority }, f.writer.key);
+    const genesis = await verifyPrivateContext({ journey: f.f.journey, creator: f.f.guide.member, controls: f.f.controls.slice(0, 1) }, { now });
+    // A signer cannot cite a real position before admission or a fabricated head,
+    // principal, admission hash or epoch to bypass verified-prefix authority.
+    for (const authority of [{ ...own.authority!, head: genesis.head }, { ...own.authority!, head: first.contentsHash }, { ...own.authority!, principal: f.reader.member.id }, { ...own.authority!, admissionHash: first.contentsHash }, { ...own.authority!, epoch: 2 }]) {
+      await expect(verifyPrivateHeader(await resign(authority), trust, { contentsHash: own.contentsHash, contexts: [f.context] })).rejects.toThrow();
+    }
     const expired = await agent(f.author.member.id); expired.member.expiresAt = new Date(now + 1000).toISOString();
     await artifactAppend(f.f, f.author, 'member.add', { member: expired.member, kind: 'agent', grants: [] });
     const live = await contextFor(f.f), expiryHeader = await signed(expired, live);
-    await expect(verifyPrivateHeader(expiryHeader, trust, { contentsHash: own.contentsHash, contexts: [await contextFor(f.f, { now: now + 2000 })] })).rejects.toThrow('authority');
+    const expiredContext = await contextFor(f.f, { now: now + 2000 });
+    expect((await verifyPrivateHeader(expiryHeader, trust, { contentsHash: own.contentsHash, contexts: [expiredContext] })).header).toEqual(expiryHeader);
+    await artifactAppend(f.f, f.f.guide, 'member.role', { member: f.author.member.id, role: 'read-write' }, undefined, new Date(now + 2000).toISOString());
+    const afterExpiry = await contextFor(f.f, { now: now + 2000 });
+    await expect(verifyPrivateHeader(await signed(expired, afterExpiry), trust, { contentsHash: own.contentsHash, contexts: [afterExpiry] })).rejects.toThrow('authority');
     await artifactAppend(f.f, f.author, 'member.remove', { member: f.writer.member.id });
-    await expect(verifyPrivateHeader(own, trust, { contentsHash: own.contentsHash, contexts: [await contextFor(f.f)] })).rejects.toThrow();
+    const afterRemoval = await contextFor(f.f);
+    expect((await verifyPrivateHeader(own, trust, { contentsHash: own.contentsHash, contexts: [afterRemoval] })).header).toEqual(own);
+    await expect(verifyPrivateHeader(await resign({ ...own.authority!, head: afterRemoval.head }), trust, { contentsHash: own.contentsHash, contexts: [afterRemoval] })).rejects.toThrow();
   });
   it('validates exact fixed-slot atomic patches and capacity without growth', async () => {
     const f = await privateFixture(), h = await header(f), ciphertext = encode(new Uint8Array(PRIVATE_SLOT_BYTES)), digest = await privateBytesHash(new Uint8Array(PRIVATE_SLOT_BYTES));

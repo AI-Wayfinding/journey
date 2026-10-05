@@ -405,11 +405,17 @@ export async function verifyPrivateHeader(value: PrivateHeader, trust: { vault: 
   const h = copyPrivateHeader(value);
   if (h.vault !== trust.vault || !sameIdentity(h.author, trust.author) || h.contentsHash !== options.contentsHash) throw new Error('Private header binding/digest mismatch');
   if (h.writer) {
-    const authority = h.authority!, context = options.contexts?.find(c => c.journey === authority.journey);
-    if (!context || h.version === 1) throw new Error('Private agent header authority denied');
+    const authority = h.authority!, current = options.contexts?.find(c => c.journey === authority.journey);
+    if (!current || h.version === 1) throw new Error('Private agent header authority denied');
+    const history = contextData(current).history;
+    const position = (await Promise.all(history.controls.map(row => hashControlProof(row.proof)))).indexOf(authority.head);
+    if (position < 0) throw new Error('Private agent header admission mismatch');
+    // Replay the bound verified prefix, not today's membership. Revocation stops
+    // new server writes; it must not invalidate the person's last accepted head.
+    const context = await verifyPrivateContext({ journey: history.journey, creator: history.creator, controls: history.controls.slice(0, position + 1) }, { now: Date.parse(history.controls[position]!.proof.at), currentHead: authority.head });
     const data = contextData(context), binding = privateBinding(context, h.writer);
-    if (!(await Promise.all(data.history.controls.map(row => hashControlProof(row.proof)))).includes(authority.head) || canonical(binding) !== canonical({ journey: authority.journey, principal: authority.principal, admissionHash: authority.admissionHash })) throw new Error('Private agent header admission mismatch');
-    const model = normalizedMembers(data.state, [binding.principal, privateBinding(context, h.author).principal], Math.max(data.now, Date.now()));
+    if (authority.epoch !== data.state.currentEpoch || canonical(binding) !== canonical({ journey: authority.journey, principal: authority.principal, admissionHash: authority.admissionHash })) throw new Error('Private agent header admission mismatch');
+    const model = normalizedMembers(data.state, [binding.principal, privateBinding(context, h.author).principal], data.now);
     if (!rules.private_write(model.members, model.id(privateBinding(context, h.author).principal), model.id(binding.principal), { $: 'PrivateAuthenticatedAgent' }, ruleVersion(data.state.minClientVersion), data.state.pendingRotation === true, data.current)) throw new Error('Private agent header authority denied');
   }
   await verifySignature(h.writer ?? h.author, unsignedHeader(h), h.sig);
