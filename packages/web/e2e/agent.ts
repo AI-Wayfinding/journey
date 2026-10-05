@@ -3,7 +3,7 @@ import type { ControlProof, Envelope, Member } from '@ai-wayfinding/core';
 import { createAgeIdentity, createSigningIdentity, ARTIFACT_FORMAT, artifactTypeHash, importSigningKey, newId, sealArtifactPayload, signControlProof, unwrapJourneyKey, verifyControlProofs } from '@ai-wayfinding/core';
 
 type Agent = { id: string; code: string; approvalUrl: string; principal: string; identity: string; signingPrivateKey: CryptoKey };
-const ORIGIN = 'http://localhost:18787';
+const ORIGIN = `http://localhost:${process.env.WAYFINDING_E2E_PORT ?? '18787'}`;
 const b64url = (bytes: Uint8Array): string => btoa(String.fromCharCode(...bytes)).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
 
 /** A separate agent process never has the person's cookies or keys. */

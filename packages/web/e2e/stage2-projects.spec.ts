@@ -80,7 +80,7 @@ test('stored projects: explicit participation, inherited new agents, read-only m
       await attempt(guest.page, trip.id, 'artifact.delete', common),
       await attempt(guest.page, trip.id, 'artifact.project', { format: 'project-v1', artifact: artifactId, author: original.author, actor: guestId, project: null, predecessor: placement.revision }),
     ]) expect(response.status(), await response.text()).toBe(403);
-    const stage = await guest.page.request.post(`/v1/journeys/${trip.id}/blobs`, { headers: { ...headers, 'X-Principal': guestId, 'X-Wayfinding': '1', Origin: 'http://localhost:18787' }, data: { size: 1 } }); expect(stage.status()).toBe(403);
+    const stage = await guest.page.request.post(`/v1/journeys/${trip.id}/blobs`, { headers: { ...headers, 'X-Principal': guestId, 'X-Wayfinding': '1', Origin: new URL(guest.page.url()).origin }, data: { size: 1 } }); expect(stage.status()).toBe(403);
     expect((await controls(owner.page, trip.id)).length).toBe(before);
     await guest.page.goto(trip.path + '/projects'); await guest.page.reload(); await expect(guest.page.getByRole('button', { name: 'Create project' })).toHaveCount(0);
     await guest.page.goto(project.path); await participateReload(guest.page, 'Leave');
@@ -166,7 +166,7 @@ test('placement assign/move/clear, selector intersection, loaded revisions, rota
     await guest.page.goto(trip.path + '/add'); await expect(guest.page.getByRole('alert')).toContainText('key update is pending'); await expect(guest.page.locator('#artifact-form')).toHaveCount(0);
     const guestId = await principal(guest.page, trip.id), state = (await stored(guest.page, trip.id)).state, placement = state.projects!.placements[docId]!;
     const denied = await attempt(guest.page, trip.id, 'artifact.project', { format: 'project-v1', project: two.id, artifact: docId, author: original.author, actor: guestId, predecessor: placement.revision }); expect(denied.status()).toBe(403);
-    const stage = await guest.page.request.post(`/v1/journeys/${trip.id}/blobs`, { headers: { ...headers, 'X-Wayfinding': '1', 'X-Principal': guestId, Origin: 'http://localhost:18787' }, data: { size: 1 } }); expect(stage.status()).toBe(403);
+    const stage = await guest.page.request.post(`/v1/journeys/${trip.id}/blobs`, { headers: { ...headers, 'X-Wayfinding': '1', 'X-Principal': guestId, Origin: new URL(guest.page.url()).origin }, data: { size: 1 } }); expect(stage.status()).toBe(403);
     await owner.page.goto(trip.path); await expect(owner.page.getByRole('heading', { name: 'Placement journey', exact: true })).toBeVisible();
     await owner.page.goto(one.path); await owner.page.reload(); await expect(owner.page.locator('#project-purpose-text')).toHaveText('Purpose during rotation');
     // A malformed/unknown control or missing capability must replace content, not leave a partial view.
