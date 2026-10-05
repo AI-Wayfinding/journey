@@ -1,9 +1,9 @@
-import type { DerivedMember } from '@ai-wayfinding/core';
+import { ownsAgent, type DerivedMember, type LogState } from '@ai-wayfinding/core';
 
 type Roster = Record<string, DerivedMember>;
 
-export function accountAgents(members: Roster, principal: string): { id: string; name: string; expiresAt?: string }[] {
-  return Object.values(members).filter(({ member }) => member.kind === 'agent' && member.addedBy === principal).map(({ member }) => ({
+export function accountAgents(state: LogState, principal: string): { id: string; name: string; expiresAt?: string }[] {
+  return Object.values(state.members).filter(({ member }) => ownsAgent(state, principal, member.id)).map(({ member }) => ({
     id: member.id,
     name: member.name ?? `Agent ${member.id.slice(0, 8)}`,
     ...(member.expiresAt ? { expiresAt: member.expiresAt } : {}),

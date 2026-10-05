@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import type { DerivedMember, Member } from '@ai-wayfinding/core';
+import type { DerivedMember, LogState, Member } from '@ai-wayfinding/core';
 import { accountAgents, membersSummary } from './members.js';
 
 const entry = (id: string, kind: Member['kind'], details: Partial<Member> = {}, name?: string): DerivedMember => ({
   member: { id, kind, recipient: 'recipient', signingKey: 'signing', ...details }, grants: [], ...(name ? { profile: { name } } : {}),
 });
+
+const state = (members: Record<string, DerivedMember>): LogState => ({ members } as unknown as LogState);
 
 describe('account agents', () => {
   it('lists only agents added by this account’s journey principal, preserving grant expiry', () => {
@@ -15,14 +17,14 @@ describe('account agents', () => {
       legacy123: entry('legacy123', 'agent', { addedBy: 'me' }),
       expired: entry('expired', 'agent', { addedBy: 'me', expiresAt: '2020-01-01T00:00:00Z' }),
     };
-    expect(accountAgents(members, 'me')).toEqual([
+    expect(accountAgents(state(members), 'me')).toEqual([
       { id: 'mine', name: '<My helper>', expiresAt: '2026-10-08T12:00:00Z' },
       { id: 'legacy123', name: 'Agent legacy12' },
       { id: 'expired', name: 'Agent expired', expiresAt: '2020-01-01T00:00:00Z' },
     ]);
-    expect(accountAgents(members, 'missing')).toEqual([]);
+    expect(accountAgents(state(members), 'missing')).toEqual([]);
     delete members.mine;
-    expect(accountAgents(members, 'me').map(agent => agent.id)).not.toContain('mine');
+    expect(accountAgents(state(members), 'me').map(agent => agent.id)).not.toContain('mine');
   });
 });
 
