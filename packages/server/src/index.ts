@@ -383,6 +383,9 @@ async function privateVaultRoute(c: AppContext): Promise<Response> {
   const id = c.req.param('id')!, s = journeySubject(c);
   const access = await enclave(c.env, id, { op: 'privateAccess', journeyId: id, subject: s });
   if (!access.ok) return access;
+  // Agent key delivery is not available yet; never let agent keys initialise
+  // or replace the person's encrypted header, even on an empty vault.
+  if (c.req.method === 'PUT' && s.agent) return Response.json({ error: { code: 'forbidden', message: 'Agent credentials cannot initialise or write a person vault header.' } }, { status: 403 });
   const query = new URL(c.req.url).search;
   const url = new URL('https://internal/' + query);
   if (c.req.method === 'GET' && (url.searchParams.size !== 1 || !url.searchParams.has('slots'))) return failure('invalid-request', 400);

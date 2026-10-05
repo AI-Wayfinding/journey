@@ -76,7 +76,7 @@ describe('dedicated fixed ciphertext member vault in workerd SQLite', () => {
     }
     expect(await runInDurableObject(vault(j.id, owner.principal), (_o, s) => s.storage.sql.exec('SELECT id,hex(substr(ciphertext,1,32)) AS fingerprint FROM slots ORDER BY id').toArray())).toEqual(before);
   });
-  it('routes an authenticated agent to its person for reads and writes, denying foreign agents and link credentials', async () => {
+  it('routes agent reads to its person but refuses initialisation and every header write without mutation, denying foreign agents and links', async () => {
     const { owner, j } = await fixture(), agent = await addAgent(j, owner, 'readwrite');
     const path = `/v1/journeys/${j.id}/private-vault?slots=00,01`, putPath = `/v1/journeys/${j.id}/private-vault`;
     const read = async (auth: Record<string, string>) => {
@@ -85,13 +85,23 @@ describe('dedicated fixed ciphertext member vault in workerd SQLite', () => {
     };
     const own = await read(as(owner)), delegated = await read(await agentHeaders(agent, 'GET', path));
     expect(delegated).toEqual(own);
-    const patch = { token: own.token, frame: privateEncode(privateRandomBytes(PRIVATE_HEADER_BYTES)), slots: own.slots };
-    const bytes = encodeVaultPatch(patch), timestamp = String(Date.now()), nonce = newId();
-    const hash = base64url(new Uint8Array(await crypto.subtle.digest('SHA-256', Uint8Array.from(bytes).buffer)));
-    const signature = base64url(new Uint8Array(await crypto.subtle.sign('Ed25519', await importSigningKey(agent.signing.privateKey), new TextEncoder().encode(['PUT', putPath, hash, timestamp, nonce].join('\n')))));
-    const signed = { 'X-Agent-Session': agent.id, 'X-Agent-Timestamp': timestamp, 'X-Agent-Nonce': nonce, 'X-Agent-Signature': signature };
-    expect((await request(putPath, signed, bytes)).status).toBe(200);
-    const committed = await read(as(owner)); expect(committed.frame).toBe(patch.frame);
+    expect(own.frame).toBeNull();
+    const patch = { token: own.token, frame: privateEncode(privateRandomBytes(PRIVATE_HEADER_BYTES)), slots: own.slots.map(s => ({ index: s.index, ciphertext: privateEncode(privateRandomBytes(PRIVATE_SLOT_BYTES)) })) };
+    const denyWrite = async (token: string) => {
+      const bytes = encodeVaultPatch({ ...patch, token }), timestamp = String(Date.now()), nonce = newId();
+      const hash = base64url(new Uint8Array(await crypto.subtle.digest('SHA-256', Uint8Array.from(bytes).buffer)));
+      const signature = base64url(new Uint8Array(await crypto.subtle.sign('Ed25519', await importSigningKey(agent.signing.privateKey), new TextEncoder().encode(['PUT', putPath, hash, timestamp, nonce].join('\n')))));
+      const signed = { 'X-Agent-Session': agent.id, 'X-Agent-Timestamp': timestamp, 'X-Agent-Nonce': nonce, 'X-Agent-Signature': signature };
+      const denied = await request(putPath, signed, bytes);
+      expect(denied.status).toBe(403);
+      expect(await denied.json()).toEqual({ error: { code: 'forbidden', message: 'Agent credentials cannot initialise or write a person vault header.' } });
+    };
+    await denyWrite(own.token);
+    expect(await read(as(owner))).toEqual(own);
+    expect((await request(putPath, as(owner), encodeVaultPatch(patch))).status).toBe(200);
+    const committed = await read(as(owner)); expect(committed.frame).toBe(patch.frame); expect(committed.slots).toEqual(patch.slots);
+    await denyWrite(committed.token);
+    expect(await read(as(owner))).toEqual(committed);
     expect(await read(await agentHeaders(agent, 'GET', path))).toEqual(committed);
     const foreign = await fixture(), foreignAgent = await addAgent(foreign.j, foreign.owner, 'readwrite');
     expect((await request(path, await agentHeaders(foreignAgent, 'GET', path))).status).toBe(403);

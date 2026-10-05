@@ -79,11 +79,12 @@ export class JourneyClient {
     return { state: checked.state, epochs, log };
   }
   private privateController?: PrivateVault;
-  /** Explicit open lifetime for the agent's own vault. Connection alone never
-   * reads a person's vault or delivers a person's copy keys. */
+  /** Agent key delivery is not available yet. Never initialise the person's
+   * vault under this agent's identity or keys. */
   async openPrivateVault(paired?: PrivateCheckpoint): Promise<PrivateVault> {
     if (this.privateController) return this.privateController;
     const verified = await this.verified();
+    if (verified.state.members[this.session.principal]!.member.kind === 'agent') throw new Error('Person vault not available to this agent yet.');
     const controls = verified.log.map(row => JSON.parse(Buffer.from(row.entry, 'base64url').toString()) as { proof: ControlProof; envelope: Envelope });
     const context = await verifyPrivateContext({ journey: this.session.journeyId, creator: controls[0]!.proof.body.creator as Member, controls }, { now: Date.now(), currentHead: verified.state.lastHash! });
     const author = privateIdentity(verified.state.members[this.session.principal]!.member), signingKey = await importSigningKey(this.session.signingPrivateKey);
