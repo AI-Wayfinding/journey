@@ -315,6 +315,15 @@ test('two people share a journey with PRF passkeys and same-origin assets', asyn
     const afterRenameWraps = await (await alice.page.request.get('/v1' + journeyPath + '/wraps/me', { headers: { ...journeyHeaders, 'X-Principal': alicePrincipal } })).json() as { wraps: { epoch: number }[] };
     expect(afterRenameWraps.wraps.map(w => w.epoch)).toEqual(beforeRenameWraps.wraps.map(w => w.epoch));
     await expect(alice.page.locator('[data-rename]')).toHaveCount(1);
+    await alice.page.getByRole('link', { name: 'Account', exact: true }).click();
+    await expect(alice.page.locator('#account-agents')).toContainText('<renamed guide>');
+    await expect(alice.page.locator('#account-agents')).toContainText('Our shared path');
+    await expect(alice.page.locator('#account-agents')).toContainText('Access ends');
+    await expect(alice.page.locator('#account-agents strong')).toHaveText('<renamed guide>');
+    await bob.page.getByRole('link', { name: 'Account', exact: true }).click();
+    await expect(bob.page.locator('#account-agents')).toHaveText('No agents associated with your account.');
+    await bob.page.goto(itemPath);
+    await alice.page.locator('#account-agents').getByRole('link', { name: 'Our shared path' }).click();
     await alice.page.getByRole('link', { name: 'Back to journey' }).click();
     await expect(alice.page.getByRole('link', { name: 'Agent observation' })).toBeVisible();
     await alice.page.getByRole('link', { name: 'Agent observation' }).click();
@@ -372,7 +381,7 @@ test('two people share a journey with PRF passkeys and same-origin assets', asyn
     const supportPrincipal = ((await supportLists.json()) as { journeys: { id: string; principal: string }[] }).journeys.find(j => journeyPath.endsWith(j.id))!.principal;
     const supportWraps = await (await support.page.request.get(`/v1${journeyPath}/wraps/me`, { headers: { ...journeyHeaders, 'X-Principal': supportPrincipal } })).json() as { wraps: { epoch: number }[] };
     expect(supportWraps.wraps.map(w => w.epoch)).toEqual([1, newest.outside.epoch]);
-    expect((await support.page.request.post(`/v1${journeyPath}/seq`, { data: {}, headers: { ...journeyHeaders, 'X-Wayfinding': '1', Origin: 'http://localhost:18787', 'X-Principal': supportPrincipal } })).status()).toBe(403);
+    expect((await support.page.request.post(`/v1${journeyPath}/seq`, { data: {}, headers: { ...journeyHeaders, 'X-Wayfinding': '1', Origin: new URL(support.page.url()).origin, 'X-Principal': supportPrincipal } })).status()).toBe(403);
     expect(support.requests.every(url => new URL(url).hostname === 'localhost')).toBeTruthy();
   } finally { await alice.context.close(); await bob.context.close(); await support.context.close(); }
 });
@@ -429,6 +438,13 @@ test('an agent link is created, read as JSON, extended and revoked', async ({ br
     expect(data.page).toEqual({ number: 1, of: 1, next: null });
     const firstExpiry = Date.parse(data.access.expiresAt);
     expect(firstExpiry).toBeGreaterThan(Date.now() + 6 * 86_400_000);
+    await alice.page.getByRole('link', { name: 'Account', exact: true }).click();
+    await expect(alice.page.locator('#account-agents')).toContainText('Cowork helper');
+    await expect(alice.page.locator('#account-agents')).toContainText(`Access ends ${data.access.expiresAt}`);
+    await alice.page.goto(journeyPath);
+    await expect(alice.page.locator('#members-summary')).toHaveText('Person and 1 agent');
+    await alice.page.getByRole('link', { name: 'People & agents', exact: true }).click();
+    await expect(alice.page.getByRole('heading', { name: 'People in this journey' })).toBeVisible();
 
     // Extend it from the renewUrl anchor.
     await alice.page.goto(new URL(data.access.renewUrl).pathname + new URL(data.access.renewUrl).hash);
@@ -439,6 +455,10 @@ test('an agent link is created, read as JSON, extended and revoked', async ({ br
     await expect(alice.page.getByRole('heading', { name: 'People in this journey' })).toBeVisible();
     await expect.poll(async () => Date.parse(((await (await request.get(path)).json()) as typeof data).access.expiresAt), { timeout: 15_000 }).toBeGreaterThan(firstExpiry + 20 * 86_400_000);
     expect((await request.get(path)).status()).toBe(200); // The same URL still works.
+    const renewed = await (await request.get(path)).json() as typeof data;
+    await alice.page.getByRole('link', { name: 'Account', exact: true }).click();
+    await expect(alice.page.locator('#account-agents')).toContainText(`Access ends ${renewed.access.expiresAt}`);
+    await alice.page.locator('#account-agents').getByRole('link', { name: 'Link test journey' }).click();
 
     // Remove the agent: the link ends at once.
     alice.page.once('dialog', dialog => void dialog.accept());
@@ -446,6 +466,8 @@ test('an agent link is created, read as JSON, extended and revoked', async ({ br
     await expect(alice.page.locator('li', { hasText: 'Cowork helper' })).toHaveCount(0, { timeout: 30_000 });
     const gone = await request.get(path);
     expect(gone.status()).toBe(404);
+    await alice.page.getByRole('link', { name: 'Account', exact: true }).click();
+    await expect(alice.page.locator('#account-agents')).toHaveText('No agents associated with your account.');
     expect(await gone.json()).toMatchObject({ message: 'This agent link has ended. Ask the person for a new one.' });
   } finally { await alice.context.close(); }
 });

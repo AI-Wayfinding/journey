@@ -124,8 +124,9 @@ try {
   }
   for (const pkg of ['rules', 'core', 'server', 'web', 'client']) symlinkSync(join(tree, 'packages', pkg), join(tree, 'node_modules/@ai-wayfinding', pkg));
   mkdirSync(join(tree, '.scratch'), { recursive: true });
-  const buildRules = () => setup(process.execPath, ['../../scripts/bend.mjs', 'rules.bend', '-o', 'rules.mjs'], join(tree, 'packages/rules'));
-  const buildCore = () => setup(process.execPath, [join(tree, 'node_modules/typescript/bin/tsc')], join(tree, 'packages/core'));
+  // Core ships a copy of the rules runtime, so a rules rebuild must refresh core too.
+  const buildRules = () => { setup(process.execPath, ['../../scripts/bend.mjs', 'rules.bend', '-o', 'rules.mjs'], join(tree, 'packages/rules')); buildCore(); };
+  const buildCore = () => { setup(process.execPath, [join(tree, 'scripts/copy-core-rules.mjs')], tree); return setup(process.execPath, [join(tree, 'node_modules/typescript/bin/tsc')], join(tree, 'packages/core')); };
   buildRules(); buildCore();
   // One clean baseline for every named test proves that each mutation has a
   // runnable assertion, not a skipped/missing test or an already broken suite.

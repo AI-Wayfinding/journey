@@ -5,6 +5,7 @@
   ],
   "scripts": {
     "build:rules": "npm run build -w @ai-wayfinding/rules",
+    "check:rules": "node scripts/check-generated-rules.mjs",
     "build": "npm run build:rules && npm run build -w @ai-wayfinding/core && npm run build -w @ai-wayfinding/server && npm run build -w @ai-wayfinding/web && npm run build -w @ai-wayfinding/client"
   }
 }

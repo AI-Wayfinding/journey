@@ -1,5 +1,5 @@
-import rules from '@ai-wayfinding/rules';
-import type { PrivateCopy as RuleCopy, PrivateAction, PrivateCredential, ProjectInfo } from '@ai-wayfinding/rules';
+import rules from './rules/rules.mjs';
+import type { PrivateCopy as RuleCopy, PrivateAction, PrivateCredential, ProjectInfo } from './rules/rules.mjs';
 import { asBuffer, decode, encode, utf8 } from './codec.js';
 import { canonical } from './log.js';
 import type { Member, LogState } from './log.js';

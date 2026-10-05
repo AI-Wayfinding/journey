@@ -2,8 +2,8 @@ import { openIdentity, sealIdentity, deriveRecipient } from './keys.js';
 import type { AgeIdentity } from './keys.js';
 import { decode, encode, asBuffer, utf8 } from './codec.js';
 import { canonical } from './log.js';
-import rules from '@ai-wayfinding/rules';
-import type { PrivateBundleScope } from '@ai-wayfinding/rules';
+import rules from './rules/rules.mjs';
+import type { PrivateBundleScope } from './rules/rules.mjs';
 import {
   PRIVATE_FORMAT, privateObject, privateShape, validPrivateId, validatePrivateIdentity, copyPrivateIdentity,
   copyPrivateRecord, validatePrivateBlob, copyPrivateBlob, privateBytesHash, verifyPrivateContext,

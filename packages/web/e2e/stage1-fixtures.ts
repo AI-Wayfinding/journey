@@ -43,7 +43,7 @@ export async function change(page: Page, id: string, type: string, body: JsonObj
   const at = new Date().toISOString(), entry = { v: 1 as const, seq: verified.state.lastSeq + 1, prev: verified.state.lastHash, at, actor, type, body };
   const envelope = await sealControlLabels(entry, { id: newId(), journey: id, seq: entry.seq, epoch: key.epoch, createdAt: at }, key);
   const proof = await signControlProof(entry, envelope, id, await importSigningKey(secrets.signing));
-  const response = await page.request.post(`/v1/journeys/${id}/log`, { headers: { ...headers, ...extraHeaders, 'X-Wayfinding': '1', Origin: 'http://localhost:18787', 'X-Principal': actor }, data: { control: { proof, envelope } } });
+  const response = await page.request.post(`/v1/journeys/${id}/log`, { headers: { ...headers, ...extraHeaders, 'X-Wayfinding': '1', Origin: new URL(page.url()).origin, 'X-Principal': actor }, data: { control: { proof, envelope } } });
   expect(response.status(), await response.text()).toBe(201);
 }
 export async function joinTrip(owner: Page, guest: Page, path: string) {

@@ -21,20 +21,27 @@ function build() {
   assert(main.scripts.build.startsWith('npm run build:rules &&'), 'Rules must build first');
   for (const name of packages) {
     const consumer = JSON.parse(read(`packages/${name}/package.json`));
-    assert(consumer.scripts.build.startsWith('npm run build -w @ai-wayfinding/rules &&'), `${name} build ordering`);
-    assert.equal(consumer.dependencies[pkg.name], pkg.version, `${name} shared dependency`);
+    if (name === 'core' || name === 'client') {
+      assert.equal(consumer.dependencies[pkg.name], undefined, `${name} must not publish a private dependency`);
+      assert.equal(consumer.scripts.build, name === 'core' ? 'node ../../scripts/copy-core-rules.mjs && tsc' : 'tsc');
+    } else {
+      assert(consumer.scripts.build.startsWith('npm run build -w @ai-wayfinding/rules &&'), `${name} build ordering`);
+      assert.equal(consumer.dependencies[pkg.name], pkg.version, `${name} shared dependency`);
+    }
   }
-  assert.match(read('packages/core/src/rules.ts'), /import rules from '@ai-wayfinding\/rules'/);
+  assert.match(read('packages/core/src/rules.ts'), /import rules from '\.\/rules\/rules\.mjs'/);
   assert.match(read('packages/server/src/enclave.ts'), /import rules from '@ai-wayfinding\/rules'/);
   for (const name of ['web', 'client']) assert.match(read(`packages/${name}/src/journey.ts`), /canWriteContent/);
   const lock = JSON.parse(read('package-lock.json')).packages;
+  const version = JSON.parse(read('packages/core/package.json')).version;
   for (const name of ['core', 'client']) {
-    assert.equal(JSON.parse(read(`packages/${name}/package.json`)).version, '0.1.6');
-    assert.equal(lock[`packages/${name}`].version, '0.1.6');
+    assert.equal(JSON.parse(read(`packages/${name}/package.json`)).version, version);
+    assert.equal(lock[`packages/${name}`].version, version);
+    assert.equal(lock[`packages/${name}`].dependencies[pkg.name], undefined);
   }
   for (const name of ['server', 'web', 'client']) {
-    assert.equal(JSON.parse(read(`packages/${name}/package.json`)).dependencies['@ai-wayfinding/core'], '0.1.6');
-    assert.equal(lock[`packages/${name}`].dependencies['@ai-wayfinding/core'], '0.1.6');
+    assert.equal(JSON.parse(read(`packages/${name}/package.json`)).dependencies['@ai-wayfinding/core'], version);
+    assert.equal(lock[`packages/${name}`].dependencies['@ai-wayfinding/core'], version);
   }
   console.log('Bend clean build ordering and shared consumer imports passed');
 }

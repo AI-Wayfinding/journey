@@ -21,7 +21,7 @@ export async function attempt(page: Page, id: string, type: ProjectActionType | 
     ? await sealArtifactPayload(type, body, payload, outside, current.key)
     : await sealProjectPayload(type, body, payload, outside, current.key);
   const proof = await signControlProof({ v: 1, seq, prev: current.state.lastHash, at, actor: current.actor, type, body }, envelope, id, await importSigningKey(current.secrets.signing));
-  return page.request.post(`/v1/journeys/${id}/log`, { headers: { ...headers, 'X-Wayfinding': '1', Origin: 'http://localhost:18787', 'X-Principal': current.actor }, data: { control: { proof, envelope } } });
+  return page.request.post(`/v1/journeys/${id}/log`, { headers: { ...headers, 'X-Wayfinding': '1', Origin: new URL(page.url()).origin, 'X-Principal': current.actor }, data: { control: { proof, envelope } } });
 }
 export async function createProjectReload(page: Page, path: string, purpose: string) {
   await page.goto(path + '/projects'); await page.getByLabel('Purpose', { exact: true }).fill(purpose);
