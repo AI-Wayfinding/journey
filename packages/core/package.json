@@ -16,15 +16,14 @@
     "README.md"
   ],
   "scripts": {
-    "typecheck": "tsc --noEmit",
-    "build": "npm run build -w @ai-wayfinding/rules && tsc",
+    "typecheck": "node ../../scripts/copy-core-rules.mjs && tsc --noEmit",
+    "build": "node ../../scripts/copy-core-rules.mjs && tsc",
     "test": "vitest run",
     "test:workers": "vitest run --config vitest.workers.config.ts",
     "test:browser": "vitest run --config vitest.browser.config.ts"
   },
   "dependencies": {
-    "age-encryption": "^0.3.1",
-    "@ai-wayfinding/rules": "0.1.0"
+    "age-encryption": "^0.3.1"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.22.0",

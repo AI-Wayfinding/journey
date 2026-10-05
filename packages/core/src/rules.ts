@@ -1,5 +1,5 @@
-import rules from '@ai-wayfinding/rules';
-import type { Control, List, Member as RuleMember, Role, Transition, JourneySettings, JourneyControl } from '@ai-wayfinding/rules';
+import rules from './rules/rules.mjs';
+import type { Control, List, Member as RuleMember, Role, Transition, JourneySettings, JourneyControl } from './rules/rules.mjs';
 import { ruleVersion } from './versions.js';
 import type { LogState, Member } from './log.js';
 
@@ -122,7 +122,7 @@ export function normalizedArtifacts(state: LogState, body: import('./types.js').
   for (const field of ['artifact', 'author', 'actor', 'version', 'predecessor', 'typeHash', 'comment', 'onVersion']) if (typeof body[field] === 'string') strings.push(body[field]);
   if (Array.isArray(body.blobs)) for (const blob of body.blobs as import('./artifacts.js').BlobDescriptor[]) strings.push(blob.id);
   const model = normalizedMembers(state, strings, now);
-  const index: import('@ai-wayfinding/rules').ArtifactIndex = { $: 'ArtifactIndex', used: ruleList([...history.used, ...Object.keys(state.projects?.items ?? {})].map(model.id)), items: ruleList(Object.values(history.items).map(item => ({
+  const index: import('./rules/rules.mjs').ArtifactIndex = { $: 'ArtifactIndex', used: ruleList([...history.used, ...Object.keys(state.projects?.items ?? {})].map(model.id)), items: ruleList(Object.values(history.items).map(item => ({
     $: 'Artifact' as const, id: model.id(item.id), author: model.id(item.author), typeHash: model.id(item.typeHash), head: model.id(item.head), deleted: item.deleted,
     versions: ruleList(item.versions.map(v => ({ $: 'ArtifactVersion' as const, id: model.id(v.id), writer: model.id(v.actor), blobs: ruleList(v.blobs.map(b => model.id(b.id))) }))),
   }))) };
@@ -131,7 +131,7 @@ export function normalizedArtifacts(state: LogState, body: import('./types.js').
 export function replayArtifact(state: LogState, type: import('./artifacts.js').ArtifactActionType, body: import('./types.js').JsonObject, actor: string, now?: number) {
   const { model, index } = normalizedArtifacts(state, body, actor, now);
   const common = { id: model.id(body.artifact as string), author: model.id(body.author as string), writer: model.id(body.actor as string) };
-  let action: import('@ai-wayfinding/rules').ArtifactAction;
+  let action: import('./rules/rules.mjs').ArtifactAction;
   if (type === 'artifact.create' || type === 'artifact.version') {
     const version = { version: model.id(body.version as string), typeHash: model.id(body.typeHash as string), blobs: ruleList((body.blobs as import('./artifacts.js').BlobDescriptor[]).map(b => model.id(b.id))) };
     action = type === 'artifact.create' ? { $: 'ArtifactCreate', ...common, ...version } : { $: 'ArtifactEdit', ...common, ...version, predecessor: model.id(body.predecessor as string) };
@@ -158,20 +158,20 @@ export function normalizedProjects(state: LogState, body: JsonObject = {}, actor
   const { model, index: artifacts } = normalizedArtifacts(state, {}, actor, now, strings);
   // Shift only project identifiers: the artifact/member namespace remains aligned.
   const projectId = (value: string | null) => value === null ? 0n : model.id(value) + 1n;
-  const index: import('@ai-wayfinding/rules').ProjectIndex = { $: 'ProjectIndex',
+  const index: import('./rules/rules.mjs').ProjectIndex = { $: 'ProjectIndex',
     items: ruleList(Object.values(history.items).map(p => ({ $: 'ProjectInfo' as const, id: projectId(p.id), revision: revision(p.revision), phase: { $: phases[p.state] } }))),
     pairs: ruleList(history.participation.map(p => ({ $: 'Participation' as const, project: projectId(p.project), person: model.id(p.member), revision: revision(p.revision), active: p.active }))),
     placements: ruleList(Object.values(history.placements).map(p => ({ $: 'Placement' as const, artifact: model.id(p.artifact), project: projectId(p.project), revision: revision(p.revision) }))),
   };
   // Project IDs are shifted, so translate used IDs to that same namespace for collision checks.
-  const reserved: import('@ai-wayfinding/rules').ArtifactIndex = { $: 'ArtifactIndex', items: artifacts.items, used: ruleList((state.artifacts?.used ?? []).map(v => model.id(v) + 1n)) };
+  const reserved: import('./rules/rules.mjs').ArtifactIndex = { $: 'ArtifactIndex', items: artifacts.items, used: ruleList((state.artifacts?.used ?? []).map(v => model.id(v) + 1n)) };
   return { model, index, artifacts, reserved, projectId };
 }
 export function replayProject(state: LogState, type: ProjectActionType, body: JsonObject, actor: string, now?: number) {
   const { model, index, reserved, projectId } = normalizedProjects(state, body, actor, now);
   const id = projectId(body.project as string | null);
   const predecessor = revision((body.predecessor ?? null) as number | null);
-  let action: import('@ai-wayfinding/rules').ProjectAction;
+  let action: import('./rules/rules.mjs').ProjectAction;
   switch (type) {
     case 'project.create': action = { $: 'ProjectCreate', id }; break;
     case 'project.purpose': action = { $: 'ProjectPurpose', id, predecessor }; break;

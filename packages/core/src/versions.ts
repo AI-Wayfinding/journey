@@ -1,5 +1,5 @@
-import rules from '@ai-wayfinding/rules';
-import type { Version } from '@ai-wayfinding/rules';
+import rules from './rules/rules.mjs';
+import type { Version } from './rules/rules.mjs';
 export const PROTOCOL_VERSION = 1 as const;
 export const CLIENT_VERSION = '0.1.7' as const;
 export const CONTROL_FORMAT = 'control-proof-v1' as const;
