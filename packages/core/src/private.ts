@@ -153,6 +153,14 @@ export function privateAccess(context: PrivateContext, author: PrivateIdentity, 
   return write ? rules.private_write(model.members, model.id(binding.principal), model.id(actor.binding.principal), auth.credential, ruleVersion(data.state.minClientVersion), data.state.pendingRotation === true, data.current)
     : rules.private_audience(model.members, model.id(binding.principal), model.id(actor.binding.principal), auth.credential);
 }
+export function privateAgentAudience(context: PrivateContext, author: PrivateIdentity, agent: PrivateIdentity): boolean {
+  if (agent.kind !== 'agent' || author.kind !== 'person') return false;
+  try {
+    const data = contextData(context), person = privateBinding(context, author), actor = privateBinding(context, agent);
+    const model = normalizedMembers(data.state, [person.principal, actor.principal], data.now);
+    return rules.private_audience(model.members, model.id(person.principal), model.id(actor.principal), { $: 'PrivateAuthenticatedAgent' });
+  } catch { return false; }
+}
 
 export function validatePrivateBlob(v: unknown): v is PrivateBlob {
   return exact(v, ['v', 'vault', 'copy', 'id', 'generation', 'size', 'ciphertextSize', 'nonce', 'digest', 'contentHash']) && privateObject(v) && v.v === 1 && validPrivateId(v.vault) && validPrivateId(v.copy) && validPrivateId(v.id) && positive(v.generation) && nonnegative(v.size) && v.size <= MAX_BLOB_BYTES && v.ciphertextSize === v.size + 16 && base64(v.nonce, 12) && validDigest(v.digest) && validDigest(v.contentHash);
@@ -379,23 +387,32 @@ export function selectPrivateCopies(view: PrivateView, context: PrivateContext, 
   return values.filter(v => v.journey === context.journey && rules.private_selected(ruleCopy(v, id), chosen, privateAccess(context, v.author, actor)));
 }
 
-export interface PrivateHeader { format: 'private-v1'; v: 1; vault: string; author: PrivateIdentity; version: number; prev: string | null; contentsHash: string; slots: string[]; sig: string }
+export interface PrivateHeader { format: 'private-v1'; v: 1; vault: string; author: PrivateIdentity; version: number; prev: string | null; contentsHash: string; slots: string[]; writer?: PrivateIdentity; authority?: PrivateAuthority; sig: string }
 export interface PrivateCheckpoint { vault: string; author: PrivateIdentity; version: number; head: string; prev: string | null; freshness: 'paired' | 'unverified' }
 export interface PrivatePatch { format: 'private-v1'; v: 1; vault: string; token: string; header: PrivateHeader; slots: { index: number; ciphertext: string }[] }
 export function copyPrivateHeader(h: PrivateHeader): PrivateHeader {
-  if (!exact(h, ['format', 'v', 'vault', 'author', 'version', 'prev', 'contentsHash', 'slots', 'sig']) || h.format !== PRIVATE_FORMAT || h.v !== 1 || !validPrivateId(h.vault) || !validatePrivateIdentity(h.author) || !positive(h.version) || !(h.prev === null || validDigest(h.prev)) || !validDigest(h.contentsHash) || !Array.isArray(h.slots) || h.slots.length !== PRIVATE_SLOT_COUNT || !h.slots.every(validDigest) || !base64(h.sig, 64)) throw new Error('Invalid private signed header');
-  return { format: PRIVATE_FORMAT, v: 1, vault: h.vault, author: copyPrivateIdentity(h.author), version: h.version, prev: h.prev, contentsHash: h.contentsHash, slots: h.slots.slice(), sig: h.sig };
+  const delegated = Object.hasOwn(h, 'writer') || Object.hasOwn(h, 'authority');
+  if (!exact(h, ['format', 'v', 'vault', 'author', 'version', 'prev', 'contentsHash', 'slots', 'sig', ...(delegated ? ['writer', 'authority'] : [])]) || h.format !== PRIVATE_FORMAT || h.v !== 1 || !validPrivateId(h.vault) || !validatePrivateIdentity(h.author) || !positive(h.version) || !(h.prev === null || validDigest(h.prev)) || !validDigest(h.contentsHash) || !Array.isArray(h.slots) || h.slots.length !== PRIVATE_SLOT_COUNT || !h.slots.every(validDigest) || !base64(h.sig, 64) || delegated && (!validatePrivateIdentity(h.writer) || h.writer.kind !== 'agent' || !validateAuthority(h.authority))) throw new Error('Invalid private signed header');
+  return { format: PRIVATE_FORMAT, v: 1, vault: h.vault, author: copyPrivateIdentity(h.author), version: h.version, prev: h.prev, contentsHash: h.contentsHash, slots: h.slots.slice(), ...(delegated ? { writer: copyPrivateIdentity(h.writer!), authority: copyAuthority(h.authority!) } : {}), sig: h.sig };
 }
-function unsignedHeader(h: PrivateHeader): Omit<PrivateHeader, 'sig'> { return { format: h.format, v: h.v, vault: h.vault, author: h.author, version: h.version, prev: h.prev, contentsHash: h.contentsHash, slots: h.slots }; }
+function unsignedHeader(h: PrivateHeader): Omit<PrivateHeader, 'sig'> { return { format: h.format, v: h.v, vault: h.vault, author: h.author, version: h.version, prev: h.prev, contentsHash: h.contentsHash, slots: h.slots, ...(h.writer ? { writer: h.writer, authority: h.authority } : {}) }; }
 export async function signPrivateHeader(h: Omit<PrivateHeader, 'sig'>, key: CryptoKey): Promise<PrivateHeader> {
-  if (!exact(h, ['format', 'v', 'vault', 'author', 'version', 'prev', 'contentsHash', 'slots'])) throw new Error('Invalid unsigned private header');
-  const clean = copyPrivateHeader({ format: h.format, v: h.v, vault: h.vault, author: h.author, version: h.version, prev: h.prev, contentsHash: h.contentsHash, slots: h.slots, sig: encode(new Uint8Array(64)) });
+  if (!exact(h, ['format', 'v', 'vault', 'author', 'version', 'prev', 'contentsHash', 'slots', ...(h.writer ? ['writer', 'authority'] : [])])) throw new Error('Invalid unsigned private header');
+  const clean = copyPrivateHeader({ format: h.format, v: h.v, vault: h.vault, author: copyPrivateIdentity(h.author), version: h.version, prev: h.prev, contentsHash: h.contentsHash, slots: h.slots.slice(), ...(h.writer ? { writer: copyPrivateIdentity(h.writer), authority: copyAuthority(h.authority!) } : {}), sig: encode(new Uint8Array(64)) });
   clean.sig = await signPrivateMessage(unsignedHeader(clean), key); return clean;
 }
-export async function verifyPrivateHeader(value: PrivateHeader, trust: { vault: string; author: PrivateIdentity }, options: { checkpoint?: PrivateCheckpoint; paired?: PrivateCheckpoint; contentsHash: string }): Promise<{ header: PrivateHeader; checkpoint: PrivateCheckpoint; decision: 'verified' | 'unverified' | 'merge' }> {
+export async function verifyPrivateHeader(value: PrivateHeader, trust: { vault: string; author: PrivateIdentity }, options: { checkpoint?: PrivateCheckpoint; paired?: PrivateCheckpoint; contentsHash: string; contexts?: readonly PrivateContext[] }): Promise<{ header: PrivateHeader; checkpoint: PrivateCheckpoint; decision: 'verified' | 'unverified' | 'merge' }> {
   const h = copyPrivateHeader(value);
   if (h.vault !== trust.vault || !sameIdentity(h.author, trust.author) || h.contentsHash !== options.contentsHash) throw new Error('Private header binding/digest mismatch');
-  await verifySignature(h.author, unsignedHeader(h), h.sig);
+  if (h.writer) {
+    const authority = h.authority!, context = options.contexts?.find(c => c.journey === authority.journey);
+    if (!context || h.version === 1) throw new Error('Private agent header authority denied');
+    const data = contextData(context), binding = privateBinding(context, h.writer);
+    if (!(await Promise.all(data.history.controls.map(row => hashControlProof(row.proof)))).includes(authority.head) || canonical(binding) !== canonical({ journey: authority.journey, principal: authority.principal, admissionHash: authority.admissionHash })) throw new Error('Private agent header admission mismatch');
+    const model = normalizedMembers(data.state, [binding.principal, privateBinding(context, h.author).principal], Math.max(data.now, Date.now()));
+    if (!rules.private_write(model.members, model.id(privateBinding(context, h.author).principal), model.id(binding.principal), { $: 'PrivateAuthenticatedAgent' }, ruleVersion(data.state.minClientVersion), data.state.pendingRotation === true, data.current)) throw new Error('Private agent header authority denied');
+  }
+  await verifySignature(h.writer ?? h.author, unsignedHeader(h), h.sig);
   // The trusted input comes from a paired device, not the journey server. A
   // signature authorizes skipped versions; no unbounded ancestry is transported.
   for (const retained of [options.checkpoint, options.paired]) if (retained && (!exact(retained, ['vault', 'author', 'version', 'head', 'prev', 'freshness']) || retained.vault !== h.vault || !sameIdentity(retained.author, h.author) || !positive(retained.version) || !validDigest(retained.head) || !(retained.prev === null || validDigest(retained.prev)) || !['paired', 'unverified'].includes(retained.freshness))) throw new Error('Invalid retained private checkpoint');

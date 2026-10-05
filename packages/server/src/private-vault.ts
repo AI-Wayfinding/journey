@@ -11,6 +11,7 @@ export class PrivateVaultObject {
   constructor(private state: DurableObjectState) {
     state.storage.sql.exec('CREATE TABLE IF NOT EXISTS head (id INTEGER PRIMARY KEY CHECK(id=1), token TEXT NOT NULL, frame BLOB)');
     state.storage.sql.exec('CREATE TABLE IF NOT EXISTS slots (id INTEGER PRIMARY KEY, ciphertext BLOB NOT NULL)');
+    state.storage.sql.exec('CREATE TABLE IF NOT EXISTS agent_wraps (agent TEXT PRIMARY KEY, ciphertext TEXT NOT NULL, expires INTEGER NOT NULL)');
   }
   async allocate(): Promise<void> {
     if (this.state.storage.sql.exec('SELECT token FROM head WHERE id=1').toArray().length) return;
@@ -36,19 +37,42 @@ export class PrivateVaultObject {
     const slots = wanted.map(index => ({ index, ciphertext: encode(new Uint8Array(this.state.storage.sql.exec<{ ciphertext: ArrayBuffer }>('SELECT ciphertext FROM slots WHERE id=?', index).one().ciphertext)) }));
     return { token: head.token, frame: head.frame ? encode(new Uint8Array(head.frame)) : null, slots };
   }
-  async commit(patch: VaultPatch): Promise<{ token: string } | null> {
+  async commit(patch: VaultPatch, agent = false): Promise<{ token: string } | null> {
     const token = randomToken(), frame = privateDecode(patch.frame, PRIVATE_HEADER_BYTES), slots = patch.slots.map(s => ({ index: s.index, bytes: privateDecode(s.ciphertext, PRIVATE_SLOT_BYTES) }));
     return this.state.storage.transactionSync(() => {
-      const head = this.state.storage.sql.exec<{ token: string }>('SELECT token FROM head WHERE id=1').one();
+      const head = this.state.storage.sql.exec<{ token: string; frame: ArrayBuffer | null }>('SELECT token,frame FROM head WHERE id=1').one();
+      if (agent && !head.frame) throw new Error('Agent initialisation denied');
       if (head.token !== patch.token) return null;
       for (const row of slots) this.state.storage.sql.exec('UPDATE slots SET ciphertext=? WHERE id=?', row.bytes, row.index);
       this.state.storage.sql.exec('UPDATE head SET token=?,frame=? WHERE id=1', token, frame); return { token };
     });
   }
+  async alarm(): Promise<void> {
+    this.state.storage.sql.exec('DELETE FROM agent_wraps WHERE expires<=?', Date.now());
+    const next = this.state.storage.sql.exec<{ expires: number }>('SELECT MIN(expires) AS expires FROM agent_wraps').one().expires;
+    if (next) await this.state.storage.setAlarm(next);
+  }
   async fetch(request: Request): Promise<Response> {
     try {
       const url = new URL(request.url);
       if (request.method === 'POST' && url.pathname === '/allocate') { await this.allocate(); return Response.json({ ok: true }); }
+      if (url.pathname === '/agent-wrap') {
+        this.state.storage.sql.exec('DELETE FROM agent_wraps WHERE expires<=?', Date.now());
+        const agent = url.searchParams.get('agent'); if (!agent) return failure('invalid-request', 400);
+        if (request.method === 'DELETE') { this.state.storage.sql.exec('DELETE FROM agent_wraps WHERE agent=?', agent); return new Response(null, { status: 204 }); }
+        if (request.method === 'GET') {
+          const row = this.state.storage.sql.exec<{ ciphertext: string }>('SELECT ciphertext FROM agent_wraps WHERE agent=?', agent).toArray()[0];
+          return row ? Response.json({ ciphertext: row.ciphertext }, { headers: { 'Cache-Control': 'no-store' } }) : failure('not-found', 404);
+        }
+        if (request.method === 'PUT') {
+          const value = await request.json() as { ciphertext: string; expires: number };
+          if (!this.state.storage.sql.exec('SELECT frame FROM head WHERE frame IS NOT NULL').toArray().length) return failure('conflict', 409);
+          this.state.storage.sql.exec('INSERT OR REPLACE INTO agent_wraps VALUES(?,?,?)', agent, value.ciphertext, value.expires);
+          await this.state.storage.setAlarm(Date.now() + 60000);
+          return Response.json({ ok: true });
+        }
+        return failure('invalid-request', 400);
+      }
       if (request.method === 'GET') {
         const q = url.searchParams.get('slots');
         if (q !== 'all' && !/^\d{2},\d{2}$/.test(q ?? '')) return failure('invalid-request', 400);
@@ -69,10 +93,10 @@ export class PrivateVaultObject {
         try {
           if (reader) for (;;) { const part = await reader.read(); if (part.done) break; if (count + part.value.length > expected) return failure('invalid-request', 400); bytes.set(part.value, count); count += part.value.length; }
           if (count !== expected) return failure('invalid-request', 400);
-          const result = await this.commit(decodeVaultPatch(bytes)); return result ? Response.json(result) : failure('conflict', 409);
+          const result = await this.commit(decodeVaultPatch(bytes), request.headers.get('X-Private-Agent') === '1'); return result ? Response.json(result) : failure('conflict', 409);
         } finally { await reader?.cancel().catch(() => {}); }
       }
       return failure('invalid-request', 400);
-    } catch { return failure('invalid-request', 400); }
+    } catch (error) { return error instanceof Error && error.message === 'Agent initialisation denied' ? failure('forbidden', 403) : failure('invalid-request', 400); }
   }
 }

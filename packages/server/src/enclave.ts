@@ -179,8 +179,18 @@ export class EnclaveObject {
         const principal = member.kind === 'agent' ? member.addedBy : member.id;
         if (!principal || state.members[principal]?.member.kind !== 'person') return failure('forbidden', 403);
         const model = normalizedMembers(state, [subject.principal, principal], now);
-        const allowed = rules.private_audience(model.members, model.id(principal), model.id(subject.principal), { $: subject.agent ? subject.privateCredential === 'authenticated' ? 'PrivateAuthenticatedAgent' : 'PrivateUnknownCredential' : 'PrivatePersonCredential' });
+        const credential = { $: subject.agent ? subject.privateCredential === 'authenticated' ? 'PrivateAuthenticatedAgent' as const : 'PrivateUnknownCredential' as const : 'PrivatePersonCredential' as const };
+        const allowed = input.write && subject.agent ? rules.private_write(model.members, model.id(principal), model.id(subject.principal), credential, ruleVersion(state.minClientVersion), state.pendingRotation === true, true) : rules.private_audience(model.members, model.id(principal), model.id(subject.principal), credential);
         return allowed ? Response.json({ allowed: true, principal }) : failure('forbidden', 403);
+      }
+      case 'privateWrapAccess': {
+        const member = state.members[subject.principal]!.member, agent = state.members[input.agent]?.member;
+        const person = member.kind === 'agent' ? member.addedBy : member.id;
+        if (!person || !agent || agent.kind !== 'agent' || subject.agent && (input.ciphertext !== undefined || subject.privateCredential !== 'authenticated' || input.agent !== subject.principal)) return failure('forbidden', 403);
+        const model = normalizedMembers(state, [person, input.agent], now);
+        if (!rules.private_audience(model.members, model.id(person), model.id(input.agent), { $: 'PrivateAuthenticatedAgent' })) return failure('forbidden', 403);
+        const stub = this.env.PRIVATE_VAULTS.get(this.env.PRIVATE_VAULTS.idFromName(JSON.stringify([state.journey, person])));
+        return stub.fetch('https://internal/agent-wrap?agent=' + encodeURIComponent(input.agent), input.ciphertext ? { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ciphertext: input.ciphertext, expires: Date.parse(agent.expiresAt!) }) } : {});
       }
       case 'access': return Response.json({ allowed: true, epoch: state.currentEpoch });
       case 'inviteAccess': return isPersonGuide(state, subject.principal) && !subject.agent ? Response.json({ allowed: true }) : failure('forbidden', 403);
@@ -327,6 +337,14 @@ export class EnclaveObject {
       if (admission) this.sql.exec('INSERT INTO principals(id,kind,scope,accountHash,addedBy) VALUES(?,?,?,?,?)', admission.id, admission.kind, admission.scope ?? 'readwrite', admission.accountHash ?? null, admission.kind === 'agent' ? subject.principal : null);
       for (const w of supplied) this.sql.exec('INSERT INTO wraps VALUES(?,?,?)', w.principal, w.epoch, w.wrap);
     });
+    // Serialized with wrap delivery: no late PUT can resurrect a removed wrap.
+    for (const id of removed) {
+      const agent = state.members[id]!.member;
+      if (agent.kind === 'agent' && agent.addedBy) {
+        const stub = this.env.PRIVATE_VAULTS.get(this.env.PRIVATE_VAULTS.idFromName(JSON.stringify([state.journey, agent.addedBy])));
+        await stub.fetch('https://internal/agent-wrap?agent=' + encodeURIComponent(id), { method: 'DELETE' });
+      }
+    }
     return Response.json({ seq: proof.seq, memberDelta: Object.keys(next.members).length - Object.keys(state.members).length, removed, minClientVersion: next.minClientVersion }, { status: 201 });
   }
   private admission(member: Member, admission: Admission | undefined, subject: Subject, model: ReturnType<typeof normalizedMembers>, now: number): boolean {

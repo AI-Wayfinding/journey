@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { createAgeIdentity, createSigningIdentity, generateJourneyKey, hashControlProof, importSigningKey, newId, newPrivateId, privateHash, privateBytesHash, signPrivateHeader, verifyPrivateHeader, sealPrivateFrame, sealControlLabels, signControlProof, wrapJourneyKey, PRIVATE_SLOT_BYTES } from '@ai-wayfinding/core';
+import { createAgeIdentity, createSigningIdentity, generateJourneyKey, hashControlProof, importSigningKey, newId, newPrivateId, privateHash, privateBytesHash, signPrivateHeader, verifyPrivateHeader, sealPrivateFrame, sealControlLabels, signControlProof, wrapJourneyKey, PRIVATE_SLOT_BYTES, PrivateVault, verifyPrivateContext, memberVaultId, privateIdentity, privatePersonSession, privateAuthorityHistory, privateAuthority, signPrivateRecord, artifactTypeHash, privateRandomBytes,  decodeVaultPatch, openVaultAgentWrap } from '@ai-wayfinding/core';
 import type { ControlProof, Envelope, JsonObject, VaultOptions, VaultCacheRecord } from '@ai-wayfinding/core';
 import { JourneyClient } from '../src/journey.js';
 import type { RememberedAgent } from '../src/storage.js';
-import { NodePrivateStore, rememberNodePrivateVault } from '../src/private-store.js';
+import { NodePrivateStore, rememberNodePrivateVault, openPersonPrivateVault } from '../src/private-store.js';
 import { forgetRemembered } from '../src/storage.js';
 
 async function fixture() {
@@ -21,7 +21,7 @@ async function fixture() {
 }
 
 describe('Node private encrypted checkpoint cache', () => {
-  it('refuses an agent vault open before private transport or cache mutation instead of initialising under agent keys', async () => {
+  it('delivers a person key at approval/backfill; the agent reads and writes the same vault with its own keys, then fails after removal', async () => {
     const scratch = resolve('../..', '.scratch', 'stage3-node'); await mkdir(scratch, { recursive: true }); const folder = await mkdtemp(join(scratch, 'agent-'));
     try {
       const f = await fixture(), journeyId = newId(), principal = newId(), ownerId = newId(), owner = await fixture(), key = generateJourneyKey();
@@ -32,11 +32,44 @@ describe('Node private encrypted checkpoint cache', () => {
         controls.push({ seq: entry.seq, envelope, proof: await signControlProof(entry, envelope, journeyId, owner.options.signingKey) });
       };
       await append('genesis', { journey: journeyId, name: 'Test journey', creator: { id: ownerId, kind: 'person', recipient: owner.age.recipient, signingKey: owner.signing.publicKey }, grants: ['members.manage'], mode: 'sealed', visibility: 'private', minClientVersion: '0.1.7' });
-      await append('member.add', { member: { id: principal, kind: 'agent', recipient: f.age.recipient, signingKey: f.signing.publicKey, scope: 'readwrite', addedBy: ownerId, expiresAt: new Date(Date.now() + 3_600_000).toISOString() }, grants: [], kind: 'agent' });
+      const agent = { id: principal, kind: 'agent' as const, recipient: f.age.recipient, signingKey: f.signing.publicKey, scope: 'readwrite' as const, addedBy: ownerId, expiresAt: new Date(Date.now() + 3_600_000).toISOString() };
+      await append('member.add', { member: agent, grants: [], kind: 'agent' });
       const wrap = (await wrapJourneyKey(key, [{ id: principal, recipient: f.age.recipient }]))[0]!;
       const session: RememberedAgent = { server: 'https://app.wayfinding.support', journeyId, sessionId: newId(), principal, identity: f.age.identity, recipient: f.age.recipient, signingPrivateKey: f.signing.privateKey, signingKey: f.signing.publicKey, scope: 'readwrite', expiresAt: Date.now() + 3_600_000 };
-      const fetcher = vi.fn(async (url: string | URL | Request): Promise<Response> => {
+      const context = await verifyPrivateContext({ journey: journeyId, creator: controls[0]!.proof.body.creator as import('@ai-wayfinding/core').Member, controls }, { now: Date.now(), currentHead: await hashControlProof(controls.at(-1)!.proof) });
+      const author = owner.options.trust.author, vault = await memberVaultId(journeyId, ownerId, author.signingKey, author.recipient), personSession = await privatePersonSession(context, author, owner.options.signingKey, owner.age.identity);
+      let time = 0, token = 0, frame: string | null = null, removed = false;
+      const slots = Array<string>(64).fill(Buffer.alloc(PRIVATE_SLOT_BYTES).toString('base64'));
+      const transport: VaultOptions['transport'] = {
+        read: async indices => ({ token: token.toString(16).padStart(64, '0'), frame, slots: (indices === 'all' ? Array.from({ length: 64 }, (_, i) => i) : indices).map(index => ({ index, ciphertext: slots[index]! })) }),
+        commit: async patch => { expect(patch.token).toBe(token.toString(16).padStart(64, '0')); frame = patch.frame; for (const slot of patch.slots) slots[slot.index] = slot.ciphertext; return { token: (++token).toString(16).padStart(64, '0') }; },
+      };
+      const options: VaultOptions = { identity: owner.age.identity, signingKey: owner.options.signingKey, trust: { vault, author }, contexts: [context], sessions: [personSession], transport, now: () => time, randomOrder: () => Array.from({ length: 64 }, (_, i) => i) };
+      let delivered = '';
+      const delivery = { agents: async () => [agent], put: async (id: string, ciphertext: string) => { expect(id).toBe(principal); delivered = ciphertext; } };
+      const person = await openPersonPrivateVault(options, context, delivery); expect(delivered).toBeTruthy();
+      const contentIdentity = await openVaultAgentWrap(delivered, { journey: journeyId, person: ownerId, agent: principal, vault, author, recipient: privateIdentity(agent) }, f.age.identity);
+      expect(contentIdentity).not.toBe(owner.age.identity); expect(contentIdentity).not.toBe(owner.signing.privateKey);
+      const copy = newPrivateId(), artifact = newPrivateId(), payload = { type: 'artifact.content', typeVersion: 1, body: { title: 'From person', tags: [], content: { kind: 'document', markdown: 'Private text' }, attachments: [] } };
+      const first = await signPrivateRecord({ format: 'private-v1', v: 1, id: newId(), vault, copy, seq: 0, prev: null, at: new Date().toISOString(), actor: author, authority: privateAuthority(context, author), type: 'private.create', body: { artifact, author: { ...author }, actor: { ...author }, version: newId(), typeHash: await artifactTypeHash('document'), blobs: [], predecessor: null }, payloadHash: await privateHash(payload) }, owner.options.signingKey);
+      const bundle: import('@ai-wayfinding/core').PrivateBundle = { format: 'private-v1', version: 1, vault, author, scope: 'author-backup', authorityHistories: [privateAuthorityHistory(context)], records: [first], payloads: [{ record: first.id, payload }], copyKeys: [{ copy, key: Buffer.from(privateRandomBytes(32)).toString('base64') }], blobs: [], unavailableDeletedBlobs: [] };
+      await person.stage(bundle); time = 300000; await person.tick(); person.close();
+      const backfilled = await openPersonPrivateVault(options, context, delivery); expect(delivered).toBeTruthy(); backfilled.close();
+      const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
         const path = new URL(String(url)).pathname;
+        if (removed) return Response.json({ error: { code: 'forbidden' } }, { status: 403 });
+        if (path.endsWith('/private-agent-wrap/' + principal)) return Response.json({ ciphertext: delivered });
+        if (path.endsWith('/private-vault')) {
+          if (init?.method === 'PUT') return Response.json(await transport.commit(decodeVaultPatch(new Uint8Array(init.body as Uint8Array))));
+          const query = new URL(String(url)).searchParams.get('slots')!;
+          const indices = query === 'all' ? 'all' : query.split(',').map(Number);
+          const wire = await transport.read(indices), frameBytes = 32768;
+          const bytes = new Uint8Array(65 + frameBytes + wire.slots.length * (1 + PRIVATE_SLOT_BYTES));
+          bytes.set(new TextEncoder().encode(wire.token)); bytes[64] = wire.frame ? 1 : 0;
+          if (wire.frame) bytes.set(Buffer.from(wire.frame, 'base64'), 65);
+          let offset = 65 + frameBytes; for (const row of wire.slots) { bytes[offset++] = row.index; bytes.set(Buffer.from(row.ciphertext, 'base64'), offset); offset += PRIVATE_SLOT_BYTES; }
+          return new Response(bytes);
+        }
         if (path.endsWith('/protocol')) return Response.json({ minClientVersion: '0.1.7', controlFormat: 'control-proof-v1', artifactFormat: 'artifact-v1', projectFormat: 'project-v1', privateFormat: 'private-v1' });
         if (path.endsWith('/log')) return Response.json({ log: controls });
         if (path.endsWith('/wraps/me')) return Response.json({ wraps: [{ epoch: 1, wrap: wrap.ciphertext }] });
@@ -45,13 +78,26 @@ describe('Node private encrypted checkpoint cache', () => {
       const cacheRead = vi.spyOn(NodePrivateStore.prototype, 'read'), cacheCommit = vi.spyOn(NodePrivateStore.prototype, 'commit');
       const client = new JourneyClient(session, { fetch: fetcher, cacheRoot: folder });
       try {
-        for (let attempt = 0; attempt < 2; attempt++) await expect(client.openPrivateVault()).rejects.toThrow('Person vault not available to this agent yet.');
-        expect(fetcher.mock.calls.some(([url]) => String(url).includes('/private-vault'))).toBe(false);
-        expect(cacheRead).not.toHaveBeenCalled(); expect(cacheCommit).not.toHaveBeenCalled();
-        expect((await readdir(folder)).every(name => !/^[a-f0-9]{64}$/.test(name))).toBe(true);
+        const controller = await client.openPrivateVault();
+        expect(controller.branches[0]!.bundle.records).toEqual([first]);
+        const actor = privateIdentity(agent), changedPayload = { ...payload, body: { ...payload.body, title: 'From agent' } };
+        const edit = await signPrivateRecord({ format: 'private-v1', v: 1, id: newId(), vault, copy, seq: 1, prev: await privateHash(first), at: new Date().toISOString(), actor, authority: privateAuthority(context, actor), type: 'private.version', body: { artifact, author: { ...author }, actor: { ...actor }, version: newId(), typeHash: await artifactTypeHash('document'), blobs: [], predecessor: first.body.version }, payloadHash: await privateHash(changedPayload) }, f.options.signingKey);
+        await controller.stage({ ...bundle, records: [first, edit], payloads: [...bundle.payloads, { record: edit.id, payload: changedPayload }] });
+        await controller.sync(true);
+        expect(cacheRead).toHaveBeenCalled(); expect(cacheCommit).toHaveBeenCalled();
+        const writtenHeader = (await import('@ai-wayfinding/core')).openPrivateFrame;
+        const raw = await writtenHeader(frame!, owner.age.identity, author.recipient) as { header: { writer: unknown; version: number } };
+        expect(raw.header.writer).toEqual(actor);
+        const reopened = new PrivateVault({ ...options, cache: undefined }); await reopened.open();
+        expect(reopened.branches[0]!.bundle.payloads.at(-1)!.payload.body.title).toBe('From agent');
+        expect(reopened.branches[0]!.bundle.records.at(-1)!.actor).toEqual(actor); reopened.close();
+        // A held controller cannot reach the server after removal either.
+        removed = true;
+        await expect(controller.sync(true)).rejects.toThrow('ended');
+        await expect(client.openPrivateVault()).rejects.toThrow('ended');
       } finally { client.close(); cacheRead.mockRestore(); cacheCommit.mockRestore(); }
     } finally { await rm(folder, { recursive: true, force: true }); }
-  });
+  }, 60000);
   it('reopens existing keys, atomically advances and refuses races, rollback, extras, foreign keys; preserves live files', async () => {
     const scratch = resolve('../..', '.scratch', 'stage3-node'); await mkdir(scratch, { recursive: true }); const folder = await mkdtemp(join(scratch, 'vault-'));
     try {

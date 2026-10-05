@@ -43,7 +43,24 @@ export function rememberPrivateVault(controller: { close(): void }): void { cont
 export function closePrivateVaults(): void { for (const controller of controllers) controller.close(); controllers.clear(); activeJourney = null; }
 
 import type { JourneyContext } from './journey.js';
-let activeJourney: { id: string; principal: string; controller: PrivateVault } | null = null;
+import { api } from './journey.js';
+import { sealVaultAgentWrap, privateAgentAudience } from '@ai-wayfinding/core';
+
+/** Every open backfills only verified own agents with authenticated credentials. */
+export async function deliverJourneyVaultWraps(ctx: JourneyContext, controller: PrivateVault): Promise<void> {
+  const context = await verifyPrivateContext({ journey: ctx.id, creator: ctx.controls[0]!.proof.body.creator as Member, controls: ctx.controls }, { now: Date.now(), currentHead: ctx.state.lastHash! });
+  const author = privateIdentity(ctx.state.members[ctx.principal]!.member);
+  const vault = await memberVaultId(ctx.id, ctx.principal, author.signingKey, author.recipient);
+  const agents = await api<{ agents: { principal: string }[] }>(`/journeys/${ctx.id}/private-agents`, 'GET', undefined, ctx.principal);
+  for (const row of agents.agents) {
+    const member = ctx.state.members[row.principal]?.member;
+    if (!member || member.kind !== 'agent' || !privateAgentAudience(context, author, privateIdentity(member))) continue;
+    // The server also checks audience and excludes link credentials at delivery.
+    const ciphertext = await sealVaultAgentWrap({ journey: ctx.id, person: ctx.principal, agent: member.id, vault, author, recipient: privateIdentity(member) }, controller.agentContentIdentity, ctx.keys.signingPrivateKey);
+    await api(`/journeys/${ctx.id}/private-agent-wrap/${member.id}`, 'PUT', { ciphertext }, ctx.principal);
+  }
+}
+let activeJourney: { id: string; principal: string; controlHash: string; controller: PrivateVault } | null = null;
 export function browserVaultTransport(journey: string, principal: string, fetcher: typeof fetch = fetch): VaultTransport {
   const request = async (query: string, body?: Uint8Array): Promise<Response> => {
     const response = await fetcher(`/v1/journeys/${journey}/private-vault${query}`, { method: body ? 'PUT' : 'GET', credentials: 'same-origin', cache: 'no-store', headers: { 'X-Principal': principal, 'X-Client-Version': '0.1.7', 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': 'artifact-v1', 'X-Project-Format': 'project-v1', 'X-Private-Format': 'private-v1', ...(body ? { 'X-Wayfinding': '1', 'Content-Type': 'application/octet-stream' } : {}) }, ...(body ? { body: new Uint8Array(body) } : {}) });
@@ -53,7 +70,7 @@ export function browserVaultTransport(journey: string, principal: string, fetche
 }
 /** Called for every open journey, whether or not any private copies exist. */
 export async function openJourneyVault(ctx: JourneyContext, paired?: PrivateCheckpoint): Promise<PrivateVault> {
-  if (activeJourney?.id === ctx.id && activeJourney.principal === ctx.principal) return activeJourney.controller;
+  if (activeJourney?.id === ctx.id && activeJourney.principal === ctx.principal && activeJourney.controlHash === ctx.state.lastHash) return activeJourney.controller;
   closePrivateVaults();
   const member = ctx.state.members[ctx.principal]!.member, author = privateIdentity(member);
   const context = await verifyPrivateContext({ journey: ctx.id, creator: ctx.controls[0]!.proof.body.creator as Member, controls: ctx.controls }, { now: Date.now(), currentHead: ctx.state.lastHash! });
@@ -62,6 +79,6 @@ export async function openJourneyVault(ctx: JourneyContext, paired?: PrivateChec
   const options: VaultOptions = { identity: ctx.keys.identity, signingKey: ctx.keys.signingPrivateKey, trust: { vault, author }, contexts: [context], sessions: [session], paired, transport: browserVaultTransport(ctx.id, ctx.principal) };
   options.cache = new BrowserPrivateStore(vault, options);
   const controller = new PrivateVault(options); rememberPrivateVault(controller);
-  activeJourney = { id: ctx.id, principal: ctx.principal, controller };
-  try { await controller.open(); controller.start(); return controller; } catch (error) { closePrivateVaults(); throw error; }
+  activeJourney = { id: ctx.id, principal: ctx.principal, controlHash: ctx.state.lastHash!, controller };
+  try { await controller.open(); await deliverJourneyVaultWraps(ctx, controller); controller.start(); return controller; } catch (error) { closePrivateVaults(); throw error; }
 }

@@ -2,6 +2,31 @@ import { mkdir, open, readFile, rename, rm, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { canonical, openIdentity, sealIdentity, privateHash, validPrivateId, validateVaultCache, verifyVaultCacheAdvance } from '@ai-wayfinding/core';
 import type { VaultCache, VaultCacheRecord, VaultOptions } from '@ai-wayfinding/core';
+import { PrivateVault, privateBinding, privateAgentAudience, privateIdentity, sealVaultAgentWrap } from '@ai-wayfinding/core';
+import type { PrivateContext, Member } from '@ai-wayfinding/core';
+
+/** Person-side Node adapter: call at approval and on every journey open. The
+ * transport authenticates as the person, not as an agent session. */
+export async function openPersonPrivateVault(options: VaultOptions, context: PrivateContext, delivery: {
+  agents(): Promise<Member[]>;
+  put(agent: string, ciphertext: string): Promise<void>;
+}): Promise<PrivateVault> {
+  if (options.trust.author.kind !== 'person' || options.actor?.kind === 'agent' || options.contentIdentity) throw new Error('Person vault keys required');
+  const person = privateBinding(context, options.trust.author).principal;
+  const controller = new PrivateVault(options); rememberNodePrivateVault(controller);
+  try {
+    await controller.open();
+    for (const member of await delivery.agents()) {
+      if (member.kind !== 'agent') continue;
+      const recipient = privateIdentity(member);
+      if (!privateAgentAudience(context, options.trust.author, recipient)) continue;
+      const agent = privateBinding(context, recipient).principal;
+      const ciphertext = await sealVaultAgentWrap({ journey: context.journey, person, agent, vault: options.trust.vault, author: options.trust.author, recipient }, controller.agentContentIdentity, options.signingKey);
+      await delivery.put(agent, ciphertext);
+    }
+    return controller;
+  } catch (error) { controller.close(); throw error; }
+}
 
 /** One encrypted immutable cache file, selected by an independently encrypted
  * checkpoint pointer. A crash before pointer rename leaves the old checkpoint;
@@ -44,11 +69,11 @@ export class NodePrivateStore implements VaultCache {
     try {
       const pointer = await this.pointer(); if (canonical(pointer?.head ?? null) !== canonical(expected)) throw new Error('Private cache concurrent checkpoint');
       const prior = await this.read(); if (prior) await verifyVaultCacheAdvance(prior, value, this.options);
-      const checkpoint = await sealIdentity(canonical(value.checkpoint), [this.options.trust.author.recipient]);
+      const checkpoint = await sealIdentity(canonical(value.checkpoint), [(this.options.actor ?? this.options.trust.author).recipient]);
       const bytes = canonical({ token: value.token, frame: value.frame, slots: value.slots, checkpoint });
       const file = Buffer.from(await privateHash(bytes), 'base64').toString('hex') + '.vault';
       await this.atomic(file, bytes);
-      await this.atomic('checkpoint.age', await sealIdentity(canonical({ head: value.checkpoint.head, file }), [this.options.trust.author.recipient]));
+      await this.atomic('checkpoint.age', await sealIdentity(canonical({ head: value.checkpoint.head, file }), [(this.options.actor ?? this.options.trust.author).recipient]));
       const dir = await open(this.folder, 'r'); try { await dir.sync(); } finally { await dir.close(); }
       // Cleanup runs under the same lock and preserves the sole live reference.
       for (const name of await readdir(this.folder)) if (/^[a-f0-9]{64}\.vault$/.test(name) && name !== file) await rm(join(this.folder, name));

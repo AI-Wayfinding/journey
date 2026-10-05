@@ -626,6 +626,8 @@ async function agentScreen(sessionId: string): Promise<void> {
     const control = await makeControl(latest, 'member.add', { member, grants: [], kind: 'agent' });
     const [wrap] = await wrapJourneyKey(currentKey(latest), [{ id: member.id, recipient: member.recipient }]);
     await api(`/agent-sessions/${sessionId}/approve`, 'POST', { code: input(f, 'agent-code'), principal: latest.principal, scope, expiresAt, wrap: wrap!.ciphertext, control });
+    const approved = await verifiedJourney(ctx.id, ctx.principal, ctx.keys);
+    await openJourneyVault(approved);
     render(`<section class="panel"><h1>Agent approved</h1><p>You can see it in your journey's people and agents list.</p><a href="/journeys/${latest.id}/members">People &amp; agents</a></section>`);
   });
 }

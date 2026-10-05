@@ -2,8 +2,9 @@ import rules from '@ai-wayfinding/rules';
 import type { List } from '@ai-wayfinding/rules';
 
 import { canonical } from './log.js';
+import { createAgeIdentity, deriveRecipient } from './keys.js';
 import type { AgeIdentity } from './keys.js';
-import { PRIVATE_FORMAT, PRIVATE_SLOT_BYTES, copyPrivateIdentity, copyPrivateHeader, mergePrivateViews, privateBytesHash, privateHash, privateObject, privateShape, privateSyncDue, privateCopies, privateCapacity, privateAccess, signPrivateHeader, verifyPrivateHeader } from './private.js';
+import { PRIVATE_FORMAT, PRIVATE_SLOT_BYTES, copyPrivateIdentity, copyPrivateHeader, mergePrivateViews, privateBytesHash, privateHash, privateObject, privateShape, privateSyncDue, privateCopies, privateCapacity, privateAccess, signPrivateHeader, verifyPrivateHeader, privateAuthority, privateBinding } from './private.js';
 import type { PrivateHeader, PrivateCheckpoint, PrivateView, PrivateCopyState } from './private.js';
 import { verifyPrivateBundle } from './private-transfer.js';
 import type { PrivateBundle, PrivateBundleOptions } from './private-transfer.js';
@@ -15,9 +16,11 @@ export interface VaultTransport { read(indices: readonly number[] | 'all'): Prom
 export interface VaultCache { read(): Promise<VaultCacheRecord | null>; commit(expected: string | null, value: VaultCacheRecord): Promise<void> }
 export interface VaultCacheRecord { token: string; frame: string; slots: string[]; checkpoint: PrivateCheckpoint }
 export interface VaultDirectory { branches: number[][]; initialized: number[] }
-interface VaultFrame { header: PrivateHeader; root: string; directory: VaultDirectory }
+interface VaultFrame { header: PrivateHeader; root: string; directory: VaultDirectory; contentIdentity?: string }
 export interface VaultOptions extends PrivateBundleOptions {
   identity: AgeIdentity; signingKey: CryptoKey; transport: VaultTransport; cache?: VaultCache;
+  /** Agent receives only this dedicated content identity. Owner keys never leave their device. */
+  contentIdentity?: string; actor?: import('./private.js').PrivateIdentity;
   /** Trusted out-of-band input from a paired device. No pairing UI is implied. */
   paired?: PrivateCheckpoint; now?: () => number; randomOrder?: () => number[];
 }
@@ -45,14 +48,18 @@ function directory(value: unknown): VaultDirectory {
   if (new Set(used).size !== used.length || used.some(i => !(value.initialized as number[]).includes(i))) throw new Error('Invalid private live references');
   return { branches, initialized: value.initialized.slice() as number[] };
 }
-async function contents(hashes: string[], root: string, dir: VaultDirectory): Promise<string> { return privateHash({ slots: hashes, root, directory: dir }); }
+async function contents(hashes: string[], root: string, dir: VaultDirectory, contentIdentity?: string): Promise<string> { return privateHash({ slots: hashes, root, directory: dir, ...(contentIdentity ? { contentIdentity } : {}) }); }
 async function decodeFrame(value: string, options: VaultOptions): Promise<VaultFrame> {
-  const parsed = await openPrivateFrame(value, options.identity, options.trust.author.recipient);
-  if (!privateObject(parsed) || !privateShape(parsed, ['header', 'root', 'directory']) || typeof parsed.root !== 'string') throw new Error('Invalid private vault frame');
+  const recipient = options.contentIdentity ? await deriveRecipient(options.contentIdentity) : options.trust.author.recipient;
+  const parsed = await openPrivateFrame(value, options.contentIdentity ?? options.identity, recipient);
+  if (!privateObject(parsed) || !privateShape(parsed, ['header', 'root', 'directory', ...(parsed.contentIdentity !== undefined ? ['contentIdentity'] : [])]) || typeof parsed.root !== 'string' || parsed.contentIdentity !== undefined && typeof parsed.contentIdentity !== 'string') throw new Error('Invalid private vault frame');
   privateDecode(parsed.root, 32);
+  if (parsed.contentIdentity !== undefined) {
+    if (await deriveRecipient(parsed.contentIdentity as string) === options.trust.author.recipient || options.contentIdentity && parsed.contentIdentity !== options.contentIdentity) throw new Error('Private content identity mismatch');
+  }
   const header = copyPrivateHeader(parsed.header as PrivateHeader), dir = directory(parsed.directory);
-  if (await contents(header.slots, parsed.root, dir) !== header.contentsHash) throw new Error('Private complete contents digest mismatch');
-  return { header, root: parsed.root, directory: dir };
+  if (await contents(header.slots, parsed.root, dir, parsed.contentIdentity as string | undefined) !== header.contentsHash) throw new Error('Private complete contents digest mismatch');
+  return { header, root: parsed.root, directory: dir, ...(parsed.contentIdentity ? { contentIdentity: parsed.contentIdentity as string } : {}) };
 }
 export async function validateVaultCache(value: VaultCacheRecord, options: VaultOptions): Promise<VaultCacheRecord> {
   if (!privateObject(value) || !privateShape(value, ['token', 'frame', 'slots', 'checkpoint']) || !/^[a-f0-9]{64}$/.test(value.token) || typeof value.frame !== 'string' || !Array.isArray(value.slots) || value.slots.length !== 64) throw new Error('Invalid private cache');
@@ -61,13 +68,13 @@ export async function validateVaultCache(value: VaultCacheRecord, options: Vault
   // head. Such bytes are unavailable until their signed digest matches, never
   // decrypted or rendered. The checkpoint must still advance atomically.
   for (const slot of value.slots) privateDecode(slot, PRIVATE_SLOT_BYTES);
-  const verified = await verifyPrivateHeader(frame.header, options.trust, { checkpoint: value.checkpoint, paired: options.paired, contentsHash: frame.header.contentsHash });
+  const verified = await verifyPrivateHeader(frame.header, options.trust, { checkpoint: value.checkpoint, paired: options.paired, contentsHash: frame.header.contentsHash, contexts: options.contexts });
   if (verified.decision === 'merge' || canonical(verified.checkpoint.head) !== canonical(value.checkpoint.head) || verified.checkpoint.version !== value.checkpoint.version || canonical(verified.checkpoint.prev) !== canonical(value.checkpoint.prev)) throw new Error('Private cache checkpoint conflict');
   return { token: value.token, frame: value.frame, slots: value.slots.slice(), checkpoint: verified.checkpoint };
 }
 export async function verifyVaultCacheAdvance(previous: VaultCacheRecord, next: VaultCacheRecord, options: VaultOptions): Promise<void> {
   const frame = await decodeFrame(next.frame, options);
-  const checked = await verifyPrivateHeader(frame.header, options.trust, { checkpoint: previous.checkpoint, contentsHash: frame.header.contentsHash });
+  const checked = await verifyPrivateHeader(frame.header, options.trust, { checkpoint: previous.checkpoint, contentsHash: frame.header.contentsHash, contexts: options.contexts });
   if (checked.decision === 'merge') throw new Error('Private cache fork must be merged');
 }
 async function readBranches(frame: VaultFrame, slots: string[], hashes: string[], options: VaultOptions): Promise<{ bundle: PrivateBundle; view: PrivateView }[] | null> {
@@ -118,6 +125,8 @@ export class PrivateVault {
   constructor(private readonly options: VaultOptions) {}
   get freshness(): 'paired' | 'unverified' { return this.checkpoint?.freshness ?? 'unverified'; }
   get retainedCheckpoint(): PrivateCheckpoint | undefined { return this.checkpoint ? { vault: this.checkpoint.vault, author: copyPrivateIdentity(this.checkpoint.author), version: this.checkpoint.version, head: this.checkpoint.head, prev: this.checkpoint.prev, freshness: this.checkpoint.freshness } : undefined; }
+  /** Available only on a person's device, for encrypting per-agent delivery. */
+  get agentContentIdentity(): string { this.assertOpen(); if ((this.options.actor ?? this.options.trust.author).kind !== 'person' || !this.current?.contentIdentity) throw new Error('Private content key unavailable'); return this.current.contentIdentity; }
   get branches(): readonly { bundle: PrivateBundle; view: PrivateView }[] { this.assertOpen(); if (!this.available) throw new Error('Private vault history is still synchronizing'); return structuredClone(this.verifiedBranches.map(b => ({ bundle: b.bundle }))).map((b, i) => ({ bundle: b.bundle, view: this.verifiedBranches[i]!.view })); }
   private assertOpen(): void { if (!this.active) throw new Error('Private vault is locked'); }
   private alive(generation: number): void { this.assertOpen(); if (generation !== this.generation) throw new Error('Private vault operation cancelled'); }
@@ -145,7 +154,7 @@ export class PrivateVault {
         const frame = await decodeFrame(wire.frame, this.options);
         const hashes = await Promise.all(this.slots.map(s => privateBytesHash(privateDecode(s))));
         if (canonical(hashes) !== canonical(frame.header.slots)) throw new Error('Private full contents digest mismatch');
-        const checked = await verifyPrivateHeader(frame.header, this.options.trust, { paired: this.options.paired, contentsHash: frame.header.contentsHash });
+        const checked = await verifyPrivateHeader(frame.header, this.options.trust, { paired: this.options.paired, contentsHash: frame.header.contentsHash, contexts: this.options.contexts });
         if (checked.decision === 'merge') throw new Error('Private fork requires verified local history');
         this.alive(generation); this.current = frame; this.checkpoint = checked.checkpoint;
       } else if (this.options.paired) throw new Error('Private vault rollback');
@@ -159,7 +168,7 @@ export class PrivateVault {
     const copies = [...new Set(bundle.records.map(r => r.copy))];
     for (const copy of copies) {
       const record = bundle.records.find(r => r.copy === copy)!;
-      const context = this.options.contexts?.find(c => c.journey === record.authority.journey), session = this.options.sessions?.find(s => s.binding.journey === record.authority.journey && canonical(s.identity) === canonical(this.options.trust.author));
+      const context = this.options.contexts?.find(c => c.journey === record.authority.journey), session = this.options.sessions?.find(s => s.binding.journey === record.authority.journey && canonical(s.identity) === canonical(this.options.actor ?? this.options.trust.author));
       if (!context || !session || !privateAccess(context, this.options.trust.author, session, true)) throw new Error('Private vault requires current write authority');
     }
   }
@@ -202,7 +211,7 @@ export class PrivateVault {
       let remote: VaultFrame | null = null, stagingConflict = false;
       if (wire.frame) {
         remote = await decodeFrame(wire.frame, this.options);
-        const checked = await verifyPrivateHeader(remote.header, this.options.trust, { checkpoint: this.checkpoint, paired: this.options.paired, contentsHash: remote.header.contentsHash });
+        const checked = await verifyPrivateHeader(remote.header, this.options.trust, { checkpoint: this.checkpoint, paired: this.options.paired, contentsHash: remote.header.contentsHash, contexts: this.options.contexts });
         if (checked.decision === 'merge' && (!this.merging || !this.current || await privateHash(remote.header) !== await privateHash(this.current.header))) throw new Error('Private fork requires complete verified histories; use merge');
         stagingConflict = !!(this.current && remote.header.version !== this.current.header.version && this.pendingBranches);
         this.alive(generation); if (!this.merging) this.checkpoint = checked.checkpoint;
@@ -220,6 +229,17 @@ export class PrivateVault {
           // whether there was a pending private save by changing traffic shape.
         }
       } else if (this.checkpoint || this.options.paired) throw new Error('Private vault rollback');
+      const actor = this.options.actor ?? this.options.trust.author;
+      if (actor.kind === 'agent') {
+        if (!remote || !this.options.contentIdentity) throw new Error('Agents cannot initialise a private vault');
+        const context = this.options.contexts?.find(c => { try { return !!privateBinding(c, actor); } catch { return false; } });
+        const session = this.options.sessions?.find(s => canonical(s.identity) === canonical(actor));
+        if (!context || !session || !privateAccess(context, this.options.trust.author, session)) throw new Error('Private agent authority denied');
+        if (!privateAccess(context, this.options.trust.author, session, true)) {
+          for (const row of wire.slots) { if (await privateBytesHash(privateDecode(row.ciphertext, PRIVATE_SLOT_BYTES)) !== remote.header.slots[row.index]) throw new Error('Private fetched slot digest mismatch'); this.slots[row.index] = row.ciphertext; this.hashes[row.index] = remote.header.slots[row.index]!; }
+          this.current = remote; this.token = wire.token; await this.refreshBranches(); return true;
+        }
+      }
       const rootText = remote?.root ?? encode(privateRandomBytes(32)), root = privateDecode(rootText, 32);
       const dir = directory(remote?.directory ?? { branches: [], initialized: [] });
       const slots = this.slots.slice(), hashes = remote?.header.slots.slice() ?? this.hashes.slice();
@@ -235,12 +255,15 @@ export class PrivateVault {
         }
       } finally { root.fill(0); }
       if (this.pendingBranches && [...this.pending.keys()].every(i => indices.includes(i))) dir.branches = this.pendingBranches.map(b => b.slice());
-      const header = await signPrivateHeader({ format: PRIVATE_FORMAT, v: 1, vault: this.options.trust.vault, author: copyPrivateIdentity(this.options.trust.author), version: (remote?.header.version ?? 0) + 1, prev: remote ? await privateHash(remote.header) : null, contentsHash: await contents(hashes, rootText, dir), slots: hashes }, this.options.signingKey);
-      const frame = await sealPrivateFrame({ header, root: rootText, directory: dir }, this.options.trust.author.recipient);
-      const checked = await verifyPrivateHeader(header, this.options.trust, { checkpoint: this.checkpoint, contentsHash: header.contentsHash });
+      const context = actor.kind === 'agent' ? this.options.contexts!.find(c => { try { return !!privateBinding(c, actor); } catch { return false; } })! : undefined;
+      // Old person-only frames migrate on the next scheduled commit, never on a private save.
+      const contentIdentity = remote?.contentIdentity ?? (await createAgeIdentity()).identity;
+      const header = await signPrivateHeader({ format: PRIVATE_FORMAT, v: 1, vault: this.options.trust.vault, author: copyPrivateIdentity(this.options.trust.author), version: (remote?.header.version ?? 0) + 1, prev: remote ? await privateHash(remote.header) : null, contentsHash: await contents(hashes, rootText, dir, contentIdentity), slots: hashes, ...(context ? { writer: copyPrivateIdentity(actor), authority: privateAuthority(context, actor) } : {}) }, this.options.signingKey);
+      const frame = await sealPrivateFrame({ header, root: rootText, directory: dir, contentIdentity }, this.options.trust.author.recipient, await deriveRecipient(contentIdentity));
+      const checked = await verifyPrivateHeader(header, this.options.trust, { checkpoint: this.checkpoint, contentsHash: header.contentsHash, contexts: this.options.contexts });
       this.alive(generation); const committed = await this.options.transport.commit({ token: wire.token, frame, slots: patchSlots }); this.alive(generation);
       if (!/^[a-f0-9]{64}$/.test(committed.token)) throw new Error('Invalid private commit token');
-      this.current = { header, root: rootText, directory: dir }; this.checkpoint = checked.checkpoint; this.token = committed.token; this.slots = slots;
+      this.current = { header, root: rootText, directory: dir, contentIdentity }; this.checkpoint = checked.checkpoint; this.token = committed.token; this.slots = slots;
       const hashesAfterCommit = await Promise.all(slots.map(s => privateBytesHash(privateDecode(s)))); this.alive(generation); this.hashes = hashesAfterCommit;
       for (const i of indices) { this.pending.get(i)?.fill(0); this.pending.delete(i); }
       if (!this.pending.size) { this.pendingBranches = null; this.merging = false; }
@@ -258,7 +281,7 @@ export class PrivateVault {
     try {
     const checked = await validateVaultCache(other, { ...this.options, paired: undefined }), remote = await decodeFrame(checked.frame, this.options);
     this.alive(generation);
-    const decision = await verifyPrivateHeader(remote.header, this.options.trust, { checkpoint: this.checkpoint, contentsHash: remote.header.contentsHash });
+    const decision = await verifyPrivateHeader(remote.header, this.options.trust, { checkpoint: this.checkpoint, contentsHash: remote.header.contentsHash, contexts: this.options.contexts });
     if (decision.decision !== 'merge' || this.verifiedBranches.length !== 1) throw new Error('Private fork merge requires complete verified branches');
     const hashes = await Promise.all(other.slots.map(s => privateBytesHash(privateDecode(s))));
     if (canonical(hashes) !== canonical(remote.header.slots)) throw new Error('Private fork contents digest mismatch');

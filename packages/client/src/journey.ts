@@ -1,5 +1,5 @@
 import { canWriteContent, canReadContent, effectiveScope } from '@ai-wayfinding/core';
-import { PrivateVault, decodeVaultWire, encodeVaultPatch, memberVaultId, privateIdentity, privateAgentSession, verifyPrivateContext } from '@ai-wayfinding/core';
+import { PrivateVault, decodeVaultWire, encodeVaultPatch, memberVaultId, privateIdentity, privateAgentSession, verifyPrivateContext, openVaultAgentWrap, privateAccess } from '@ai-wayfinding/core';
 import { PROJECT_FORMAT, projectPurposeHash, replayProject, sealProjectPayload, effectiveProjectParticipants, selectProjectArtifacts, projectSelector } from '@ai-wayfinding/core';
 import type { ProjectActionType } from '@ai-wayfinding/core';
 import { projectId, observedRevision, purposeText, stateValue } from './projects.js';
@@ -79,22 +79,28 @@ export class JourneyClient {
     return { state: checked.state, epochs, log };
   }
   private privateController?: PrivateVault;
-  /** Agent key delivery is not available yet. Never initialise the person's
-   * vault under this agent's identity or keys. */
+  private privateHead?: string;
+  /** Open the adding person's vault using only this agent's delivered content key. */
   async openPrivateVault(paired?: PrivateCheckpoint): Promise<PrivateVault> {
-    if (this.privateController) return this.privateController;
     const verified = await this.verified();
-    if (verified.state.members[this.session.principal]!.member.kind === 'agent') throw new Error('Person vault not available to this agent yet.');
+    if (this.privateController && this.privateHead === verified.state.lastHash) return this.privateController;
+    this.privateController?.close(); this.privateController = undefined;
     const controls = verified.log.map(row => JSON.parse(Buffer.from(row.entry, 'base64url').toString()) as { proof: ControlProof; envelope: Envelope });
     const context = await verifyPrivateContext({ journey: this.session.journeyId, creator: controls[0]!.proof.body.creator as Member, controls }, { now: Date.now(), currentHead: verified.state.lastHash! });
-    const author = privateIdentity(verified.state.members[this.session.principal]!.member), signingKey = await importSigningKey(this.session.signingPrivateKey);
-    const session = await privateAgentSession(context, author, signingKey, this.session.identity, 'authenticated');
-    const vault = await memberVaultId(this.session.journeyId, this.session.principal, author.signingKey, author.recipient);
+    const member = verified.state.members[this.session.principal]!.member, person = member.addedBy;
+    if (!person || verified.state.members[person]?.member.kind !== 'person') throw new Error('Private vault owner unavailable');
+    const actor = privateIdentity(member), author = privateIdentity(verified.state.members[person]!.member), signingKey = await importSigningKey(this.session.signingPrivateKey);
+    const session = await privateAgentSession(context, actor, signingKey, this.session.identity, 'authenticated');
+    if (!privateAccess(context, author, session)) throw new Error('Private vault access denied');
+    const vault = await memberVaultId(this.session.journeyId, person, author.signingKey, author.recipient);
+    const wrap = await this.request<{ ciphertext: string }>(`/journeys/${this.session.journeyId}/private-agent-wrap/${this.session.principal}`);
+    const contentIdentity = await openVaultAgentWrap(wrap.ciphertext, { journey: this.session.journeyId, person, agent: this.session.principal, vault, author, recipient: actor }, this.session.identity);
     const transport: VaultTransport = { read: async indices => decodeVaultWire(new Uint8Array(await (await this.response(`/journeys/${this.session.journeyId}/private-vault?slots=${indices === 'all' ? 'all' : indices.map(i => String(i).padStart(2, '0')).join(',')}`)).arrayBuffer()), indices), commit: async patch => (await this.response(`/journeys/${this.session.journeyId}/private-vault`, 'PUT', encodeVaultPatch(patch))).json() };
-    const options: VaultOptions = { trust: { vault, author }, identity: this.session.identity, signingKey, contexts: [context], sessions: [session], paired, transport };
+    const options: VaultOptions = { actor, contentIdentity, trust: { vault, author }, identity: this.session.identity, signingKey, contexts: [context], sessions: [session], paired, transport };
     if (this.options.cacheRoot) options.cache = new NodePrivateStore(this.options.cacheRoot, vault, options);
     const controller = new PrivateVault(options); rememberNodePrivateVault(controller);
-    await controller.open(); controller.start(); this.privateController = controller; return controller;
+    try { await controller.open(); controller.start(); this.privateController = controller; this.privateHead = verified.state.lastHash!; return controller; }
+    catch (error) { controller.close(); throw error; }
   }
   private async writable(): Promise<Verified> {
     const verified = await this.verified();

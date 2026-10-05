@@ -25,4 +25,18 @@ describe('fixed private ciphertext and independent key domains', () => {
     const corrupt = privateDecode(b); corrupt[100] = corrupt[100]! ^ 1; await expect(openPrivateFrame(encode(corrupt), identity, recipient)).rejects.toThrow();
     await expect(sealPrivateFrame({ text: 'x'.repeat(20000) }, recipient)).rejects.toThrow('capacity');
   });
+  it('wraps only the vault content identity, bound to the person, agent and journey', async () => {
+    const { sealVaultAgentWrap, openVaultAgentWrap, createSigningIdentity, importSigningKey } = await import('../src/index.js');
+    const person = await createAgeIdentity(), agent = await createAgeIdentity(), foreign = await createAgeIdentity(), signing = await createSigningIdentity();
+    const author = { kind: 'person' as const, recipient: person.recipient, signingKey: signing.publicKey };
+    const target = { kind: 'agent' as const, recipient: agent.recipient, signingKey: (await createSigningIdentity()).publicKey };
+    const binding = { journey: 'journey', person: 'person', agent: 'agent', vault: newPrivateId(), author, recipient: target };
+    const content = await createAgeIdentity();
+    const wrap = await sealVaultAgentWrap(binding, content.identity, await importSigningKey(signing.privateKey));
+    expect(wrap).not.toContain(content.identity); expect(wrap).not.toContain(person.identity);
+    expect(await openVaultAgentWrap(wrap, binding, agent.identity)).toBe(content.identity);
+    await expect(openVaultAgentWrap(wrap, binding, foreign.identity)).rejects.toThrow();
+    for (const key of ['journey', 'person', 'agent', 'vault'] as const) await expect(openVaultAgentWrap(wrap, { ...binding, [key]: 'foreign' }, agent.identity)).rejects.toThrow();
+    await expect(openVaultAgentWrap(wrap, { ...binding, recipient: { ...target, signingKey: signing.publicKey } }, agent.identity)).rejects.toThrow();
+  });
 });

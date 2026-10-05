@@ -50,6 +50,8 @@ export type RegistryMessage =
   | { op: 'pendingGet' | 'pendingDelete'; journeyId: string; principal: string }
   | { op: 'agentCreate'; id: string; journeyId: string; principal: string; recipient: string; signingKey: string; requestedScope: Scope; code: string; remembered: boolean; keyStorage: 'memory' | 'file' | 'link'; name: string | null }
   | { op: 'agentGet'; id: string }
+  | { op: 'agentPrincipal'; journeyId: string; principal: string }
+  | { op: 'privateAgents'; journeyId: string }
   | { op: 'agentAttempt'; id: string; code: string }
   | { op: 'agentApprove'; id: string; scope: Scope; expires: number }
   | { op: 'linkCreate'; hash: string; journeyId: string; memberId: string; addedBy: string; blob: string; expires: number }
@@ -62,7 +64,9 @@ type JourneyMessage = { journeyId: string; subject: Subject };
 export type EnclaveMessage =
   | { op: 'create'; data: CreateJourney }
   | (JourneyMessage & (
-      { op: 'access' | 'inviteAccess' | 'reserve' | 'wraps' | 'export' | 'protocol' | 'privateAccess' }
+      { op: 'access' | 'inviteAccess' | 'reserve' | 'wraps' | 'export' | 'protocol' }
+    | { op: 'privateAccess'; write?: boolean }
+    | { op: 'privateWrapAccess'; agent: string; ciphertext?: string }
     | { op: 'blobBegin'; size: number }
     | { op: 'blobUpload'; descriptor: BlobDescriptor }
     | { op: 'blobRead'; id: string }

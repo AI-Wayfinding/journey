@@ -1,15 +1,46 @@
 import { describe, expect, it } from 'vitest';
 import { env, runInDurableObject } from 'cloudflare:test';
-import { PRIVATE_SLOT_BYTES, PRIVATE_HEADER_BYTES, decodeVaultWire, encodeVaultPatch, privateRandomBytes, privateEncode, importSigningKey, newId } from '@ai-wayfinding/core';
+import { PRIVATE_SLOT_BYTES, PRIVATE_HEADER_BYTES, decodeVaultWire, encodeVaultPatch, privateRandomBytes, privateEncode, importSigningKey, newId, sealIdentity, createAgeIdentity } from '@ai-wayfinding/core';
 import type { VaultPatch } from '@ai-wayfinding/core';
 import worker, { type Env, PrivateVaultObject } from '../src/index.js';
-import { fixture, as, addPerson, addAgent, agentHeaders, change, snapshot } from './stage0-fixtures.js';
+import { fixture, as, addPerson, addAgent, agentHeaders, change, snapshot, request as jsonRequest } from './stage0-fixtures.js';
 import { base64url } from '../src/crypto.js';
 const vault = (id: string, principal: string) => (env as unknown as Env).PRIVATE_VAULTS.get((env as unknown as Env).PRIVATE_VAULTS.idFromName(JSON.stringify([id, principal])));
 const headers = { 'X-Client-Version': '0.1.7', 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': 'artifact-v1', 'X-Project-Format': 'project-v1', 'X-Private-Format': 'private-v1' };
 const request = (path: string, auth: Record<string, string>, body?: Uint8Array) => worker.fetch(new Request('https://app.wayfinding.support' + path, { method: body ? 'PUT' : 'GET', headers: { ...headers, ...auth, Origin: 'https://app.wayfinding.support', 'X-Wayfinding': '1', 'Content-Type': 'application/octet-stream' }, ...(body ? { body: Uint8Array.from(body) } : {}) }), { ...env, RP_ID: 'app.wayfinding.support', ORIGIN: 'https://app.wayfinding.support', EMAIL_HASH_KEY: 'test-key' } as Env);
 
 describe('dedicated fixed ciphertext member vault in workerd SQLite', () => {
+  it('stores only encrypted own-agent wraps, fetches only to that agent, and deletes on removal and expiry', async () => {
+    const { owner, j } = await fixture(), own = await addAgent(j, owner, 'readwrite'), guest = await addPerson(j, owner), foreign = await addAgent(j, guest, 'readwrite'), link = await addAgent(j, owner, 'read', true);
+    const path = (id: string) => `/v1/journeys/${j.id}/private-agent-wrap/${id}`;
+    const secret = (await createAgeIdentity()).identity, ciphertext = await sealIdentity(secret, [own.age.recipient]);
+    const wire = decodeVaultWire(new Uint8Array(await (await request(`/v1/journeys/${j.id}/private-vault?slots=00,01`, as(owner))).arrayBuffer()), [0, 1]);
+    expect((await jsonRequest(path(own.principal), 'PUT', { ciphertext }, as(owner))).status).toBe(409);
+    expect((await request(`/v1/journeys/${j.id}/private-vault`, as(owner), encodeVaultPatch({ token: wire.token, frame: privateEncode(privateRandomBytes(PRIVATE_HEADER_BYTES)), slots: wire.slots }))).status).toBe(200);
+    expect((await jsonRequest(path(own.principal), 'PUT', { ciphertext, identity: secret }, as(owner))).status).toBe(400);
+    expect((await jsonRequest(path(own.principal), 'PUT', { ciphertext: secret }, as(owner))).status).toBe(400);
+    expect((await jsonRequest(path(own.principal), 'PUT', { ciphertext }, as(guest))).status).toBe(403);
+    expect((await jsonRequest(path(foreign.principal), 'PUT', { ciphertext }, as(owner))).status).toBe(403);
+    expect((await jsonRequest(path(link.principal), 'PUT', { ciphertext }, as(owner))).status).toBe(403);
+    expect((await jsonRequest(path(own.principal), 'PUT', { ciphertext }, as(owner))).status).toBe(200);
+    expect((await request(path(own.principal), as(owner))).status).toBe(403);
+    expect((await request(path(own.principal), as(guest))).status).toBe(403);
+    expect((await request(path(own.principal), await agentHeaders(foreign, 'GET', path(own.principal)))).status).toBe(403);
+    expect((await request(path(own.principal), await agentHeaders(link, 'GET', path(own.principal)))).status).toBe(403);
+    const fetched = await request(path(own.principal), await agentHeaders(own, 'GET', path(own.principal)));
+    expect(fetched.status).toBe(200); expect(fetched.headers.get('Cache-Control')).toBe('no-store'); expect(await fetched.json()).toEqual({ ciphertext });
+    const rows = await runInDurableObject(vault(j.id, owner.principal), (_o, state) => state.storage.sql.exec('SELECT * FROM agent_wraps').toArray());
+    expect(rows).toEqual([{ agent: own.principal, ciphertext, expires: own.expiresAt }]); expect(JSON.stringify(rows)).not.toContain(secret); expect(await snapshot(j)).not.toContain(ciphertext);
+    expect((await change(j, owner, 'member.remove', { member: own.principal })).status).toBe(201);
+    expect((await request(path(own.principal), await agentHeaders(own, 'GET', path(own.principal)))).status).toBe(403);
+    expect((await jsonRequest(path(own.principal), 'PUT', { ciphertext }, as(owner))).status).toBe(403);
+    await runInDurableObject(vault(j.id, owner.principal), async (_o, state) => {
+      expect(state.storage.sql.exec('SELECT * FROM agent_wraps').toArray()).toEqual([]);
+      state.storage.sql.exec('INSERT INTO agent_wraps VALUES(?,?,?)', 'expired', ciphertext, Date.now() - 1);
+      await new PrivateVaultObject(state).alarm();
+      expect(state.storage.sql.exec('SELECT * FROM agent_wraps').toArray()).toEqual([]);
+    });
+  }, 60000);
   it('fills every slot independently, rolls back incomplete allocation and preserves bytes on retries', async () => {
     const first = vault('allocation-test', 'first');
     const inspect = (state: DurableObjectState) => ({
@@ -76,8 +107,9 @@ describe('dedicated fixed ciphertext member vault in workerd SQLite', () => {
     }
     expect(await runInDurableObject(vault(j.id, owner.principal), (_o, s) => s.storage.sql.exec('SELECT id,hex(substr(ciphertext,1,32)) AS fingerprint FROM slots ORDER BY id').toArray())).toEqual(before);
   });
-  it('routes agent reads to its person but refuses initialisation and every header write without mutation, denying foreign agents and links', async () => {
+  it('routes own authenticated write-agent commits to the initialised person vault, denying initialisation, read-only, removed, foreign and link agents', async () => {
     const { owner, j } = await fixture(), agent = await addAgent(j, owner, 'readwrite');
+    expect((await change(j, owner, 'client.minVersion', { version: '0.1.7' })).status).toBe(201);
     const path = `/v1/journeys/${j.id}/private-vault?slots=00,01`, putPath = `/v1/journeys/${j.id}/private-vault`;
     const read = async (auth: Record<string, string>) => {
       const response = await request(path, auth); expect(response.status).toBe(200);
@@ -87,20 +119,20 @@ describe('dedicated fixed ciphertext member vault in workerd SQLite', () => {
     expect(delegated).toEqual(own);
     expect(own.frame).toBeNull();
     const patch = { token: own.token, frame: privateEncode(privateRandomBytes(PRIVATE_HEADER_BYTES)), slots: own.slots.map(s => ({ index: s.index, ciphertext: privateEncode(privateRandomBytes(PRIVATE_SLOT_BYTES)) })) };
-    const denyWrite = async (token: string) => {
+    const write = async (actor: typeof agent, token: string) => {
       const bytes = encodeVaultPatch({ ...patch, token }), timestamp = String(Date.now()), nonce = newId();
       const hash = base64url(new Uint8Array(await crypto.subtle.digest('SHA-256', Uint8Array.from(bytes).buffer)));
-      const signature = base64url(new Uint8Array(await crypto.subtle.sign('Ed25519', await importSigningKey(agent.signing.privateKey), new TextEncoder().encode(['PUT', putPath, hash, timestamp, nonce].join('\n')))));
-      const signed = { 'X-Agent-Session': agent.id, 'X-Agent-Timestamp': timestamp, 'X-Agent-Nonce': nonce, 'X-Agent-Signature': signature };
-      const denied = await request(putPath, signed, bytes);
-      expect(denied.status).toBe(403);
-      expect(await denied.json()).toEqual({ error: { code: 'forbidden', message: 'Agent credentials cannot initialise or write a person vault header.' } });
+      const signature = base64url(new Uint8Array(await crypto.subtle.sign('Ed25519', await importSigningKey(actor.signing.privateKey), new TextEncoder().encode(['PUT', putPath, hash, timestamp, nonce].join('\n')))));
+      return request(putPath, { 'X-Agent-Session': actor.id, 'X-Agent-Timestamp': timestamp, 'X-Agent-Nonce': nonce, 'X-Agent-Signature': signature }, bytes);
     };
-    await denyWrite(own.token);
+    expect((await write(agent, own.token)).status).toBe(403);
     expect(await read(as(owner))).toEqual(own);
     expect((await request(putPath, as(owner), encodeVaultPatch(patch))).status).toBe(200);
-    const committed = await read(as(owner)); expect(committed.frame).toBe(patch.frame); expect(committed.slots).toEqual(patch.slots);
-    await denyWrite(committed.token);
+    const initial = await read(as(owner));
+    expect((await write(agent, initial.token)).status).toBe(200);
+    const committed = await read(as(owner)); expect(committed.frame).toBe(patch.frame); expect(committed.slots).toEqual(patch.slots); expect(committed.token).not.toBe(initial.token);
+    const readonly = await addAgent(j, owner, 'read');
+    expect((await write(readonly, committed.token)).status).toBe(403);
     expect(await read(as(owner))).toEqual(committed);
     expect(await read(await agentHeaders(agent, 'GET', path))).toEqual(committed);
     const foreign = await fixture(), foreignAgent = await addAgent(foreign.j, foreign.owner, 'readwrite');
@@ -111,6 +143,12 @@ describe('dedicated fixed ciphertext member vault in workerd SQLite', () => {
     expect((await request(forged, await agentHeaders(guestAgent, 'GET', forged))).status).toBe(400);
     const link = await addAgent(j, owner, 'read', true);
     expect((await request(path, await agentHeaders(link, 'GET', path))).status).toBe(403);
+    expect(await read(as(owner))).toEqual(committed);
+    expect((await write(guestAgent, committed.token)).status).toBe(403); // guest vault is uninitialised, never owner's
+    expect((await write(foreignAgent, committed.token)).status).toBe(403);
+    expect((await write(link, committed.token)).status).toBe(403);
+    expect((await change(j, owner, 'member.remove', { member: agent.principal })).status).toBe(201);
+    expect((await write(agent, committed.token)).status).toBe(403);
     expect(await read(as(owner))).toEqual(committed);
   });
   it('CAS replaces only two slots plus header; stale, truncated, oversized and repeated-slot commits cannot partially mutate', async () => {
