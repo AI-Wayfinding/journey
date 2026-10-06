@@ -38,9 +38,11 @@ export class BrowserPrivateStore implements VaultCache {
     }); } finally { db.close(); }
   }
 }
+const syncErrors = new WeakMap<PrivateVault, string>();
+export function privateSyncError(vault: PrivateVault): string | undefined { return syncErrors.get(vault); }
 const controllers = new Set<{ close(): void }>();
 export function rememberPrivateVault(controller: { close(): void }): void { controllers.add(controller); }
-export function closePrivateVaults(): void { for (const controller of controllers) controller.close(); controllers.clear(); activeJourney = null; }
+export function closePrivateVaults(): void { for (const controller of controllers) controller.close(); controllers.clear(); activeJourneys.clear(); }
 
 import type { JourneyContext } from './journey.js';
 import { api } from './journey.js';
@@ -60,7 +62,7 @@ export async function deliverJourneyVaultWraps(ctx: JourneyContext, controller: 
     await api(`/journeys/${ctx.id}/private-agent-wrap/${member.id}`, 'PUT', { ciphertext }, ctx.principal);
   }
 }
-let activeJourney: { id: string; principal: string; controlHash: string; controller: PrivateVault } | null = null;
+const activeJourneys = new Map<string, { principal: string; controlHash: string; controller: PrivateVault }>();
 export function browserVaultTransport(journey: string, principal: string, fetcher: typeof fetch = fetch): VaultTransport {
   const request = async (query: string, body?: Uint8Array): Promise<Response> => {
     const response = await fetcher(`/v1/journeys/${journey}/private-vault${query}`, { method: body ? 'PUT' : 'GET', credentials: 'same-origin', cache: 'no-store', headers: { 'X-Principal': principal, 'X-Client-Version': '0.1.7', 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': 'artifact-v1', 'X-Project-Format': 'project-v1', 'X-Private-Format': 'private-v1', ...(body ? { 'X-Wayfinding': '1', 'Content-Type': 'application/octet-stream' } : {}) }, ...(body ? { body: new Uint8Array(body) } : {}) });
@@ -70,8 +72,9 @@ export function browserVaultTransport(journey: string, principal: string, fetche
 }
 /** Called for every open journey, whether or not any private copies exist. */
 export async function openJourneyVault(ctx: JourneyContext, paired?: PrivateCheckpoint): Promise<PrivateVault> {
-  if (activeJourney?.id === ctx.id && activeJourney.principal === ctx.principal && activeJourney.controlHash === ctx.state.lastHash) return activeJourney.controller;
-  closePrivateVaults();
+  const active = activeJourneys.get(ctx.id);
+  if (!paired && active?.principal === ctx.principal && active.controlHash === ctx.state.lastHash) return active.controller;
+  if (active) { active.controller.close(); activeJourneys.delete(ctx.id); }
   const member = ctx.state.members[ctx.principal]!.member, author = privateIdentity(member);
   const context = await verifyPrivateContext({ journey: ctx.id, creator: ctx.controls[0]!.proof.body.creator as Member, controls: ctx.controls }, { now: Date.now(), currentHead: ctx.state.lastHash! });
   const session = await privatePersonSession(context, author, ctx.keys.signingPrivateKey, ctx.keys.identity);
@@ -79,6 +82,12 @@ export async function openJourneyVault(ctx: JourneyContext, paired?: PrivateChec
   const options: VaultOptions = { identity: ctx.keys.identity, signingKey: ctx.keys.signingPrivateKey, trust: { vault, author }, contexts: [context], sessions: [session], paired, transport: browserVaultTransport(ctx.id, ctx.principal) };
   options.cache = new BrowserPrivateStore(vault, options);
   const controller = new PrivateVault(options); rememberPrivateVault(controller);
-  activeJourney = { id: ctx.id, principal: ctx.principal, controlHash: ctx.state.lastHash!, controller };
-  try { await controller.open(); await deliverJourneyVaultWraps(ctx, controller); controller.start(); return controller; } catch (error) { closePrivateVaults(); throw error; }
+  activeJourneys.set(ctx.id, { principal: ctx.principal, controlHash: ctx.state.lastHash!, controller });
+  try {
+    await controller.open(); await deliverJourneyVaultWraps(ctx, controller);
+    // Exactly the portable fixed schedule; errors remain local to the authorized UI.
+    const timer = setInterval(() => { void controller.tick().then(() => syncErrors.delete(controller), cause => syncErrors.set(controller, cause instanceof Error ? cause.message : 'Private sync failed')); }, 300000);
+    rememberPrivateVault({ close: () => clearInterval(timer) });
+    return controller;
+  } catch (error) { closePrivateVaults(); throw error; }
 }

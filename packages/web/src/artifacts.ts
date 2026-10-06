@@ -1,5 +1,5 @@
 import { ARTIFACT_FORMAT, MAX_BLOB_BYTES, artifactTypeHash, canonical, canWriteContent, newId, openBlob, readArtifactPayload, sealArtifactPayload, sealBlob, signControlProof, verifyControlProofs } from '@ai-wayfinding/core';
-import type { ArtifactActionType, ArtifactAttachment, ArtifactPayload, ArtifactState, BlobDescriptor, JsonObject, Member } from '@ai-wayfinding/core';
+import type { ArtifactActionType, ArtifactAttachment, ArtifactContent, ArtifactPayload, ArtifactState, BlobDescriptor, JsonObject, Member } from '@ai-wayfinding/core';
 import { ApiError, api, currentKey, INTERFACE_VERSION, verifiedJourney } from './journey.js';
 import type { JourneyContext, SignedControl } from './journey.js';
 import { plainError } from './messages.js';
@@ -27,7 +27,7 @@ export async function artifactViews(ctx: JourneyContext): Promise<ArtifactView[]
   currentKey(ctx);
   return views;
 }
-export function artifactText(payload: ArtifactPayload): string {
+export function artifactText(payload: { content: ArtifactContent }): string {
   const c = payload.content;
   switch (c.kind) {
     case 'skill': return c.skill;
