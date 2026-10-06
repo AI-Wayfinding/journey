@@ -7,14 +7,17 @@ import type { PrivateBundleScope } from './rules/rules.mjs';
 import {
   PRIVATE_FORMAT, privateObject, privateShape, validPrivateId, validatePrivateIdentity, copyPrivateIdentity,
   copyPrivateRecord, validatePrivateBlob, copyPrivateBlob, privateBytesHash, verifyPrivateContext,
-  verifyPrivateRecords, privateCopies, privateAccess, privateAuthorityHistory,
+  verifyPrivateRecords, privateCopies, privateAccess, privateAuthorityHistory, privateBinding, memberVaultId,
 } from './private.js';
 import type { PrivateIdentity, PrivateRecord, PrivatePayload, PrivateBlob, PrivateContext, PrivateSession, PrivateView, PrivateAuthorityHistory } from './private.js';
 
+/** Complete signed provenance chains, without source keys or ciphertext. */
+export interface PrivateSourceHistory { vault: string; records: PrivateRecord[]; payloads: PrivatePayload[] }
 export interface PrivateBundle {
   format: 'private-v1'; version: 1; vault: string; author: PrivateIdentity;
   scope: 'author-backup' | 'agent-handoff' | 'agent-return'; authorityHistories: PrivateAuthorityHistory[];
   records: PrivateRecord[]; payloads: PrivatePayload[]; copyKeys: { copy: string; key: string }[];
+  sourceHistories?: PrivateSourceHistory[];
   blobs: { descriptor: PrivateBlob; ciphertext: string }[]; unavailableDeletedBlobs: string[];
 }
 export interface PrivateBundleOptions {
@@ -45,7 +48,7 @@ export async function openPrivateBlob(blob: PrivateBlob, ciphertext: string, key
   if (plain.length !== blob.size || await privateBytesHash(plain) !== blob.contentHash) throw new Error('Private blob raw content mismatch'); return plain;
 }
 export async function verifyPrivateBundle(value: unknown, options: PrivateBundleOptions): Promise<{ bundle: PrivateBundle; view: PrivateView }> {
-  if (!privateObject(value) || !privateShape(value, ['format', 'version', 'vault', 'author', 'scope', 'authorityHistories', 'records', 'payloads', 'copyKeys', 'blobs', 'unavailableDeletedBlobs']) || value.format !== PRIVATE_FORMAT || value.version !== 1 || !validPrivateId(value.vault) || value.vault !== options.trust.vault || !validatePrivateIdentity(value.author) || canonical(value.author) !== canonical(options.trust.author) || !['author-backup', 'agent-handoff', 'agent-return'].includes(value.scope as string) || !Array.isArray(value.authorityHistories) || !Array.isArray(value.records) || !Array.isArray(value.payloads) || !Array.isArray(value.copyKeys) || !Array.isArray(value.blobs) || !Array.isArray(value.unavailableDeletedBlobs)) throw new Error('Invalid private bundle');
+  if (!privateObject(value) || !privateShape(value, ['format', 'version', 'vault', 'author', 'scope', 'authorityHistories', 'records', 'payloads', 'copyKeys', 'blobs', 'unavailableDeletedBlobs', ...(value.sourceHistories === undefined ? [] : ['sourceHistories'])]) || value.format !== PRIVATE_FORMAT || value.version !== 1 || !validPrivateId(value.vault) || value.vault !== options.trust.vault || !validatePrivateIdentity(value.author) || canonical(value.author) !== canonical(options.trust.author) || !['author-backup', 'agent-handoff', 'agent-return'].includes(value.scope as string) || !Array.isArray(value.authorityHistories) || !Array.isArray(value.records) || !Array.isArray(value.payloads) || !Array.isArray(value.copyKeys) || !Array.isArray(value.blobs) || !Array.isArray(value.unavailableDeletedBlobs)) throw new Error('Invalid private bundle');
   if (options.historical && value.scope !== 'author-backup') throw new Error('Historical recovery is author-backup only');
   const contexts: PrivateContext[] = [];
   for (const history of value.authorityHistories) {
@@ -62,8 +65,21 @@ export async function verifyPrivateBundle(value: unknown, options: PrivateBundle
     const index = contexts.findIndex(c => rules.private_authority_snapshot(id(c.journey), id(c.head), id(live.journey), id(live.head)));
     if (index >= 0) contexts[index] = live;
   }
+  if (value.sourceHistories !== undefined && !Array.isArray(value.sourceHistories)) throw new Error('Invalid private source histories');
+  const provenance: PrivateView[] = [], sourceHistories: PrivateSourceHistory[] = [];
+  for (const history of value.sourceHistories ?? []) {
+    if (!privateObject(history) || !privateShape(history, ['vault', 'records', 'payloads']) || !validPrivateId(history.vault) || history.vault === options.trust.vault || !Array.isArray(history.records) || !history.records.length || !Array.isArray(history.payloads)) throw new Error('Invalid private source history');
+    const sourceRecords = history.records.map(r => copyPrivateRecord(r as PrivateRecord));
+    const view = await verifyPrivateRecords(sourceRecords, history.payloads as PrivatePayload[], contexts, { vault: history.vault, author: options.trust.author }, { sessions: options.sessions, provenance, historical: true });
+    const copies = privateCopies(view);
+    for (const copy of copies) {
+      const context = contexts.find(c => c.journey === copy.journey);
+      if (!context || history.vault !== await memberVaultId(copy.journey, privateBinding(context, copy.author).principal, copy.author.signingKey, copy.author.recipient)) throw new Error('Private source vault mismatch');
+    }
+    provenance.push(view); sourceHistories.push({ vault: history.vault, records: copies.flatMap(c => c.records), payloads: copies.flatMap(c => c.payloads) });
+  }
   const records = value.records.map(r => copyPrivateRecord(r as PrivateRecord));
-  const view = await verifyPrivateRecords(records, value.payloads as PrivatePayload[], contexts, options.trust, { sessions: options.sessions, source: options.source, historical: options.historical });
+  const view = await verifyPrivateRecords(records, value.payloads as PrivatePayload[], contexts, options.trust, { sessions: options.sessions, source: options.source, provenance, historical: options.historical });
   const copies = privateCopies(view), keys = new Map<string, Uint8Array>(), copyKeys: PrivateBundle['copyKeys'] = [];
   for (const row of value.copyKeys) {
     if (!privateObject(row) || !privateShape(row, ['copy', 'key']) || !validPrivateId(row.copy) || typeof row.key !== 'string' || keys.has(row.copy) || !copies.some(c => c.copy === row.copy)) throw new Error('Invalid private bundle copy key');
@@ -83,7 +99,7 @@ export async function verifyPrivateBundle(value: unknown, options: PrivateBundle
     seen.add(row.descriptor.id); blobs.push({ descriptor: copyPrivateBlob(row.descriptor), ciphertext: row.ciphertext });
   }
   if (seen.size !== descriptors.size) throw new Error('Missing live private blob');
-  const bundle: PrivateBundle = { format: PRIVATE_FORMAT, version: 1, vault: value.vault, author: copyPrivateIdentity(value.author), scope: value.scope as PrivateBundle['scope'], authorityHistories: contexts.map(privateAuthorityHistory), records: copies.flatMap(c => c.records), payloads: copies.flatMap(c => c.payloads), copyKeys, blobs, unavailableDeletedBlobs: deleted };
+  const bundle: PrivateBundle = { format: PRIVATE_FORMAT, version: 1, vault: value.vault, author: copyPrivateIdentity(value.author), scope: value.scope as PrivateBundle['scope'], authorityHistories: contexts.map(privateAuthorityHistory), records: copies.flatMap(c => c.records), payloads: copies.flatMap(c => c.payloads), copyKeys, blobs, unavailableDeletedBlobs: deleted, ...(sourceHistories.length ? { sourceHistories } : {}) };
   return { bundle, view };
 }
 /** There is one derived recipient, not a recipients/grants parameter. */

@@ -252,7 +252,10 @@ export async function validatePrivatePayload(record: PrivateRecord, payload: Pro
   return { type: copied.type, typeVersion: copied.typeVersion, body: { title: result.title, tags: result.tags, content: result.content, attachments: result.attachments.map((a, i) => ({ blob: copyPrivateBlob(blobs[i]!), name: a.name, mime: a.mime, ...(a.path === undefined ? {} : { path: a.path }) })) } };
 }
 
-interface VerifiedCopies { vault: string; copies: Map<string, PrivateCopyState> }
+interface VerifiedCopies { vault: string; copies: Map<string, PrivateCopyState>; versions: Map<string, Map<string, PrivateCopyState>> }
+export async function memberVaultId(journey: string, principal: string, signingKey: string, recipient: string): Promise<string> {
+  return (await privateBytesHash(utf8(canonical({ domain: 'wayfinding/private/member-v1', journey, principal, signingKey, recipient })))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
 export interface PrivateView { readonly vault: string }
 const views = new WeakMap<PrivateView, VerifiedCopies>();
 export function privateCopies(view: PrivateView): PrivateCopyState[] {
@@ -269,7 +272,7 @@ function ruleCopy(value: PrivateCopyState, id: (s: string | null | undefined) =>
 }
 /** All-or-nothing, signed per-copy replay. Supporting authority is independently
  * verified; caller indexes, payload actions and claimed credential classes are ignored. */
-export async function verifyPrivateRecords(records: readonly PrivateRecord[], payloads: readonly PrivatePayload[], authorities: readonly PrivateContext[], trust: { vault: string; author: PrivateIdentity }, options: { sessions?: readonly PrivateSession[]; source?: PrivateView; historical?: boolean } = {}): Promise<PrivateView> {
+export async function verifyPrivateRecords(records: readonly PrivateRecord[], payloads: readonly PrivatePayload[], authorities: readonly PrivateContext[], trust: { vault: string; author: PrivateIdentity }, options: { sessions?: readonly PrivateSession[]; source?: PrivateView; provenance?: readonly PrivateView[]; historical?: boolean } = {}): Promise<PrivateView> {
   if (!validPrivateId(trust.vault) || !validatePrivateIdentity(trust.author)) throw new Error('Invalid private trust');
   const copies = new Map<string, PrivateCopyState>(), operations = new Map<string, string>();
   const historicalSources = new Map<string, Map<string, PrivateCopyState>>();
@@ -280,6 +283,15 @@ export async function verifyPrivateRecords(records: readonly PrivateRecord[], pa
   const knownTypes = await Promise.all(ARTIFACT_TYPES.map(artifactTypeHash));
   const sourceCopies = options.source ? views.get(options.source)?.copies : undefined;
   if (options.source && !sourceCopies) throw new Error('Unverified private source');
+  const provenanceSources = new Map<string, Map<string, PrivateCopyState>>(), provenanceCurrent = new Map<string, PrivateCopyState>();
+  for (const view of options.provenance ?? []) {
+    const verified = views.get(view);
+    if (!verified) throw new Error('Unverified private provenance');
+    for (const [copy, versions] of verified.versions) {
+      if (provenanceSources.has(copy)) throw new Error('Conflicting private provenance');
+      provenanceSources.set(copy, versions); provenanceCurrent.set(copy, verified.copies.get(copy)!);
+    }
+  }
   for (const input of records) {
     const r = copyPrivateRecord(input), hash = await privateHash(r);
     if (r.vault !== trust.vault || !validatePrivateIdentity(r.body.author) || !sameIdentity(r.body.author, trust.author)) throw new Error('Private author/vault mismatch');
@@ -305,13 +317,13 @@ export async function verifyPrivateRecords(records: readonly PrivateRecord[], pa
     const allowed = options.historical ? rules.private_write(model.members, model.id(privateBinding(context, trust.author).principal), model.id(binding.principal), historicalCredential, ruleVersion(data.state.minClientVersion), data.state.pendingRotation === true, true)
       : !!actorSession && privateAccess(context, trust.author, actorSession, true);
     const strings = [r.copy, r.body.artifact as string, canonical(trust.author), canonical(r.actor), r.authority.journey, r.sig, r.prev ?? '', ...Object.keys(data.state.projects?.items ?? {})];
-    for (const c of [...copies.values(), ...(sourceCopies?.values() ?? [])]) strings.push(...ruleCopyStrings(c));
+    for (const c of [...copies.values(), ...(sourceCopies?.values() ?? []), ...provenanceCurrent.values()]) strings.push(...ruleCopyStrings(c));
     for (const key of ['version', 'typeHash', 'predecessor', 'comment', 'onVersion', 'project']) if (typeof r.body[key] === 'string') strings.push(r.body[key]);
     if (r.type === 'private.copy') {
       // SAFETY: validatePrivateRecord above checks the exact origin fields.
       const origin = r.body.origin as unknown as PrivateOrigin;
       strings.push(origin.version);
-      const historicalSource = options.historical ? historicalSources.get(origin.copy)?.get(origin.version) : undefined;
+      const historicalSource = provenanceSources.get(origin.copy)?.get(origin.version) ?? (options.historical ? historicalSources.get(origin.copy)?.get(origin.version) : undefined);
       if (historicalSource) strings.push(...ruleCopyStrings(historicalSource));
     }
     for (const b of (r.body.blobs as PrivateBlob[] | undefined) ?? []) strings.push(b.id);
@@ -326,13 +338,15 @@ export async function verifyPrivateRecords(records: readonly PrivateRecord[], pa
     if (r.type === 'private.copy') {
       // SAFETY: copyPrivateRecord validated the exact private.copy origin fields.
       const o = r.body.origin as unknown as PrivateOrigin;
-      let source = sourceCopies?.get(o.copy);
+      let source = sourceCopies?.get(o.copy) ?? (options.historical ? provenanceSources.get(o.copy)?.get(o.version) : provenanceCurrent.get(o.copy));
       // A complete author backup carries the independently signed source history.
       // Replay only its origin prefix: later edits/deletion cannot invalidate a
       // snapshot already copied into another journey. Live proposals still need
       // the explicitly supplied current source and current write sessions.
       if (options.historical && !source) source = historicalSources.get(o.copy)?.get(o.version);
       if (!source || source.journey !== o.journey || source.artifact !== o.artifact || !rules.private_origin_version(id(source.head), id(o.version)) || !sameIdentity(source.author, trust.author)) throw new Error('Private copy origin mismatch');
+      const sourceRecord = source.records[0]!, sourceContext = authorities.find(c => rules.private_authority_snapshot(authorityIds.id(c.journey), authorityIds.id(c.head), authorityIds.id(source.journey), authorityIds.id(sourceRecord.authority.head)));
+      if (!sourceContext || sourceRecord.vault === trust.vault || sourceRecord.vault !== await memberVaultId(source.journey, privateBinding(sourceContext, source.author).principal, source.author.signingKey, source.author.recipient)) throw new Error('Private source vault mismatch');
       const versionRecord = source.records.find(v => v.body.version === o.version)!;
       const sourcePayload = source.payloads.find(v => v.record === versionRecord.id)!.payload;
       if (await privateHash(versionRecord) !== o.recordHash || await privateSnapshotHash(sourcePayload) !== r.body.snapshotHash || await privateSnapshotHash(cleanPayload) !== r.body.snapshotHash) throw new Error('Private copy snapshot mismatch');
@@ -357,13 +371,13 @@ export async function verifyPrivateRecords(records: readonly PrivateRecord[], pa
     const names = (n: bigint) => namespace(strings).ids[Number(n) - 2]!;
     const value: PrivateCopyState = { copy: r.copy, artifact: r.body.artifact as string, author: copyPrivateIdentity(trust.author), journey: context.journey, typeHash: names(next.typeHash), head: names(next.head), deleted: next.deleted, project: names(next.project) ?? null, placement: names(next.placement) ?? null, records: [...(old?.records ?? []), r], payloads: [...(old?.payloads ?? []), { record: r.id, payload: cleanPayload }] };
     copies.set(r.copy, value);
-    if (options.historical && typeof r.body.version === 'string') {
+    if (typeof r.body.version === 'string') {
       const versions = historicalSources.get(r.copy) ?? new Map<string, PrivateCopyState>();
       versions.set(r.body.version, value); historicalSources.set(r.copy, versions);
     }
   }
   if (payloadMap.size !== operations.size) throw new Error('Unreferenced private payload');
-  const view = Object.freeze({ vault: trust.vault }); views.set(view, { vault: trust.vault, copies }); return view;
+  const view = Object.freeze({ vault: trust.vault }); views.set(view, { vault: trust.vault, copies, versions: historicalSources }); return view;
 }
 /** Snapshot hashes bind logical content/attachment bytes, not destination handles. */
 export async function privateSnapshotHash(payload: ProtocolRecord): Promise<string> {

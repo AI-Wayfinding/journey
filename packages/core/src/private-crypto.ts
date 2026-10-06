@@ -7,11 +7,7 @@ import type { PrivateIdentity } from './private.js';
 
 export const PRIVATE_CHUNK_BYTES = PRIVATE_SLOT_BYTES - 32;
 export const PRIVATE_HEADER_BYTES = 32768;
-/** Stable random-looking local namespace, bound to signed admission and member
- * keys, not private operations. The server still uses its authenticated mapping. */
-export async function memberVaultId(journey: string, principal: string, signingKey: string, recipient: string): Promise<string> {
-  return (await privateBytesHash(utf8(canonical({ domain: 'wayfinding/private/member-v1', journey, principal, signingKey, recipient })))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
+export { memberVaultId } from './private.js';
 const random = (size: number): Uint8Array => { const bytes = new Uint8Array(size); for (let i = 0; i < size; i += 65536) crypto.getRandomValues(bytes.subarray(i, Math.min(size, i + 65536))); return bytes; };
 export const privateRandomBytes = random;
 export function privateEncode(bytes: Uint8Array): string {

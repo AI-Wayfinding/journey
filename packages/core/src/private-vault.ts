@@ -101,7 +101,8 @@ function bundleForCopies(copies: PrivateCopyState[], sources: PrivateBundle[]): 
   for (const source of sources) for (const key of source.copyKeys) if (ids.has(key.copy) && keys.get(key.copy)!.key !== key.key) throw new Error('Private fork copy key conflict');
   const histories = new Map(sources.flatMap(b => b.authorityHistories).map(h => [canonical(h), h]));
   const blobs = new Map(sources.flatMap(b => b.blobs).filter(b => live.has(b.descriptor.id)).map(b => [b.descriptor.id, b]));
-  return { format: PRIVATE_FORMAT, version: 1, vault: first.vault, author: copyPrivateIdentity(first.author), scope: 'author-backup', authorityHistories: [...histories.values()], records: copies.flatMap(c => c.records), payloads: copies.flatMap(c => c.payloads), copyKeys: [...keys.values()], blobs: [...blobs.values()], unavailableDeletedBlobs: [...all].filter(id => !live.has(id)).sort() };
+  const sourceHistories = [...new Map(sources.flatMap(b => b.sourceHistories ?? []).map(h => [canonical(h), h])).values()];
+  return { format: PRIVATE_FORMAT, version: 1, vault: first.vault, author: copyPrivateIdentity(first.author), scope: 'author-backup', authorityHistories: [...histories.values()], records: copies.flatMap(c => c.records), payloads: copies.flatMap(c => c.payloads), copyKeys: [...keys.values()], blobs: [...blobs.values()], unavailableDeletedBlobs: [...all].filter(id => !live.has(id)).sort(), ...(sourceHistories.length ? { sourceHistories } : {}) };
 }
 /** One controller per open journey. Only scheduled ticks write to the network. */
 export class PrivateVault {
