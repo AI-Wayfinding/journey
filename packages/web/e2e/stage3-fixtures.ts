@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import { PrivateVault, decodeVaultWire, privateIdentity, memberVaultId, verifyPrivateHeader, openPrivateFrame, verifyPrivateContext, importSigningKey, privateHash, privateBytesHash } from '@ai-wayfinding/core';
 import type { PrivateCheckpoint, PrivateHeader, VaultCacheRecord } from '@ai-wayfinding/core';
 import { headers as previousHeaders, personSecrets } from './stage1-fixtures.js';
-import { verifyControlProofs, unwrapJourneyKey, sealControlLabels, signControlProof, newId } from '@ai-wayfinding/core';
+import { verifyControlProofs, unwrapJourneyKey, sealControlLabels, sealProjectPayload, signControlProof, newId } from '@ai-wayfinding/core';
 import type { Member, JsonObject } from '@ai-wayfinding/core';
 
 export const headers = { ...previousHeaders, 'X-Private-Format': 'private-v1' };
@@ -27,7 +27,8 @@ export async function stored(page: Page, id: string) {
 export async function change(page: Page, id: string, type: string, body: JsonObject) {
   const c = await stored(page, id), at = new Date().toISOString(), seq = c.state.lastSeq + 1;
   const entry = { v: 1 as const, seq, prev: c.state.lastHash, at, actor: c.actor, type, body };
-  const envelope = await sealControlLabels(entry, { id: newId(), journey: id, seq, epoch: c.key.epoch, createdAt: at }, c.key);
+  const outside = { id: newId(), journey: id, seq, epoch: c.key.epoch, createdAt: at };
+  const envelope = type.startsWith('project.') ? await sealProjectPayload(type as 'project.join' | 'project.state', body, {}, outside, c.key) : await sealControlLabels(entry, outside, c.key);
   const proof = await signControlProof(entry, envelope, id, await importSigningKey(c.secrets.signing));
   const response = await page.request.post(`/v1/journeys/${id}/log`, { headers: { ...headers, 'X-Principal': c.actor, 'X-Wayfinding': '1', Origin: new URL(page.url()).origin }, data: { control: { proof, envelope } } }); expect(response.status(), await response.text()).toBe(201);
 }
@@ -38,7 +39,8 @@ export async function durable(page: Page, id: string) {
   const vault = await memberVaultId(id, current.actor, author.signingKey, author.recipient);
   const response = await page.request.get(`/v1/journeys/${id}/private-vault?slots=all`, { headers: { ...headers, 'X-Principal': current.actor } });
   expect(response.status()).toBe(200);
-  const bytes = await response.body(), wire = decodeVaultWire(new Uint8Array(bytes), 'all');
+  const bytes = await response.body(); await response.dispose();
+  const wire = decodeVaultWire(new Uint8Array(bytes), 'all');
   expect(wire.slots).toHaveLength(64);
   for (const slot of wire.slots) expect(Buffer.from(slot.ciphertext, 'base64')).toHaveLength(1_048_576);
   if (!wire.frame) throw new Error('Expected initialized signed vault');
@@ -49,7 +51,7 @@ export async function durable(page: Page, id: string) {
   const snapshot: VaultCacheRecord = { token: wire.token, frame: wire.frame, slots: wire.slots.map(s => s.ciphertext), checkpoint: checked.checkpoint };
   const reader = new PrivateVault({ identity: current.secrets.identity, signingKey: await importSigningKey(current.secrets.signing), trust: { vault, author }, historical: true, contexts: [context], cache: { read: async () => snapshot, commit: async () => { throw new Error('Historical verifier must not commit'); } }, transport: { read: async () => { throw new Error('Historical verifier must not fetch'); }, commit: async () => { throw new Error('Historical verifier must not commit'); } } });
   await reader.open(); const branches = reader.branches; reader.close();
-  return { current, vault, author, snapshot, branches, bytes, head: await privateHash(frame.header) };
+  return { current, vault, author, snapshot, branches, head: await privateHash(frame.header) };
 }
 export async function frozen(page: Page) {
   const now = new Date(); await page.clock.install({ time: now }); await page.clock.pauseAt(now);
@@ -57,6 +59,7 @@ export async function frozen(page: Page) {
 export async function scheduled(page: Page) {
   const committed = page.waitForResponse(r => r.url().endsWith('/private-vault') && r.request().method() === 'PUT');
   await page.clock.runFor(300_000); expect((await committed).status()).toBe(200);
+  await expect.poll(async () => { await page.clock.runFor(1000); return page.locator('#private-save-status').textContent(); }).toContain('Verified committed');
 }
 export async function navigate(page: Page, path: string) {
   await page.evaluate(path => { history.pushState(null, '', path); window.dispatchEvent(new PopStateEvent('popstate')); }, path);
@@ -80,8 +83,22 @@ export function observe(page: Page) {
 // production test hook. Blank device pages avoid running two UI controllers.
 let bundle: Promise<string> | undefined;
 async function adapterBundle(): Promise<string> {
-  bundle ??= build({ stdin: { contents: "export { BrowserPrivateArtifacts } from './src/private.ts'; export { restorePersonKeys, clearPersonKeys, lockPersonKeys, getPersonKeys } from './src/keys.ts'; export { verifiedJourney } from './src/journey.ts'; export { closePrivateVaults, openJourneyVault, BrowserPrivateStore } from './src/private-store.ts'; export * from '@ai-wayfinding/core';", resolveDir: resolve('.'), sourcefile: 'stage3-device.ts', loader: 'ts' }, bundle: true, write: false, format: 'iife', globalName: 'Stage3', platform: 'browser', target: 'es2022' }).then(r => r.outputFiles[0]!.text);
+  bundle ??= build({ stdin: { contents: "export { BrowserPrivateArtifacts } from './src/private.ts'; export { restorePersonKeys, clearPersonKeys, lockPersonKeys, getPersonKeys } from './src/keys.ts'; export { verifiedJourney } from './src/journey.ts'; export { createProject, participateProject, stateProject } from './src/projects.ts'; export { closePrivateVaults, openJourneyVault, BrowserPrivateStore } from './src/private-store.ts'; export * from '@ai-wayfinding/core';", resolveDir: resolve('.'), sourcefile: 'stage3-device.ts', loader: 'ts' }, bundle: true, write: false, format: 'iife', globalName: 'Stage3', platform: 'browser', target: 'es2022' }).then(r => r.outputFiles[0]!.text);
   return bundle;
+}
+export async function signedAgent(page: Page, agent: { id: string; signingPrivateKey: CryptoKey }, method: 'GET' | 'PUT', path: string, bytes = new Uint8Array()) {
+  const encode = (b: Uint8Array) => Buffer.from(b).toString('base64url'), timestamp = String(Date.now()), nonce = encode(crypto.getRandomValues(new Uint8Array(16)));
+  const hash = encode(new Uint8Array(await crypto.subtle.digest('SHA-256', new Uint8Array(bytes))));
+  const signature = encode(new Uint8Array(await crypto.subtle.sign('Ed25519', agent.signingPrivateKey, new TextEncoder().encode([method, path, hash, timestamp, nonce].join('\n')))));
+  return page.request.fetch(path, { method, ...(method === 'PUT' ? { data: Buffer.from(bytes) } : {}), headers: { ...headers, 'X-Agent-Session': agent.id, 'X-Agent-Timestamp': timestamp, 'X-Agent-Nonce': nonce, 'X-Agent-Signature': signature, ...(method === 'PUT' ? { 'X-Wayfinding': '1', Origin: new URL(page.url()).origin, 'Content-Type': 'application/octet-stream' } : {}) } });
+}
+export async function firstDeviceCheckpoint(page: Page, vault: string, identity: string): Promise<PrivateCheckpoint> {
+  const encrypted = await page.evaluate(async vault => {
+    const db = await new Promise<IDBDatabase>((resolve, reject) => { const r = indexedDB.open('wayfinding-private-' + vault, 1); r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error); });
+    try { return await new Promise<string>((resolve, reject) => { const r = db.transaction('encrypted').objectStore('encrypted').get('checkpoint'); r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error); }); } finally { db.close(); }
+  }, vault);
+  const { openIdentity } = await import('@ai-wayfinding/core');
+  return JSON.parse(await openIdentity(encrypted, [identity]));
 }
 export async function device(context: BrowserContext, source: Page, id: string, paired?: PrivateCheckpoint) {
   const secrets = await personSecrets(source), actor = (await stored(source, id)).actor;

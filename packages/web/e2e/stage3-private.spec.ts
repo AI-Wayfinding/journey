@@ -1,8 +1,9 @@
 import { expect, test } from '@playwright/test';
-import { importArtifactJourney, privateCopies, createAgeIdentity, importPrivateBundle } from '@ai-wayfinding/core';
+import { importArtifactJourney, privateCopies, createAgeIdentity, importPrivateBundle, answerPrivateChallenge, privateIdentity, openIdentity, encodeVaultPatch } from '@ai-wayfinding/core';
+import { requestAgent } from './agent.js';
 import { browserPerson, signUp } from './person.js';
 import { createTrip, downloadBytes, joinTrip } from './stage1-fixtures.js';
-import { addPrivate, durable, frozen, scheduled, device, observe, headers, controls, change, principal, navigate } from './stage3-fixtures.js';
+import { addPrivate, durable, frozen, scheduled, device, observe, headers, controls, change, principal, navigate, firstDeviceCheckpoint, signedAgent } from './stage3-fixtures.js';
 
 // These tests use real browser code, real signed controls, Durable Objects and
 // server vault bytes. No save-triggered sync or in-memory-only success oracle.
@@ -81,7 +82,8 @@ test('unpaired second device warns; paired checkpoint preserves freshness and re
     try {
       // Trusted checkpoint comes directly from first device's verified encrypted
       // cache, simulating the existing out-of-band pairing input seam.
-      const paired = { ...saved.snapshot.checkpoint, freshness: 'paired' as const };
+      await expect.poll(async () => (await firstDeviceCheckpoint(owner.page, saved.vault, saved.current.secrets.identity)).head).toBe(saved.head);
+      const paired = { ...await firstDeviceCheckpoint(owner.page, saved.vault, saved.current.secrets.identity), freshness: 'paired' as const };
       const second = await device(pairedContext, owner.page, trip.id, paired);
       expect(await second.evaluate(() => (window as any).privateWork.vault.freshness)).toBe('paired');
       const current = await durable(owner.page, trip.id), retained = await second.evaluate(() => (window as any).privateWork.vault.retainedCheckpoint);
@@ -92,5 +94,125 @@ test('unpaired second device warns; paired checkpoint preserves freshness and re
       expect(await second.evaluate(async () => { try { await (window as any).Stage3.openJourneyVault((window as any).privateContext); return 'accepted'; } catch (error) { return (error as Error).message; } })).toContain('rollback');
       expect(puts).toBe(0); expect((await durable(owner.page, trip.id)).head).toBe(current.head);
     } finally { await pairedContext.close(); }
+  } finally { await owner.context.close(); }
+});
+
+
+test('a read-only person can reopen committed private content but cannot write it', async ({ browser }) => {
+  const owner = await browserPerson(browser);
+  try {
+    await signUp(owner.page, `private-readonly-${Date.now()}@example.org`);
+    await frozen(owner.page); const trip = await createTrip(owner.page);
+    const path = await addPrivate(owner.page, trip.path, 'READONLY PRIVATE CANARY', 'Still readable after a downgrade');
+    await scheduled(owner.page);
+    const before = await durable(owner.page, trip.id);
+    await change(owner.page, trip.id, 'member.role', { member: before.current.actor, role: 'read-only' });
+    const readonlyContext = await browser.newContext({ storageState: await owner.context.storageState() });
+    try {
+      const reader = await device(readonlyContext, owner.page, trip.id), retained = await durable(owner.page, trip.id);
+      await expect(reader.evaluate(() => (window as any).privateWork.save({ title: 'FORBIDDEN PRIVATE WRITE', tags: [], content: { kind: 'document', markdown: 'Must not survive' }, attachments: [] }))).rejects.toThrow('Private write authority denied');
+      expect((await durable(owner.page, trip.id)).head).toBe(retained.head);
+      expect(privateCopies((await durable(owner.page, trip.id)).branches[0]!.view)).toHaveLength(1);
+    } finally { await readonlyContext.close(); }
+    await navigate(owner.page, path);
+    await expect(owner.page.getByRole('heading', { name: 'READONLY PRIVATE CANARY', exact: true })).toBeVisible();
+    await expect(owner.page.getByRole('link', { name: 'Edit private artifact', exact: true })).toHaveCount(0);
+    await expect(owner.page.getByRole('button', { name: 'Delete private artifact', exact: true })).toHaveCount(0);
+  } finally { await owner.context.close(); }
+});
+
+
+test('private cross-journey copies have independent keys, files and lifecycle; placement filters keep archived content readable', async ({ browser }) => {
+  test.setTimeout(300_000);
+  const owner = await browserPerson(browser);
+  try {
+    await signUp(owner.page, `private-copy-${Date.now()}@example.org`); await frozen(owner.page);
+    const source = await createTrip(owner.page, 'Private source');
+    await navigate(owner.page, '/'); const destination = await createTrip(owner.page, 'Private destination');
+    await navigate(owner.page, source.path + '/projects'); await owner.page.getByLabel('Purpose', { exact: true }).fill('Private grouping');
+    await owner.page.getByRole('button', { name: 'Create project', exact: true }).click();
+    await expect(owner.page).toHaveURL(/\/projects\/[0-9A-Z]+$/);
+    const project = new URL(owner.page.url()).pathname.split('/').at(-1)!;
+    await expect(owner.page.locator('#project-purpose-text')).toHaveText('Private grouping');
+    const path = await addPrivate(owner.page, source.path, 'INDEPENDENT PRIVATE COPY', 'Original snapshot', Buffer.from('Independent bytes'));
+    await scheduled(owner.page); const original = await durable(owner.page, source.id);
+    await owner.page.getByLabel('Place private copy in').selectOption(project); await owner.page.getByRole('button', { name: 'Save private placement', exact: true }).click();
+    await expect(owner.page.getByLabel('Place private copy in')).toHaveValue(project); await scheduled(owner.page);
+    const placed = await durable(owner.page, source.id); expect(privateCopies(placed.branches[0]!.view)[0]!.project).toBe(project);
+    await navigate(owner.page, source.path + '/private'); await expect(owner.page.locator('#private-count')).toHaveText('0 matching author-private artifacts');
+    await owner.page.getByLabel('Private artifact list', { exact: true }).selectOption(project); await expect(owner.page.locator('#private-count')).toHaveText('1 matching author-private artifacts');
+    await owner.page.getByLabel('Private artifact list', { exact: true }).selectOption('all'); await expect(owner.page.locator('#private-count')).toHaveText('1 matching author-private artifacts');
+    await change(owner.page, source.id, 'project.join', { format: 'project-v1', project, member: original.current.actor, predecessor: null });
+    await change(owner.page, source.id, 'project.state', { format: 'project-v1', project, state: 'archived', predecessor: 1 });
+    await navigate(owner.page, source.path + '/projects/' + project); await expect(owner.page.locator('#project-state')).toContainText('archived');
+    await navigate(owner.page, source.path + '/private'); await owner.page.getByLabel('Private artifact list', { exact: true }).selectOption(project); await expect(owner.page.getByRole('link', { name: 'INDEPENDENT PRIVATE COPY', exact: true })).toBeVisible();
+    await navigate(owner.page, path); await owner.page.getByLabel('Copy privately to journey').selectOption(destination.id); await owner.page.getByRole('button', { name: 'Create independent private copy', exact: true }).click();
+    await expect(owner.page).toHaveURL(new RegExp(destination.path + '/private/[A-Za-z0-9_-]{43}$')); const copiedPath = new URL(owner.page.url()).pathname;
+    await scheduled(owner.page); const copied = await durable(owner.page, destination.id), sourceNow = await durable(owner.page, source.id), destCopy = privateCopies(copied.branches[0]!.view)[0]!;
+    expect(copied.vault).not.toBe(original.vault); expect(destCopy.copy).not.toBe(privateCopies(original.branches[0]!.view)[0]!.copy); expect(destCopy.author).toEqual(original.author); expect(destCopy.project).toBeNull();
+    expect(destCopy.records.map(r => r.type)).toEqual(['private.copy']); expect(destCopy.records[0]!.body.destination).toEqual({ journey: destination.id, copy: destCopy.copy });
+    expect(copied.branches[0]!.bundle.copyKeys[0]!.key).not.toBe(sourceNow.branches[0]!.bundle.copyKeys[0]!.key);
+    expect(copied.branches[0]!.bundle.blobs[0]!.descriptor.id).not.toBe(sourceNow.branches[0]!.bundle.blobs[0]!.descriptor.id);
+    expect(copied.branches[0]!.bundle.blobs[0]!.ciphertext).not.toBe(sourceNow.branches[0]!.bundle.blobs[0]!.ciphertext);
+    expect(copied.branches[0]!.bundle.sourceHistories![0]!.vault).toBe(original.vault);
+    await navigate(owner.page, path); owner.page.once('dialog', d => { void d.accept(); }); await owner.page.getByRole('button', { name: 'Delete private artifact', exact: true }).click(); await scheduled(owner.page);
+    expect(privateCopies((await durable(owner.page, source.id)).branches[0]!.view)[0]!.deleted).toBe(true);
+    await navigate(owner.page, copiedPath); await expect(owner.page.getByRole('heading', { name: 'INDEPENDENT PRIVATE COPY', exact: true })).toBeVisible();
+    const download = owner.page.waitForEvent('download'); await owner.page.getByRole('button', { name: 'Download secret.bin', exact: true }).click(); expect(await downloadBytes(await download)).toEqual(Buffer.from('Independent bytes'));
+    expect(privateCopies((await durable(owner.page, destination.id)).branches[0]!.view)[0]!.deleted).toBe(false);
+    expect(JSON.stringify(await controls(owner.page, destination.id))).not.toContain(destCopy.copy);
+  } finally { await owner.context.close(); }
+});
+
+
+test('empty and populated browser lifetimes use matched two-slot dummy/dirty traffic, retained-cache reopen and lock cancellation', async ({ browser }) => {
+  test.setTimeout(300_000);
+  const owner = await browserPerson(browser);
+  try {
+    await signUp(owner.page, `private-traffic-${Date.now()}@example.org`); await frozen(owner.page);
+    const first = observe(owner.page), trip = await createTrip(owner.page);
+    expect(first.filter(r => r.method === 'GET' && r.path.endsWith('?slots=all'))).toHaveLength(1);
+    await navigate(owner.page, trip.path + '/private'); first.length = 0; const start = await owner.page.evaluate(() => Date.now());
+    await scheduled(owner.page); const empty = await durable(owner.page, trip.id), dummy = first.map(r => ({ method: r.method, path: r.path, bytes: r.bytes, headers: r.headers }));
+    expect(dummy.map(r => r.method)).toEqual(['GET', 'PUT']); expect(dummy[0]!.path).toBe(`/v1/journeys/${trip.id}/private-vault?slots=two`); expect(dummy[1]!.bytes).toBe(2_129_986);
+    first.length = 0; const path = await addPrivate(owner.page, trip.path, 'TRAFFIC PRIVATE CANARY', 'Not sent on save'); expect(first).toEqual([]);
+    await owner.page.clock.runFor(start + 600_000 - await owner.page.evaluate(() => Date.now()) - 1); expect(first).toEqual([]);
+    const put = owner.page.waitForResponse(r => r.url().endsWith('/private-vault') && r.request().method() === 'PUT'); await owner.page.clock.runFor(1); expect((await put).status()).toBe(200);
+    await expect.poll(async () => (await durable(owner.page, trip.id)).branches.length).toBe(1);
+    const populated = await durable(owner.page, trip.id); expect(populated.snapshot.checkpoint.version).toBe(empty.snapshot.checkpoint.version + 1);
+    expect(first.map(r => ({ method: r.method, path: r.path, bytes: r.bytes, headers: r.headers }))).toEqual(dummy);
+    await navigate(owner.page, '/'); first.length = 0; await navigate(owner.page, path); await expect(owner.page.getByRole('heading', { name: 'TRAFFIC PRIVATE CANARY', exact: true })).toBeVisible();
+    expect(first.filter(r => r.path.endsWith('?slots=all'))).toEqual([]); expect(first.map(r => r.method)).toEqual(['GET', 'PUT']);
+    const held = await durable(owner.page, trip.id); first.length = 0;
+    await owner.page.evaluate(() => window.dispatchEvent(new Event('pagehide')));
+    await expect(owner.page.getByRole('heading', { name: 'Session locked' })).toBeVisible(); expect(await owner.page.locator('main').textContent()).not.toContain('TRAFFIC PRIVATE CANARY');
+    await owner.page.clock.runFor(600_000); expect(first).toEqual([]); expect((await durable(owner.page, trip.id)).head).toBe(held.head);
+  } finally { await owner.context.close(); }
+});
+
+
+test('own authenticated read-only agent gets its wrap and possession handoff but cannot PUT; person records returned work', async ({ browser, request }) => {
+  test.setTimeout(300_000);
+  const owner = await browserPerson(browser);
+  try {
+    await signUp(owner.page, `private-agent-${Date.now()}@example.org`); await frozen(owner.page); const trip = await createTrip(owner.page);
+    const agent = await requestAgent(request, trip.id, 'Private reader');
+    await navigate(owner.page, new URL(agent.approvalUrl).pathname); await owner.page.getByLabel('Six-digit code').fill(agent.code); await owner.page.getByLabel('Access', { exact: true }).selectOption('read');
+    await owner.page.getByRole('button', { name: 'Confirm with passkey', exact: true }).click(); await expect(owner.page.getByRole('heading', { name: 'Agent approved' })).toBeVisible();
+    const path = await addPrivate(owner.page, trip.path, 'SCOPED AGENT INPUT', 'The person owns this content'); await scheduled(owner.page); const saved = await durable(owner.page, trip.id);
+    const wrap = await signedAgent(owner.page, agent, 'GET', `/v1/journeys/${trip.id}/private-agent-wrap/${agent.principal}`); expect(wrap.status()).toBe(200); expect(JSON.stringify(await wrap.json())).not.toContain('SCOPED AGENT INPUT');
+    const read = await signedAgent(owner.page, agent, 'GET', `/v1/journeys/${trip.id}/private-vault?slots=00,01`); expect(read.status()).toBe(200); expect((await read.body()).length).toBe(2_129_987); await read.dispose();
+    const denied = await signedAgent(owner.page, agent, 'PUT', `/v1/journeys/${trip.id}/private-vault`, encodeVaultPatch({ token: saved.snapshot.token, frame: saved.snapshot.frame, slots: [0, 1].map(index => ({ index, ciphertext: saved.snapshot.slots[index]! })) })); expect(denied.status()).toBe(403); expect((await durable(owner.page, trip.id)).head).toBe(saved.head);
+    await owner.page.getByRole('button', { name: 'Create one-use possession challenge', exact: true }).click();
+    await expect(owner.page.locator('#private-challenge')).not.toBeEmpty(); const challenge = JSON.parse((await owner.page.locator('#private-challenge').textContent())!);
+    const response = await answerPrivateChallenge(challenge, agent.signingPrivateKey, agent.identity);
+    await owner.page.getByLabel('Agent possession response JSON').fill(JSON.stringify(response)); const downloading = owner.page.waitForEvent('download'); await owner.page.getByRole('button', { name: 'Download scoped encrypted handoff', exact: true }).click();
+    const ciphertext = (await downloadBytes(await downloading)).toString(); expect(ciphertext).not.toContain('SCOPED AGENT INPUT');
+    const opened = JSON.parse(await openIdentity(ciphertext, [agent.identity])); expect(opened.scope).toBe('agent-handoff'); expect(opened.payloads[0].payload.body.title).toBe('SCOPED AGENT INPUT'); expect(opened.author).toEqual(saved.author);
+    await expect(openIdentity(ciphertext, [saved.current.secrets.identity])).rejects.toThrow();
+    await owner.page.getByRole('button', { name: 'Download scoped encrypted handoff', exact: true }).click(); await expect(owner.page.locator('main > [role="alert"]')).toContainText('Create a fresh local challenge first');
+    expect((await durable(owner.page, trip.id)).head).toBe(saved.head);
+    await navigate(owner.page, path + '/edit'); await owner.page.getByLabel('Private body', { exact: true }).fill('Reviewed agent result, recorded by the person'); await owner.page.getByRole('button', { name: 'Save private artifact', exact: true }).click(); await expect(owner.page).toHaveURL(path); await scheduled(owner.page);
+    const result = await durable(owner.page, trip.id); expect(privateCopies(result.branches[0]!.view)[0]!.records.at(-1)!.actor).toEqual(saved.author); expect(result.branches[0]!.bundle.payloads.at(-1)!.payload.body.content).toEqual({ kind: 'document', markdown: 'Reviewed agent result, recorded by the person' });
   } finally { await owner.context.close(); }
 });

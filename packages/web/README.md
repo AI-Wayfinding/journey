@@ -42,6 +42,24 @@ A saved artifact has a separate Project placement form. Assign, move or clear it
 
 Purpose/state, participation and placement use the revision loaded with the page. A stale change fails with a reload instruction rather than overwriting newer work. Signed history records who changed what and when. The browser verifies the entire history before displaying content; unknown controls, bad payloads, missing capabilities or newer minimums cannot leave a partial project view. Purpose text is escaped, not interpreted as markup or fetched.
 
+## Author-private artifacts
+
+Open Author-private artifacts from a journey to create, read, version, comment on or delete a private copy. Private files use the same bounded local viewers as journey-visible files. Search and project placement are private to the author. Cross-journey copies keep their author and use independent copy keys, attachments and signed source histories. There is no private-to-public toggle or arbitrary recipient grant.
+
+The member vault is server-backed, separate from shared records, blobs and exports. It has 64 fixed 1 MiB ciphertext slots. Opening a journey starts the portable vault lifecycle, including empty vaults. A save stages content locally; it does not upload immediately. The next 5-minute sync reads and writes exactly two slots and a signed header, including dummy commits. The screen distinguishes pending saves from verified committed history. Pending saves are discarded on lock, sign-out or leaving the journey lifetime; do not treat them as durable.
+
+IndexedDB retains ciphertext and an independently encrypted signed checkpoint, not decoded private content. `openJourneyVault(ctx, paired)` accepts a trusted `PrivateCheckpoint` with `freshness: 'paired'` from another device. There is no pairing workflow or UI yet; callers must obtain that input out of band. Without it, the screen shows an unverified freshness warning even for a signature-verified server head. A retained checkpoint refuses older signed heads. Server-backed storage is not an offline freshness guarantee, and removing access cannot recall downloaded keys or copies.
+
+Private backup/import uses a separate download encrypted to the person's existing keys, never the journey recovery recipient. Imports cannot replace newer history or resurrect deletions. Verified device snapshots can be submitted for portable fork merging; higher artifact versions win and tied versions remain visible rather than silently replacing one another.
+
+Agent handoff uses a local one-use challenge requiring both signing-key and age-key possession by an eligible authenticated agent. The agent reads the person's scoped content; the person reviews and records the result. Agent authorship is not enabled. Link credentials never receive private content.
+
+Browser Stage 3 evidence runs with:
+
+```sh
+npm run test:e2e -w @ai-wayfinding/web -- e2e/stage3-private.spec.ts
+```
+
 ## Local tests
 
 From the repository root, run:
