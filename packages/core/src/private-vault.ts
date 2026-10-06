@@ -1,5 +1,5 @@
-import rules from '@ai-wayfinding/rules';
-import type { List } from '@ai-wayfinding/rules';
+import rules from './rules/rules.mjs';
+import type { List } from './rules/rules.mjs';
 
 import { canonical } from './log.js';
 import { createAgeIdentity, deriveRecipient } from './keys.js';

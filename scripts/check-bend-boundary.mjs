@@ -30,6 +30,8 @@ function build() {
     }
   }
   assert.match(read('packages/core/src/rules.ts'), /import rules from '\.\/rules\/rules\.mjs'/);
+  // Published core ships its own rules copy; the rules package is never published.
+  for (const file of readdirSync(root + 'packages/core/src')) if (/\.ts$/.test(file)) assert(!read(`packages/core/src/${file}`).includes("from '@ai-wayfinding/rules'"), `core/src/${file} must import ./rules/rules.mjs`);
   assert.match(read('packages/server/src/enclave.ts'), /import rules from '@ai-wayfinding\/rules'/);
   for (const name of ['web', 'client']) assert.match(read(`packages/${name}/src/journey.ts`), /canWriteContent/);
   const lock = JSON.parse(read('package-lock.json')).packages;
