@@ -15,7 +15,9 @@ import { mountArtifactViewer } from './artifact-viewer.js';
 import { PROJECT_STATES, canEditProject, effectiveProjectParticipants, projectSelector, selectProjectArtifacts } from '@ai-wayfinding/core';
 import type { ProjectState } from '@ai-wayfinding/core';
 import { canCreateProject, canParticipate, createProject, participateProject, placeArtifact, purposeProject, stateProject } from './projects.js';
-import { closePrivateVaults, openJourneyVault } from './private-store.js';
+import { closePrivateVaults, openJourneyVault, privateSyncError } from './private-store.js';
+import { BrowserPrivateArtifacts } from './private.js';
+import type { PrivateContent } from './private.js';
 import './style.css';
 
 const root = document.querySelector<HTMLDivElement>('#app')!;
@@ -359,7 +361,7 @@ function agentPromptScreen(id: string): void {
 async function journeyHome(id: string): Promise<void> {
   const ctx = await context(id); if (!ctx) return;
   const artifacts = await artifactViews(ctx), readOnly = !canWriteContent(ctx.state, ctx.principal);
-  render(`<section class="panel"><p class="eyebrow">JOURNEY</p><h1>${escape(ctx.state.settings?.name ?? 'Journey')}</h1>${ctx.state.settings?.description ? `<p>${escape(ctx.state.settings.description)}</p>` : ''}<div class="actions">${readOnly ? '<p class="meta">Your access is read-only or a key update is pending.</p>' : `<a class="button" href="/journeys/${id}/add">Add an artifact</a>`}<a class="button" href="/journeys/${id}/agent">Add your agent</a><a class="button" href="/journeys/${id}/members">People &amp; agents</a><a class="button" href="/journeys/${id}/members">Share this journey</a><a class="button" href="/journeys/${id}/export">Export</a><a class="button" href="/journeys/${id}/projects">Projects</a></div><p id="members-summary" class="meta">${escape(membersSummary(ctx.state.members))}</p></section><section class="panel"><h2>Artifacts</h2><label for="project-filter">Artifact list</label><select id="project-filter"><option value="main">Main (unassigned)</option><option value="all">All artifacts</option>${projectOptions(ctx)}</select><p id="artifact-count" class="meta"></p><div class="grid"><div><label for="filter">Filter by type</label><select id="filter"><option value="">All types</option>${ARTIFACT_TYPES.map(t => `<option value="${t}">${t}</option>`).join('')}</select></div><div><label for="search">Search your artifacts</label><input id="search" type="search" placeholder="Search titles, tags and text" /></div></div><div id="artifacts" class="cards"></div></section>`);
+  render(`<section class="panel"><p class="eyebrow">JOURNEY</p><h1>${escape(ctx.state.settings?.name ?? 'Journey')}</h1>${ctx.state.settings?.description ? `<p>${escape(ctx.state.settings.description)}</p>` : ''}<div class="actions">${readOnly ? '<p class="meta">Your access is read-only or a key update is pending.</p>' : `<a class="button" href="/journeys/${id}/add">Add an artifact</a>`}<a class="button" href="/journeys/${id}/agent">Add your agent</a><a class="button" href="/journeys/${id}/members">People &amp; agents</a><a class="button" href="/journeys/${id}/members">Share this journey</a><a class="button" href="/journeys/${id}/export">Export</a><a class="button" href="/journeys/${id}/projects">Projects</a><a class="button" href="/journeys/${id}/private">Author-private artifacts</a></div><p id="members-summary" class="meta">${escape(membersSummary(ctx.state.members))}</p></section><section class="panel"><h2>Artifacts</h2><label for="project-filter">Artifact list</label><select id="project-filter"><option value="main">Main (unassigned)</option><option value="all">All artifacts</option>${projectOptions(ctx)}</select><p id="artifact-count" class="meta"></p><div class="grid"><div><label for="filter">Filter by type</label><select id="filter"><option value="">All types</option>${ARTIFACT_TYPES.map(t => `<option value="${t}">${t}</option>`).join('')}</select></div><div><label for="search">Search your artifacts</label><input id="search" type="search" placeholder="Search titles, tags and text" /></div></div><div id="artifacts" class="cards"></div></section>`);
   const selector = root.querySelector<HTMLSelectElement>('#project-filter')!;
   selector.value = projectSelector(sessionStorage.getItem(`wayfinding-project-filter:${id}`) ?? undefined);
   // Fail closed for a stored unknown project; never fall back to all artifacts.
@@ -642,6 +644,98 @@ async function exportScreen(id: string): Promise<void> {
   render(`<section class="panel"><p><a href="/journeys/${id}">← Back to journey</a></p><h1>Export your journey</h1><p>Your export contains the signed journey history, encrypted artifacts, comments and surviving files, and your key wraps. Deleted artifacts retain signed proofs and encrypted metadata, but their files are unavailable. Previously downloaded copies cannot be recalled. The download is encrypted to you and, by default, your recovery key. Save both to open it later.</p><form id="export-form"><label for="recovery-recipient">Recovery recipient (age public key)</label><input id="recovery-recipient" name="recovery-recipient" required placeholder="age1…" value="${escape(recipient)}" /><div class="actions"><button type="submit">Download encrypted export</button></div></form></section>`);
   form('export-form', async f => { const latest = await verifiedJourney(ctx.id, ctx.principal, ctx.keys); const ciphertext = await exportEncrypted(latest, [ctx.keys.recipient, input(f, 'recovery-recipient')]); download(`wayfinding-${id}.age.txt`, ciphertext); });
 }
+function privateStatus(work: BrowserPrivateArtifacts): string {
+  const checkpoint = work.vault.retainedCheckpoint;
+  return `<p class="notice" id="private-durability">Server-backed encrypted vault. Saves wait for the next 5-minute sync. This is not an offline freshness guarantee. Removal cannot recall downloaded copies.</p><p class="notice" id="private-freshness">${work.vault.freshness === 'paired' ? 'Paired-device freshness checkpoint held.' : 'Unverified freshness: no paired-device checkpoint. The server signature alone cannot prove this is the newest head.'}</p><p role="status" id="private-save-status">${work.saveStatus === 'pending' ? 'Pending scheduled sync' : 'Verified committed'} · Signed vault version ${checkpoint?.version ?? 0}</p><p role="alert" id="private-sync-error">${escape(privateSyncError(work.vault) ?? '')}</p>`;
+}
+function watchPrivate(work: BrowserPrivateArtifacts): void {
+  const timer = setInterval(() => {
+    if (!getPersonKeys()) return;
+    try {
+      const status = root.querySelector('#private-save-status');
+      if (status) status.textContent = `${work.saveStatus === 'pending' ? 'Pending scheduled sync' : 'Verified committed'} · Signed vault version ${work.vault.retainedCheckpoint?.version ?? 0}`;
+      const box = root.querySelector('#private-sync-error'); if (box) box.textContent = privateSyncError(work.vault) ?? '';
+    } catch (cause) { const box = root.querySelector('#private-sync-error'); if (box) box.textContent = cause instanceof Error ? cause.message : 'Private history unavailable'; }
+  }, 1000);
+  const viewer = disposeViewer; disposeViewer = () => { clearInterval(timer); viewer?.(); };
+}
+async function privateList(id: string): Promise<void> {
+  const ctx = await context(id); if (!ctx) return;
+  const work = await BrowserPrivateArtifacts.open(ctx), branches = await work.allBranches();
+  if (branches.length > 1) {
+    // SAFETY: these payload bodies came from complete signature/format-verified private vault branches.
+    render(`<section class="panel"><h1>Conflicting private versions</h1>${privateStatus(work)}<p>Both verified tied versions are retained. Neither is silently replaced. Editing is blocked until the conflict is resolved.</p>${branches.map((copies, n) => `<h2>Branch ${n + 1}</h2><ul>${copies.map(c => { const record = c.records.find(r => r.body.version === c.head), p = c.payloads.find(p => p.record === record?.id)?.payload.body; return `<li>${escape(c.copy)} · ${escape(c.head)}<h3>${escape(p?.title)}</h3><pre>${escape(p ? artifactText(p as unknown as PrivateContent) : '')}</pre></li>`; }).join('')}</ul>`).join('')}</section>`); watchPrivate(work); return;
+  }
+  render(`<section class="panel"><p><a href="/journeys/${id}">← Back to journey</a></p><h1>Author-private artifacts</h1><p>Only you and your eligible authenticated agents can read this vault. Project participation does not grant access. Nothing here enters journey exports or agent links.</p>${privateStatus(work)}<div class="actions">${canWriteContent(ctx.state, ctx.principal) ? `<a class="button" href="/journeys/${id}/private/add">Add a private artifact</a>` : '<p>Your private content access is read-only.</p>'}<a href="/journeys/${id}/private/backup">Private backup and import</a></div><label for="private-project">Private artifact list</label><select id="private-project"><option value="main">Main (unassigned)</option><option value="all">All private artifacts</option>${projectOptions(ctx)}</select><label for="private-search">Search author-private artifacts</label><input type="search" id="private-search" /><p id="private-count"></p><div id="private-artifacts" class="cards"></div></section>`);
+  const show = async () => {
+    const selector = root.querySelector<HTMLSelectElement>('#private-project')!.value, query = root.querySelector<HTMLInputElement>('#private-search')!.value.toLocaleLowerCase();
+    const copies = await work.copies(selector), rows = await Promise.all(copies.map(async copy => ({ copy, content: await work.content(copy) })));
+    if (!root.querySelector('#private-artifacts') || !getPersonKeys()) return;
+    void work.saveStatus;
+    const selected = rows.filter(row => `${row.content.title} ${row.content.tags.join(' ')} ${artifactText(row.content)} ${row.content.attachments.map(a => a.name).join(' ')}`.toLocaleLowerCase().includes(query));
+    root.querySelector('#private-count')!.textContent = `${selected.length} matching author-private artifacts`;
+    root.querySelector('#private-artifacts')!.innerHTML = selected.map(row => `<article class="card"><p class="meta">Author-private · ${escape(row.content.content.kind)}</p><h2><a href="/journeys/${id}/private/${row.copy.copy}">${escape(row.content.title)}</a></h2><p>${escape(artifactText(row.content).slice(0, 160))}</p></article>`).join('') || '<p>No matching private artifacts.</p>';
+  };
+  root.querySelector('#private-project')!.addEventListener('change', () => perform(show)); root.querySelector('#private-search')!.addEventListener('input', () => perform(show));
+  await show(); watchPrivate(work);
+}
+async function privateForm(id: string, copyId?: string): Promise<void> {
+  const ctx = await context(id); if (!ctx) return;
+  if (!canWriteContent(ctx.state, ctx.principal)) throw new Error('Private write authority denied');
+  const work = await BrowserPrivateArtifacts.open(ctx), previous = copyId ? (await work.copies('all')).find(c => c.copy === copyId) : undefined;
+  if (copyId && !previous) throw new Error('Private copy unavailable');
+  const p = previous ? await work.content(previous) : undefined;
+  render(`<section class="panel"><p><a href="/journeys/${id}/private">← Author-private artifacts</a></p><h1>${previous ? 'Edit private artifact' : 'Add a private artifact'}</h1>${privateStatus(work)}<p>Author-private only. There is no public toggle or recipient grant.</p><form id="private-form"><label for="private-type">Private type</label><select id="private-type" ${previous ? 'disabled' : ''}>${ARTIFACT_TYPES.map(t => `<option value="${t}" ${p?.content.kind === t || !p && t === 'document' ? 'selected' : ''}>${t}</option>`).join('')}</select><label for="private-title">Private title</label><input id="private-title" name="private-title" value="${escape(p?.title ?? '')}" required /><label for="private-body">Private body</label><textarea id="private-body" name="private-body">${escape(p ? artifactText(p) : '')}</textarea><label for="private-tags">Private tags</label><input id="private-tags" name="private-tags" value="${escape(p?.tags.join(', ') ?? '')}" /><label for="private-url">Private link URL</label><input id="private-url" name="private-url" value="${escape(p?.content.kind === 'link' ? p.content.url : '')}" /><label for="private-format">Private data format</label><select id="private-format" name="private-format">${['json','csv','toml','yaml','sqlite'].map(f => `<option ${p?.content.kind === 'data' && p.content.format === f ? 'selected' : ''}>${f}</option>`).join('')}</select><label for="private-files">Private attachments</label><input id="private-files" type="file" multiple /><label for="private-paths">Private package paths (one per new file)</label><textarea id="private-paths" name="private-paths"></textarea><p>Existing attachments are kept. Maximum eight files, each 25,000,000 bytes. No remote fetch or execution.</p><button type="submit">Save private artifact</button></form></section>`);
+  form('private-form', async f => {
+    const kind = root.querySelector<HTMLSelectElement>('#private-type')!.value as ArtifactType, text = input(f, 'private-body');
+    let content: ArtifactContent;
+    switch (kind) {
+      case 'document': content = { kind, markdown: text }; break;
+      case 'prompt': content = { kind, text }; break;
+      case 'skill': content = { kind, skill: text }; break;
+      case 'link': content = { kind, url: input(f, 'private-url'), summary: '', notes: text }; break;
+      case 'data': content = { kind, format: input(f, 'private-format') as 'json' | 'csv' | 'toml' | 'yaml' | 'sqlite', text }; break;
+      case 'file': case 'image': content = { kind, primary: p && 'primary' in p.content ? String(p.content.primary) : '' }; break;
+    }
+    const files = [...(root.querySelector<HTMLInputElement>('#private-files')!.files ?? [])], paths = input(f, 'private-paths').split('\n').map(s => s.trim()).filter(Boolean);
+    if (files.length + (p?.attachments.length ?? 0) > MAX_ARTIFACT_ATTACHMENTS) throw new Error('At most eight attachments are allowed.');
+    if (paths.length && paths.length !== files.length) throw new Error('Supply one package path per new file.');
+    const payload: PrivateContent = { title: input(f, 'private-title'), tags: [...new Set(input(f, 'private-tags').split(',').map(s => s.trim()).filter(Boolean))], content, attachments: p?.attachments ?? [] };
+    const saved = await work.saveWithFiles(payload, files.map((file, n) => ({ file, ...(paths[n] || kind === 'skill' ? { path: paths[n] ?? file.name } : {}) })), previous);
+    navigate(`/journeys/${id}/private/${saved}`);
+  }); watchPrivate(work);
+}
+async function privateDetail(id: string, copyId: string): Promise<void> {
+  const ctx = await context(id); if (!ctx) return;
+  const work = await BrowserPrivateArtifacts.open(ctx), copy = (await work.copies('all')).find(c => c.copy === copyId);
+  if (!copy) throw new Error('Private copy unavailable. It may have been deleted.');
+  const p = await work.content(copy), versions = copy.records.filter(r => typeof r.body.version === 'string'), readOnly = !canWriteContent(ctx.state, ctx.principal);
+  const destinations = (await listings()).filter(j => j.id !== id);
+  const agents = await api<{ agents: { principal: string }[] }>(`/journeys/${id}/private-agents`, 'GET', undefined, ctx.principal);
+  const versionRows = (await Promise.all(versions.map(async r => `<li>${escape(r.body.version)} · Writer: ${escape(attribution(ctx, r.authority.principal))}<pre>${escape(artifactText(await work.content(copy, String(r.body.version))))}</pre></li>`))).join('');
+  void work.saveStatus; // A lock or author switch during an await must not restore plaintext.
+  render(`<section class="panel"><p><a href="/journeys/${id}/private">← Author-private artifacts</a></p><p class="eyebrow">AUTHOR-PRIVATE</p><h1>${escape(p.title)}</h1>${privateStatus(work)}<p id="private-author">Author: ${escape(attribution(ctx, ctx.principal))}. Every result below is recorded by its actual signer.</p><div id="private-viewer"></div><ul>${p.attachments.map((a, n) => `<li>${escape(a.name)} <button class="secondary" data-private-download="${n}">Download ${escape(a.name)}</button></li>`).join('')}</ul>${readOnly ? '' : `<a class="button" href="/journeys/${id}/private/${copyId}/edit">Edit private artifact</a><button id="private-delete" class="secondary">Delete private artifact</button>`}</section><section class="panel"><h2>Private versions</h2><ul id="private-versions">${versionRows}</ul><h2>Private comments</h2><ul id="private-comments">${copy.records.filter(r => r.type === 'private.comment').map(r => `<li>Writer: ${escape(attribution(ctx, r.authority.principal))} · Version: ${escape(r.body.onVersion)}<p>${escape(copy.payloads.find(p => p.record === r.id)!.payload.body.text)}</p></li>`).join('')}</ul>${readOnly ? '' : '<form id="private-comment-form"><label for="private-comment">Private comment</label><textarea id="private-comment" name="private-comment" required></textarea><button type="submit">Add private comment</button></form>'}</section>${readOnly ? '' : `<section class="panel"><h2>Private placement and copy</h2><p>Projects group copies, not access. Copies in another journey remain author-private and independent.</p><form id="private-place-form"><label for="private-placement">Place private copy in</label><select id="private-placement" name="private-placement"><option value="">Main (unassigned)</option>${projectOptions(ctx, copy.project ?? undefined)}</select><button type="submit">Save private placement</button></form><form id="private-copy-form"><label for="private-destination">Copy privately to journey</label><select id="private-destination" name="private-destination">${destinations.map(j => `<option value="${j.id}">${escape(j.id)}</option>`).join('')}</select><button type="submit" ${destinations.length ? '' : 'disabled'}>Create independent private copy</button></form></section><section class="panel"><h2>Agent handoff</h2><p>The agent reads your scoped content. Review its result and record it yourself using Edit private artifact. Agent authorship is not enabled.</p><form id="private-challenge-form"><label for="private-agent">Your authenticated agent</label><select id="private-agent" name="private-agent">${agents.agents.map(a => `<option value="${a.principal}">${escape(attribution(ctx, a.principal))}</option>`).join('')}</select><button type="submit" ${agents.agents.length ? '' : 'disabled'}>Create one-use possession challenge</button></form><pre id="private-challenge"></pre><form id="private-handoff-form"><label for="private-response">Agent possession response JSON</label><textarea id="private-response" name="private-response" required></textarea><button type="submit">Download scoped encrypted handoff</button></form></section>`}`);
+  disposeViewer = mountArtifactViewer(root.querySelector<HTMLElement>('#private-viewer')!, p, a => work.attachment(copy, a));
+  root.querySelectorAll<HTMLButtonElement>('[data-private-download]').forEach(button => button.addEventListener('click', () => perform(async () => { const a = p.attachments[Number(button.dataset.privateDownload)]!; downloadAttachment(a.name, await work.attachment(copy, a)); })));
+  form('private-comment-form', async f => { await work.comment(copy, input(f, 'private-comment')); await privateDetail(id, copyId); });
+  form('private-place-form', async f => { await work.place(copy, input(f, 'private-placement') || null); await privateDetail(id, copyId); });
+  form('private-copy-form', async f => { const target = input(f, 'private-destination'), listing = destinations.find(j => j.id === target); if (!listing) throw new Error('Unknown private destination'); const destination = await BrowserPrivateArtifacts.open(await verifiedJourney(target, listing.principal, ctx.keys)); const copied = await work.copyTo(copy, destination); navigate(`/journeys/${target}/private/${copied}`); });
+  root.querySelector('#private-delete')?.addEventListener('click', () => perform(async () => { if (!confirm('Delete this private copy? Signed history remains. This cannot recall downloaded copies.')) return; await work.delete(copy); navigate(`/journeys/${id}/private`); }));
+  let challenge: import('@ai-wayfinding/core').PrivateChallenge | undefined;
+  form('private-challenge-form', async f => { challenge = await work.challenge(input(f, 'private-agent')); root.querySelector('#private-challenge')!.textContent = JSON.stringify(challenge); });
+  form('private-handoff-form', async f => { if (!challenge) throw new Error('Create a fresh local challenge first.'); const response: unknown = JSON.parse(input(f, 'private-response')); if (!response || typeof response !== 'object' || Object.keys(response).sort().join(',') !== 'opened,sig' || !('sig' in response) || !('opened' in response) || typeof response.sig !== 'string' || typeof response.opened !== 'string') throw new Error('Invalid possession response'); const used = challenge; challenge = undefined; download('wayfinding-private-handoff.age.txt', await work.handoff(used, { sig: response.sig, opened: response.opened })); });
+  watchPrivate(work);
+}
+async function privateBackup(id: string): Promise<void> {
+  const ctx = await context(id); if (!ctx) return;
+  const work = await BrowserPrivateArtifacts.open(ctx);
+  render(`<section class="panel"><p><a href="/journeys/${id}/private">← Author-private artifacts</a></p><h1>Private backup and import</h1>${privateStatus(work)}<p>This separate encrypted backup is only for your existing member keys. It contains no recovery recipient or direct sharing grant. A stale backup cannot replace newer signed history or revive deletions.</p><button id="private-backup">Download encrypted private backup</button><form id="private-import-form"><label for="private-import">Encrypted private backup</label><input type="file" id="private-import" required /><button type="submit">Import private backup</button></form><h2>Verified fork merge</h2><p>A complete encrypted device snapshot is independently verified before merging. Higher artifact versions win. Ties retain both versions. The next fixed sync signs a higher vault version.</p><form id="private-merge-form"><label for="private-merge">Encrypted device snapshot JSON</label><input type="file" id="private-merge" required /><button type="submit">Merge verified device histories</button></form></section>`);
+  root.querySelector('#private-backup')!.addEventListener('click', () => perform(async () => download(`wayfinding-private-${id}.age.txt`, await work.backup())));
+  form('private-import-form', async () => { const file = root.querySelector<HTMLInputElement>('#private-import')!.files?.[0]; if (!file || file.size > 100_000_000) throw new Error('Invalid private backup size'); await work.restore(await file.text()); await privateList(id); });
+  form('private-merge-form', async () => { const file = root.querySelector<HTMLInputElement>('#private-merge')!.files?.[0]; if (!file || file.size > 100_000_000) throw new Error('Invalid private snapshot size'); const parsed: unknown = JSON.parse(await file.text()); if (!parsed || typeof parsed !== 'object' || Object.keys(parsed).sort().join(',') !== 'checkpoint,frame,slots,token') throw new Error('Invalid private snapshot fields'); // SAFETY: portable merge validates every ciphertext, slot digest, checkpoint and signature before staging.
+    await work.merge(parsed as import('@ai-wayfinding/core').VaultCacheRecord); await privateList(id); });
+  watchPrivate(work);
+}
 function navigate(path: string): void {
   if (recovery && location.pathname.endsWith('/recovery') && path !== location.pathname) recovery = null;
   history.pushState(null, '', path); requestedRoute = path; perform(route);
@@ -675,6 +769,11 @@ async function route(): Promise<void> {
     if (sub === 'agent') return agentPromptScreen(id);
     if (sub === 'export') return exportScreen(id);
     if (sub === 'add') return artifactForm(id);
+    if (sub === 'private') return privateList(id);
+    if (sub === 'private/add') return privateForm(id);
+    if (sub === 'private/backup') return privateBackup(id);
+    const privateCopy = /^private\/([A-Za-z0-9_-]{43})(?:\/(edit))?$/.exec(sub);
+    if (privateCopy) return privateCopy[2] ? privateForm(id, privateCopy[1]) : privateDetail(id, privateCopy[1]!);
     if (sub === 'projects') return projectsScreen(id);
     const project = /^projects\/([0-7][0-9A-HJKMNP-TV-Z]{25})$/.exec(sub);
     if (project) return projectScreen(id, project[1]!);

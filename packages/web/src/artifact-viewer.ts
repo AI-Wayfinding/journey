@@ -1,6 +1,10 @@
 import { Lexer, type Token, type Tokens } from 'marked';
 import { validArtifactUrl } from '@ai-wayfinding/core';
-import type { ArtifactAttachment, ArtifactPayload } from '@ai-wayfinding/core';
+import type { ArtifactAttachment, ArtifactContent } from '@ai-wayfinding/core';
+
+/** Both public and private attachments use the same inert viewer, never a shared transport. */
+export interface ViewerAttachment { name: string; mime: string; path?: string; blob: { id: string; size: number } }
+export interface ViewerPayload<A extends ViewerAttachment> { title: string; content: ArtifactContent; attachments: A[] }
 import { downloadAttachment } from './artifacts.js';
 import type { DataRequest, DataView as DataResult } from './data-worker.js';
 
@@ -103,7 +107,7 @@ export function dataJob(request: DataRequest, signal: AbortSignal): Promise<Data
 }
 
 /** Read only already verified/decrypted content. The transport callback retains all Bend access checks. */
-export function mountArtifactViewer(host: HTMLElement, payload: ArtifactPayload, load: (a: ArtifactAttachment, signal: AbortSignal) => Promise<Uint8Array>): () => void {
+export function mountArtifactViewer<A extends ViewerAttachment = ArtifactAttachment>(host: HTMLElement, payload: ViewerPayload<A>, load: (a: A, signal: AbortSignal) => Promise<Uint8Array>): () => void {
   const lifetime = new AbortController(); const urls = new Set<string>(); let job: AbortController | undefined;
   const content = payload.content;
   const cleanup = () => { lifetime.abort(); job?.abort(); for (const url of urls) URL.revokeObjectURL(url); urls.clear(); };
