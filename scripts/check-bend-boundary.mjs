@@ -16,7 +16,7 @@ function build() {
   assert(existsSync(root + 'packages/rules/rules.mjs'), 'Missing compiled rules.mjs');
   const pkg = JSON.parse(read('packages/rules/package.json'));
   assert.equal(pkg.exports['.'].default, './rules.mjs');
-  assert.equal(pkg.scripts.build, 'node ../../scripts/bend.mjs rules.bend -o rules.mjs');
+  assert.equal(pkg.scripts.build, 'node ../../scripts/build-rules.mjs');
   const main = JSON.parse(read('package.json'));
   assert(main.scripts.build.startsWith('npm run build:rules &&'), 'Rules must build first');
   for (const name of packages) {
