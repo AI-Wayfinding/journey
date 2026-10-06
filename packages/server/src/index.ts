@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { projectSelector, copyProjectPublic, isProjectAction, validateProjectPublic, CLIENT_VERSION, copyArtifactPublic, isArtifactAction, validateArtifactPublic, validateBlobDescriptor, MAX_BLOB_BYTES, LINK_SECRET_PATTERN, isId, linkLookupHash, newId, validAgentName, controlDefinitions, type ControlProof, type JsonObject, type Envelope } from '@ai-wayfinding/core';
+import { PRIVATE_HEADER_BYTES, PRIVATE_SLOT_BYTES, projectSelector, copyProjectPublic, isProjectAction, validateProjectPublic, CLIENT_VERSION, copyArtifactPublic, isArtifactAction, validateArtifactPublic, validateBlobDescriptor, MAX_BLOB_BYTES, LINK_SECRET_PATTERN, isId, linkLookupHash, newId, validAgentName, controlDefinitions, type ControlProof, type JsonObject, type Envelope } from '@ai-wayfinding/core';
 import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse } from '@simplewebauthn/server';
 import { appPrfSalt, base64url, digest, emailHash, equalSecret, randomToken, unbase64url, verifyAgentSignature } from './crypto.js';
 import { ENDED_MESSAGE, LINK_RATE_LIMIT, LinkEnded, LinkExpired, expiredBody, linkResponse, readLink } from './agentLink.js';
@@ -76,7 +76,7 @@ async function agent(c: AppContext): Promise<Subject | null> {
   } catch { return null; }
   if (!await verifyAgentSignature(row.signingKey, c.req.method, path, body, timestamp, nonce, signature)) return null;
   if (!await registry(c.env, { op: 'nonce', id, nonce })) return null;
-  return { principal: row.principal, agent: true, privateCredential: row.keyStorage === 'link' ? 'link' : 'authenticated', ...capability(c) };
+  return { principal: row.principal, agent: true, agentJourney: row.journeyId, privateCredential: row.keyStorage === 'link' ? 'link' : row.keyStorage === 'memory' || row.keyStorage === 'file' ? 'authenticated' : undefined, ...capability(c) };
 }
 async function subject(c: AppContext): Promise<Subject | null> {
   if (c.req.header('x-agent-session')) return agent(c);
@@ -111,7 +111,7 @@ function control(value: unknown, journey: string): ControlInput | null {
   return { proof, envelope: { outside: { v: 1, id: o.id, journey, seq: p.seq, epoch: o.epoch, size: o.size, createdAt: o.createdAt }, nonce: e.nonce, ciphertext: e.ciphertext } };
 }
 function wraps(value: unknown, epoch: number, historical = false): EpochWrap[] | null {
-  if (!Array.isArray(value) || value.length > (historical ? Math.max(100, epoch) : 100) || !value.every(w => object(w) && validString(w.principal, 128) && validString(w.wrap, 100_000) && validEpoch(w.epoch) && (historical ? w.epoch <= epoch : w.epoch === epoch))) return null;
+  if (!Array.isArray(value) || value.length > (historical ? Math.max(100, epoch) : 100) || !value.every(w => object(w) && Object.keys(w).sort().join(',') === 'epoch,principal,wrap' && validString(w.principal, 128) && validString(w.wrap, 100_000) && validEpoch(w.epoch) && (historical ? w.epoch <= epoch : w.epoch === epoch))) return null;
   if (new Set(value.map(w => JSON.stringify([w.principal, w.epoch]))).size !== value.length) return null;
   return value.map(w => ({ principal: w.principal as string, epoch: w.epoch as number, wrap: w.wrap as string }));
 }
@@ -387,9 +387,11 @@ async function privateVaultRoute(c: AppContext): Promise<Response> {
   const url = new URL('https://internal/' + query);
   if (c.req.method === 'GET' && (url.searchParams.size !== 1 || !url.searchParams.has('slots'))) return failure('invalid-request', 400);
   if (c.req.method === 'PUT' && query) return failure('invalid-request', 400);
-  const { principal } = await access.json() as { principal: string };
-  const stub = c.env.PRIVATE_VAULTS.get(c.env.PRIVATE_VAULTS.idFromName(JSON.stringify([id, principal])));
-  return stub.fetch(url.toString(), { method: c.req.method, headers: { 'X-Private-Agent': s.agent ? '1' : '0' }, ...(c.req.method === 'PUT' ? { body: c.req.raw.body } : {}) });
+  // Read bounded bytes before entering the serialized authority/commit operation.
+  // Neither a removal nor a role change can pass between its check and storage.
+  let bytes: Uint8Array | undefined;
+  if (c.req.method === 'PUT') try { bytes = await boundedBytes(c.req.raw.body, 64 + PRIVATE_HEADER_BYTES + 2 * (1 + PRIVATE_SLOT_BYTES)); } catch { return failure('invalid-request', 400); }
+  return c.env.ENCLAVES.get(c.env.ENCLAVES.idFromName(id)).fetch('https://internal/private-vault' + query, { method: c.req.method, headers: { 'X-Private-Message': JSON.stringify({ op: 'privateAccess', journeyId: id, subject: s, write: c.req.method === 'PUT' }) }, ...(bytes ? { body: Uint8Array.from(bytes) } : {}) });
 }
 app.get('/v1/journeys/:id/private-vault', privateVaultRoute);
 app.put('/v1/journeys/:id/private-vault', privateVaultRoute);
@@ -399,7 +401,7 @@ async function privateAgentWrapRoute(c: AppContext): Promise<Response> {
   // authenticated agents may fetch only their own wrap. Links are never eligible.
   if (!isId(agent) || new URL(c.req.url).search || c.req.method === 'GET' && (!s.agent || s.privateCredential !== 'authenticated' || agent !== s.principal) || c.req.method === 'PUT' && s.agent) return failure('forbidden', 403);
   const row = await registry(c.env, { op: 'agentPrincipal', journeyId: id, principal: agent });
-  if (!row || row.keyStorage === 'link') return failure('forbidden', 403);
+  if (!row || row.keyStorage !== 'memory' && row.keyStorage !== 'file') return failure('forbidden', 403);
   if (c.req.method === 'GET') return enclave(c.env, id, { op: 'privateWrapAccess', journeyId: id, subject: s, agent });
   const b = await payload(c).catch(() => null);
   if (!b || Object.keys(b).join(',') !== 'ciphertext' || !validString(b.ciphertext, 8192)) return failure('invalid-request', 400);
@@ -411,7 +413,13 @@ app.get('/v1/journeys/:id/private-agents', async c => {
   if (s.agent) return failure('forbidden', 403);
   const access = await enclave(c.env, id, { op: 'privateAccess', journeyId: id, subject: s });
   if (!access.ok) return access;
-  return json({ agents: await registry(c.env, { op: 'privateAgents', journeyId: id }) });
+  const candidates = await registry(c.env, { op: 'privateAgents', journeyId: id }) as { principal: string }[];
+  const agents: { principal: string }[] = [];
+  for (const candidate of candidates) {
+    const eligible = await enclave(c.env, id, { op: 'privateWrapEligible', journeyId: id, subject: s, agent: candidate.principal });
+    if (eligible.ok) agents.push({ principal: candidate.principal });
+  }
+  return json({ agents });
 });
 app.get('/v1/journeys/:id/private-agent-wrap/:agent', privateAgentWrapRoute);
 app.put('/v1/journeys/:id/private-agent-wrap/:agent', privateAgentWrapRoute);
@@ -440,7 +448,7 @@ app.get('/v1/journeys/:id/blobs/:blob', async c => {
 app.post('/v1/journeys/:id/seq', async c => enclave(c.env, c.req.param('id'), { op: 'reserve', journeyId: c.req.param('id'), subject: journeySubject(c) }));
 app.post('/v1/journeys/:id/records', async c => {
   const b = await payload(c).catch(() => null), id = c.req.param('id');
-  if (!b || !object(b.envelope) || !object(b.envelope.outside)) return failure('invalid-request', 400);
+  if (!b || Object.keys(b).join(',') !== 'envelope' || !object(b.envelope) || Object.keys(b.envelope).some(k => !['outside', 'nonce', 'ciphertext'].includes(k)) || !object(b.envelope.outside)) return failure('invalid-request', 400);
   const o = b.envelope.outside;
   if (Object.keys(o).some(k => !['v','id','journey','seq','epoch','size','createdAt'].includes(k)) || o.v !== 1 || !validString(o.id, 128) || o.journey !== id || !validSeq(o.seq) || !validEpoch(o.epoch) || !validString(o.createdAt, 64) || !validSeq(o.size) || o.size > 1_048_576 || !validString(b.envelope.nonce, 64) || !encrypted(b.envelope.ciphertext, 1_400_000)) return failure(o.size && Number(o.size) > 1_048_576 ? 'too-large' : 'invalid-request', o.size && Number(o.size) > 1_048_576 ? 413 : 400);
   const bytes = new TextEncoder().encode(b.envelope.ciphertext).length;
@@ -458,7 +466,7 @@ app.get('/v1/journeys/:id/records', async c => {
 });
 app.post('/v1/journeys/:id/log', async c => {
   const b = await payload(c).catch(() => null), id = c.req.param('id'), s = journeySubject(c);
-  if (!b || b.entry !== undefined || b.accessChanges !== undefined || b.epoch !== undefined || b.memberWraps !== undefined) return failure('invalid-request', 400);
+  if (!b || Object.keys(b).some(k => !['control', 'wraps'].includes(k))) return failure('invalid-request', 400);
   const signed = control(b.control, id);
   if (!signed || (isArtifactAction(signed.proof.type) || isProjectAction(signed.proof.type)) && Object.keys(b).some(k => !['control', 'wraps'].includes(k))) return failure('invalid-request', 400);
   let admission: Admission | undefined;
@@ -624,7 +632,7 @@ app.get('/a/:secret', async c => {
   if (!row) return ended();
   if (row.limited) return linkResponse({ error: 'rate-limited', message: 'This link has been read too often. Try again later.', retryAfterSeconds: row.retryAfter }, 429, { 'Retry-After': String(row.retryAfter) });
   if (Number(row.expires) <= Date.now()) return linkResponse(expiredBody(c.env.ORIGIN, row.journeyId, row.memberId, Number(row.expires)), 410);
-  const subject: Subject = { principal: row.memberId, agent: true, clientVersion: CLIENT_VERSION, controlFormat: 'control-proof-v1', artifactFormat: 'artifact-v1', projectFormat: 'project-v1', privateFormat: 'private-v1' };
+  const subject: Subject = { principal: row.memberId, agent: true, agentJourney: row.journeyId, clientVersion: CLIENT_VERSION, controlFormat: 'control-proof-v1', artifactFormat: 'artifact-v1', projectFormat: 'project-v1', privateFormat: 'private-v1' };
   const call: Enclave = message => enclave(c.env, row.journeyId, { ...message, journeyId: row.journeyId, subject });
   try {
     const pages = await readLink({ journeyId: row.journeyId, memberId: row.memberId, blob: row.blob, expires: Number(row.expires), since: Number(row.since) }, secret, c.env.ORIGIN, call, Date.now(), c.req.query('project') === undefined ? undefined : selection);

@@ -1548,8 +1548,20 @@ function $private_audience$(_members_0, _author_0, _actor_0, _value_0) {
   return $private_audience_value$(_members_0, ($find$(_members_0, _author_0)), ($find$(_members_0, _actor_0)), _value_0);
 }
 
+function $private_link_read$(_members_0, _actor_0) {
+  return $Bool$and$(($access_read$(($member_access$(($find$(_members_0, _actor_0)), _members_0)))), ($Bool$not$(($private_audience$(_members_0, _actor_0, _actor_0, {$: "PrivateLinkCredential"})))));
+}
+
 function $private_write$(_members_0, _author_0, _actor_0, _value_0, _minimum_0, _pending_0, _current_0) {
   return $Bool$and$(($Bool$and$(($Bool$and$(_current_0, ($private_ready$(_minimum_0)))), ($private_audience$(_members_0, _author_0, _actor_0, _value_0)))), ($content_write$(($member_access$(($find$(_members_0, _actor_0)), _members_0)), _pending_0)));
+}
+
+function $private_wrap_access$(_members_0, _author_0, _actor_0, _target_0, _value_0, _write_0) {
+  if (_write_0) {
+    return $Bool$and$(($Bool$and$(($private_credential$({$: "Person"}, _value_0)), ($private_audience$(_members_0, _author_0, _actor_0, _value_0)))), ($private_audience$(_members_0, _author_0, _target_0, {$: "PrivateAuthenticatedAgent"})));
+  } else {
+    return $Bool$and$(($Bool$and$(($Nat$is_eq$(_actor_0, _target_0)), ($private_credential$({$: "Agent"}, _value_0)))), ($private_audience$(_members_0, _author_0, _actor_0, _value_0)));
+  }
 }
 
 function $private_copy_access$(_source_0, _destination_0, _different_0, _visibility_0) {
@@ -2874,7 +2886,9 @@ export default {
   "private_relation": run_lib((a0, a1) => { const r = (run_loop($private_relation$($0m5(a0), $0m5(a1)))); $0m4(a0); $0m4(a1); return r; }, 2),
   "private_audience_value": run_lib((a0, a1, a2, a3) => { const r = (run_loop($private_audience_value$($0m0(a0), $0m5(a1), $0m5(a2), (a3)))); $0m2(a0); $0m4(a1); $0m4(a2); (a3); return r; }, 4),
   "private_audience": run_lib((a0, a1, a2, a3) => { const r = (run_loop($private_audience$($0m0(a0), nat_host(a1), nat_host(a2), (a3)))); $0m2(a0); BigInt(a1); BigInt(a2); (a3); return r; }, 4),
+  "private_link_read": run_lib((a0, a1) => { const r = (run_loop($private_link_read$($0m0(a0), nat_host(a1)))); $0m2(a0); BigInt(a1); return r; }, 2),
   "private_write": run_lib((a0, a1, a2, a3, a4, a5, a6) => { const r = (run_loop($private_write$($0m0(a0), nat_host(a1), nat_host(a2), (a3), $0m15(a4), (a5), (a6)))); $0m2(a0); BigInt(a1); BigInt(a2); (a3); $0m16(a4); (a5); (a6); return r; }, 7),
+  "private_wrap_access": run_lib((a0, a1, a2, a3, a4, a5) => { const r = (run_loop($private_wrap_access$($0m0(a0), nat_host(a1), nat_host(a2), nat_host(a3), (a4), (a5)))); $0m2(a0); BigInt(a1); BigInt(a2); BigInt(a3); (a4); (a5); return r; }, 6),
   "private_copy_access": run_lib((a0, a1, a2, a3) => { const r = (run_loop($private_copy_access$((a0), (a1), (a2), (a3)))); (a0); (a1); (a2); (a3); return r; }, 4),
   "private_guard": run_lib((a0, a1) => { const r = $0m63(run_loop($private_guard$((a0), $0m61(a1)))); (a0); $0m62(a1); return r; }, 2),
   "private_same": run_lib((a0, a1, a2, a3, a4, a5) => { const r = (run_loop($private_same$(nat_host(a0), nat_host(a1), nat_host(a2), nat_host(a3), nat_host(a4), nat_host(a5)))); BigInt(a0); BigInt(a1); BigInt(a2); BigInt(a3); BigInt(a4); BigInt(a5); return r; }, 6),

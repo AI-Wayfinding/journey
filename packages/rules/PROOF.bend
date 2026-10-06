@@ -282,6 +282,14 @@ def Laws.project_client_requires_capability(client, minimum, control, artifact):
 def Laws.project_replay_uses_authority_version_and_revision(members, actor, minimum, pending, index, artifacts, revision, action, pairs, items, placements):
   {==}
 
+def Laws.private_link_read_requires_live_access(members, actor):
+  {==}
+def Laws.private_wrap_fetch_requires_agent(members, author, actor, target):
+  Equal.trans(Bool, R.private_wrap_access(members, author, actor, target, R.PrivatePersonCredential{}, False{}), False{} && R.private_audience(members, author, actor, R.PrivatePersonCredential{}), False{}, Equal.cong(Bool, Bool, b => b && R.private_audience(members, author, actor, R.PrivatePersonCredential{}), Nat.is_eq(actor, target) && False{}, False{}, and_false(Nat.is_eq(actor, target))), {==})
+def Laws.private_wrap_delivery_requires_person(members, author, actor, target):
+  {==}
+def Laws.private_wrap_fetch_requires_self(members, author, actor, target, credential):
+  {==}
 def Laws.private_link_excluded(kind):
   match kind:
     case R.Person{}: {==}

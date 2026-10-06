@@ -947,8 +947,20 @@ def private_audience_value(+members: +List<Member>, +author: Maybe<&2, Member>, 
 def private_audience(+members: +List<Member>, author: Nat, actor: Nat, value: PrivateCredential) -> Bool:
   private_audience_value(members, find(members, author), find(members, actor), value)
 
+# Link renderers receive only shared content; check before selecting/counting pages.
+def private_link_read(+members: +List<Member>, +actor: Nat) -> Bool:
+  access_read(member_access(find(members, actor), members)) && Bool.not(private_audience(members, actor, actor, PrivateLinkCredential{}))
+
 def private_write(+members: +List<Member>, author: Nat, +actor: Nat, value: PrivateCredential, minimum: Version, pending: Bool, current: Bool) -> Bool:
   current && private_ready(minimum) && private_audience(members, author, actor, value) && content_write(member_access(find(members, actor), members), pending)
+
+# Persons deliver only to their own eligible agents; agents fetch only themselves.
+def private_wrap_access(+members: +List<Member>, +author: Nat, +actor: Nat, +target: Nat, +value: PrivateCredential, write: Bool) -> Bool:
+  match write:
+    case True{}:
+      private_credential(Person{}, value) && private_audience(members, author, actor, value) && private_audience(members, author, target, PrivateAuthenticatedAgent{})
+    case False{}:
+      Nat.is_eq(actor, target) && private_credential(Agent{}, value) && private_audience(members, author, actor, value)
 
 # Destination visibility deliberately grants no authority.
 def private_copy_access(source: Bool, destination: Bool, different: Bool, visibility: Visibility) -> Bool:
