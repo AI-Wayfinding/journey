@@ -1720,10 +1720,10 @@ function $private_references$(_own_0, _complete_0, _digest_0, _staged_0) {
 
 function $private_header$(_retained_0, _incoming_0, _private_same_0, _predecessor_0, _paired_0) {
   if (_retained_0 === 0) {
-    return $Bool$pick$(_paired_0, {$: "PrivateVerifiedFreshness"}, {$: "PrivateUnverifiedFreshness"});
+    return $Bool$pick$(_predecessor_0, ($Bool$pick$(_paired_0, {$: "PrivateVerifiedFreshness"}, {$: "PrivateUnverifiedFreshness"})), {$: "PrivateHeaderConflict"});
   } else {
     const _retained_1 = (_retained_0 - 0);
-    return $Bool$pick$((_incoming_0 < _retained_1), {$: "PrivateRollback"}, ($Bool$pick$(($Nat$is_eq$(_incoming_0, _retained_1)), ($Bool$pick$(_private_same_0, ($Bool$pick$(_paired_0, {$: "PrivateVerifiedFreshness"}, {$: "PrivateUnverifiedFreshness"})), ($Bool$pick$(_predecessor_0, {$: "PrivateMergeRequired"}, {$: "PrivateHeaderConflict"})))), ($Bool$pick$(_predecessor_0, ($Bool$pick$(_paired_0, {$: "PrivateVerifiedFreshness"}, {$: "PrivateUnverifiedFreshness"})), {$: "PrivateHeaderConflict"})))));
+    return $Bool$pick$((_incoming_0 < _retained_1), {$: "PrivateRollback"}, ($Bool$pick$(_predecessor_0, ($Bool$pick$(($Bool$and$(($Nat$is_eq$(_incoming_0, _retained_1)), ($Bool$not$(_private_same_0)))), {$: "PrivateMergeRequired"}, ($Bool$pick$(_paired_0, {$: "PrivateVerifiedFreshness"}, {$: "PrivateUnverifiedFreshness"})))), {$: "PrivateHeaderConflict"})));
   }
 }
 
@@ -1739,6 +1739,35 @@ function $private_capacity$(_bytes_0) {
 function $private_sync_due$(_open_0, _elapsed_0) {
   const _x_0 = ($Bool$not$((_elapsed_0 < 300000)));
   return (_open_0 || _x_0);
+}
+
+function $private_slot_take$($0, $1, $2) {
+  for (;;) {
+    {
+      const _xs_0 = $0;
+      const _fuel_0 = $1;
+      const _selected_0 = $2;
+      if (_xs_0.$ === "Nil") {
+        return _selected_0;
+      } else {
+        const _slot_0 = _xs_0["head"];
+        const _rest_0 = _xs_0["tail"];
+        if (_fuel_0 === 0) {
+          return _selected_0;
+        } else {
+          const _n_0 = (_fuel_0 - 1);
+          $0 = _rest_0;
+          $1 = ($Bool$pick$(($Bool$and$((_slot_0 < 64), ($Bool$not$(($nat_has$(_selected_0, _slot_0)))))), _n_0, nat_chk(_n_0 + 1)));
+          $2 = ($Bool$pick$(($Bool$and$((_slot_0 < 64), ($Bool$not$(($nat_has$(_selected_0, _slot_0)))))), {$: "Con", "head": _slot_0, "tail": _selected_0}, _selected_0));
+          continue;
+        }
+      }
+    }
+  }
+}
+
+function $private_slots$(_dirty_0, _randomOrder_0) {
+  return $private_slot_take$(($List$append$(_dirty_0, _randomOrder_0)), 2, {$: "Nil"});
 }
 
 function $Bool$pick$(_c_0, _a_0, _b_0) {
@@ -1775,6 +1804,16 @@ function $Nat$is_gt$(_a_0, _b_0) {
 
 function $Nat$is_ge$(_a_0, _b_0) {
   return $Cmp$is_ge$(cmp_new(_a_0, _b_0));
+}
+
+function $List$append$(_xs_0, _ys_0) {
+  if (_xs_0.$ === "Nil") {
+    return _ys_0;
+  } else {
+    const _h_0 = _xs_0["head"];
+    const _t_0 = _xs_0["tail"];
+    return {$: "Con", "head": _h_0, "tail": ($List$append$(_t_0, _ys_0))};
+  }
 }
 
 function $Cmp$is_eq$(_c_0) {
@@ -2855,4 +2894,6 @@ export default {
   "private_merge": run_lib((a0, a1, a2, a3, a4) => { const r = (run_loop($private_merge$(nat_host(a0), nat_host(a1), (a2), (a3), (a4)))); BigInt(a0); BigInt(a1); (a2); (a3); (a4); return r; }, 5),
   "private_capacity": run_lib((a0) => { const r = (run_loop($private_capacity$((a0)))); (a0); return r; }, 1),
   "private_sync_due": run_lib((a0, a1) => { const r = (run_loop($private_sync_due$((a0), nat_host(a1)))); (a0); BigInt(a1); return r; }, 2),
+  "private_slot_take": run_lib((a0, a1, a2) => { const r = $0m26(run_loop($private_slot_take$($0m25(a0), nat_host(a1), $0m25(a2)))); $0m26(a0); BigInt(a1); $0m26(a2); return r; }, 3),
+  "private_slots": run_lib((a0, a1) => { const r = $0m26(run_loop($private_slots$($0m25(a0), $0m25(a1)))); $0m26(a0); $0m26(a1); return r; }, 2),
 };

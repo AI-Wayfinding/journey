@@ -127,6 +127,11 @@ export class EnclaveObject {
     if (!stored) return failure('not-found', 404);
     return new Response(stored.body, { headers: { 'Content-Type': 'application/octet-stream', 'Content-Disposition': `attachment; filename="${id}.encrypted"`, 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store', 'X-Blob-Descriptor': String(row!.descriptor) } });
   }
+  private async provision(journey: string, principal: string): Promise<void> {
+    const stub = this.env.PRIVATE_VAULTS.get(this.env.PRIVATE_VAULTS.idFromName(JSON.stringify([journey, principal])));
+    const result = await stub.fetch('https://internal/allocate', { method: 'POST' });
+    if (!result.ok) throw new Error('Member allocation failed');
+  }
   private async handle(input: EnclaveMessage): Promise<Response> {
     const now = Date.now();
     if (input.op === 'create') {
@@ -139,6 +144,7 @@ export class EnclaveObject {
       if (data.control.envelope.outside.epoch !== 1 || data.wraps.length !== 1 || data.wraps[0]?.principal !== creator.id || data.wraps[0]?.epoch !== 1) return failure('invalid-request', 400);
       const s: Subject = { principal: creator.id, accountHash: data.creatorHash, clientVersion: data.clientVersion, controlFormat: data.controlFormat, artifactFormat: data.artifactFormat, projectFormat: data.projectFormat };
       if (!this.version(state, s)) return this.upgrade(state);
+      await this.provision(data.id, creator.id);
       this.state.storage.transactionSync(() => {
         this.sql.exec('INSERT INTO meta VALUES(?,?,?,?,?)', data.id, 1, 1, 1, 0);
         this.sql.exec('INSERT INTO authority VALUES(?,?,?)', data.id, canonical(creator), JSON.stringify(state));
@@ -168,6 +174,24 @@ export class EnclaveObject {
         return Response.json({ id, journey: state.journey, epoch: state.currentEpoch, size: input.size, expiresAt }, { status: 201 });
       }
       case 'blobRead': return this.download(state, subject, input.id);
+      case 'privateAccess': {
+        const member = state.members[subject.principal]!.member;
+        const principal = member.kind === 'agent' ? member.addedBy : member.id;
+        if (!principal || state.members[principal]?.member.kind !== 'person') return failure('forbidden', 403);
+        const model = normalizedMembers(state, [subject.principal, principal], now);
+        const credential = { $: subject.agent ? subject.privateCredential === 'authenticated' ? 'PrivateAuthenticatedAgent' as const : 'PrivateUnknownCredential' as const : 'PrivatePersonCredential' as const };
+        const allowed = input.write && subject.agent ? rules.private_write(model.members, model.id(principal), model.id(subject.principal), credential, ruleVersion(state.minClientVersion), state.pendingRotation === true, true) : rules.private_audience(model.members, model.id(principal), model.id(subject.principal), credential);
+        return allowed ? Response.json({ allowed: true, principal }) : failure('forbidden', 403);
+      }
+      case 'privateWrapAccess': {
+        const member = state.members[subject.principal]!.member, agent = state.members[input.agent]?.member;
+        const person = member.kind === 'agent' ? member.addedBy : member.id;
+        if (!person || !agent || agent.kind !== 'agent' || subject.agent && (input.ciphertext !== undefined || subject.privateCredential !== 'authenticated' || input.agent !== subject.principal)) return failure('forbidden', 403);
+        const model = normalizedMembers(state, [person, input.agent], now);
+        if (!rules.private_audience(model.members, model.id(person), model.id(input.agent), { $: 'PrivateAuthenticatedAgent' })) return failure('forbidden', 403);
+        const stub = this.env.PRIVATE_VAULTS.get(this.env.PRIVATE_VAULTS.idFromName(JSON.stringify([state.journey, person])));
+        return stub.fetch('https://internal/agent-wrap?agent=' + encodeURIComponent(input.agent), input.ciphertext ? { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ciphertext: input.ciphertext, expires: Date.parse(agent.expiresAt!) }) } : {});
+      }
       case 'access': return Response.json({ allowed: true, epoch: state.currentEpoch });
       case 'inviteAccess': return isPersonGuide(state, subject.principal) && !subject.agent ? Response.json({ allowed: true }) : failure('forbidden', 403);
       case 'linkAccess': return replayControl(state, subject.principal, 'Renew', input.member, undefined, false, undefined, now).transition.$ === 'Accepted' && !subject.agent ? Response.json({ allowed: true }) : failure('forbidden', 403);
@@ -304,6 +328,7 @@ export class EnclaveObject {
     const wrapCount = historical ? state.currentEpoch : expected.length;
     if (supplied.length !== wrapCount || new Set(supplied.map(w => JSON.stringify([w.principal, w.epoch]))).size !== wrapCount || supplied.some(w => !expected.includes(w.principal) || !Number.isSafeInteger(w.epoch) || (historical ? w.epoch < 1 || w.epoch > state.currentEpoch : w.epoch !== next.currentEpoch))) return failure('invalid-request', 400);
     const removed = Object.keys(state.members).filter(id => !next.members[id]);
+    if (admission?.kind === 'person') await this.provision(state.journey, admission.id);
     this.state.storage.transactionSync(() => {
       this.sql.exec('INSERT INTO log VALUES(?,?,?)', proof.seq, JSON.stringify(input.control), now);
       this.sql.exec('UPDATE authority SET state=?', JSON.stringify(next));
@@ -312,6 +337,14 @@ export class EnclaveObject {
       if (admission) this.sql.exec('INSERT INTO principals(id,kind,scope,accountHash,addedBy) VALUES(?,?,?,?,?)', admission.id, admission.kind, admission.scope ?? 'readwrite', admission.accountHash ?? null, admission.kind === 'agent' ? subject.principal : null);
       for (const w of supplied) this.sql.exec('INSERT INTO wraps VALUES(?,?,?)', w.principal, w.epoch, w.wrap);
     });
+    // Serialized with wrap delivery: no late PUT can resurrect a removed wrap.
+    for (const id of removed) {
+      const agent = state.members[id]!.member;
+      if (agent.kind === 'agent' && agent.addedBy) {
+        const stub = this.env.PRIVATE_VAULTS.get(this.env.PRIVATE_VAULTS.idFromName(JSON.stringify([state.journey, agent.addedBy])));
+        await stub.fetch('https://internal/agent-wrap?agent=' + encodeURIComponent(id), { method: 'DELETE' });
+      }
+    }
     return Response.json({ seq: proof.seq, memberDelta: Object.keys(next.members).length - Object.keys(state.members).length, removed, minClientVersion: next.minClientVersion }, { status: 201 });
   }
   private admission(member: Member, admission: Admission | undefined, subject: Subject, model: ReturnType<typeof normalizedMembers>, now: number): boolean {

@@ -128,6 +128,41 @@ describe('private-v1 verified audience and records', () => {
 });
 
 describe('fixed private header, schedule and fork contracts', () => {
+  it('verifies agent heads at bound log positions, preserving owner access without admitting ineligible signers', async () => {
+    const f = await privateFixture(), trust = { vault: f.vault, author: f.identity }, first = await header(f);
+    const checkpoint = (await verifyPrivateHeader(first, trust, { contentsHash: first.contentsHash })).checkpoint;
+    const signed = async (actor: typeof f.writer, context = f.context, version = 2) => signPrivateHeader({ format: first.format, v: 1, vault: f.vault, author: f.identity, version, prev: checkpoint.head, contentsHash: first.contentsHash, slots: first.slots, writer: privateIdentity(actor.member), authority: privateAuthority(context, privateIdentity(actor.member)) }, actor.key);
+    const own = await signed(f.writer);
+    const checked = await verifyPrivateHeader(own, trust, { checkpoint, contentsHash: own.contentsHash, contexts: [f.context] });
+    expect(checked.header.author).toEqual(f.identity); expect(checked.header.writer).toEqual(privateIdentity(f.writer.member)); expect(checked.checkpoint.version).toBe(2);
+    const next = await header(f, 3, checked.checkpoint.head);
+    expect((await verifyPrivateHeader(next, trust, { checkpoint: checked.checkpoint, contentsHash: next.contentsHash })).checkpoint.version).toBe(3);
+    for (const actor of [f.foreign, f.reader]) await expect(verifyPrivateHeader(await signed(actor), trust, { contentsHash: own.contentsHash, contexts: [f.context] })).rejects.toThrow('authority');
+    await expect(verifyPrivateHeader(await signed(f.writer, f.context, 1), trust, { contentsHash: own.contentsHash, contexts: [f.context] })).rejects.toThrow('authority');
+    await expect(verifyPrivateHeader({ ...own, vault: newPrivateId() }, trust, { contentsHash: own.contentsHash, contexts: [f.context] })).rejects.toThrow('binding');
+    await expect(verifyPrivateHeader({ ...own, sig: first.sig }, trust, { contentsHash: own.contentsHash, contexts: [f.context] })).rejects.toThrow('signature');
+    await expect(verifyPrivateHeader(own, trust, { contentsHash: own.contentsHash })).rejects.toThrow('authority');
+    const { sig: _sig, ...unsigned } = own;
+    const resign = (authority: typeof unsigned.authority) => signPrivateHeader({ ...unsigned, authority }, f.writer.key);
+    const genesis = await verifyPrivateContext({ journey: f.f.journey, creator: f.f.guide.member, controls: f.f.controls.slice(0, 1) }, { now });
+    // A signer cannot cite a real position before admission or a fabricated head,
+    // principal, admission hash or epoch to bypass verified-prefix authority.
+    for (const authority of [{ ...own.authority!, head: genesis.head }, { ...own.authority!, head: first.contentsHash }, { ...own.authority!, principal: f.reader.member.id }, { ...own.authority!, admissionHash: first.contentsHash }, { ...own.authority!, epoch: 2 }]) {
+      await expect(verifyPrivateHeader(await resign(authority), trust, { contentsHash: own.contentsHash, contexts: [f.context] })).rejects.toThrow();
+    }
+    const expired = await agent(f.author.member.id); expired.member.expiresAt = new Date(now + 1000).toISOString();
+    await artifactAppend(f.f, f.author, 'member.add', { member: expired.member, kind: 'agent', grants: [] });
+    const live = await contextFor(f.f), expiryHeader = await signed(expired, live);
+    const expiredContext = await contextFor(f.f, { now: now + 2000 });
+    expect((await verifyPrivateHeader(expiryHeader, trust, { contentsHash: own.contentsHash, contexts: [expiredContext] })).header).toEqual(expiryHeader);
+    await artifactAppend(f.f, f.f.guide, 'member.role', { member: f.author.member.id, role: 'read-write' }, undefined, new Date(now + 2000).toISOString());
+    const afterExpiry = await contextFor(f.f, { now: now + 2000 });
+    await expect(verifyPrivateHeader(await signed(expired, afterExpiry), trust, { contentsHash: own.contentsHash, contexts: [afterExpiry] })).rejects.toThrow('authority');
+    await artifactAppend(f.f, f.author, 'member.remove', { member: f.writer.member.id });
+    const afterRemoval = await contextFor(f.f);
+    expect((await verifyPrivateHeader(own, trust, { contentsHash: own.contentsHash, contexts: [afterRemoval] })).header).toEqual(own);
+    await expect(verifyPrivateHeader(await resign({ ...own.authority!, head: afterRemoval.head }), trust, { contentsHash: own.contentsHash, contexts: [afterRemoval] })).rejects.toThrow();
+  });
   it('validates exact fixed-slot atomic patches and capacity without growth', async () => {
     const f = await privateFixture(), h = await header(f), ciphertext = encode(new Uint8Array(PRIVATE_SLOT_BYTES)), digest = await privateBytesHash(new Uint8Array(PRIVATE_SLOT_BYTES));
     h.slots[0] = digest; h.slots[1] = digest;
@@ -161,14 +196,19 @@ describe('fixed private header, schedule and fork contracts', () => {
     const verified = await verifyPrivateHeader(next, { vault: f.vault, author: f.identity }, { contentsHash: next.contentsHash, paired }); expect(verified.decision).toBe('verified');
     await expect(verifyPrivateHeader(h, { vault: f.vault, author: f.identity }, { contentsHash: h.contentsHash, checkpoint: verified.checkpoint })).rejects.toThrow('rollback');
     const wrongPrev = await header(f, 3, await privateHash('not previous'));
-    await expect(verifyPrivateHeader(wrongPrev, { vault: f.vault, author: f.identity }, { contentsHash: wrongPrev.contentsHash, checkpoint: verified.checkpoint })).rejects.toThrow('predecessor');
+    expect((await verifyPrivateHeader(wrongPrev, { vault: f.vault, author: f.identity }, { contentsHash: wrongPrev.contentsHash, checkpoint: verified.checkpoint })).decision).toBe('verified');
+    const missingPrev = await header(f, 3, null);
+    await expect(verifyPrivateHeader(missingPrev, { vault: f.vault, author: f.identity }, { contentsHash: missingPrev.contentsHash, checkpoint: verified.checkpoint })).rejects.toThrow('predecessor');
     for (const invalid of [{ ...next, sig: h.sig }, { ...next, version: 0 }, { ...next, slots: next.slots.slice(1) }, { ...next, privateCount: 1 }]) await expect(verifyPrivateHeader(invalid, { vault: f.vault, author: f.identity }, { contentsHash: next.contentsHash })).rejects.toThrow();
     await expect(verifyPrivateHeader(next, { vault: f.vault, author: f.identity }, { contentsHash: await privateHash('forged') })).rejects.toThrow('digest');
     await expect(verifyPrivateHeader(h, { vault: f.vault, author: f.identity }, { contentsHash: h.contentsHash, paired: first.checkpoint })).rejects.toThrow('Unverified');
     const fork = await header(f, 2, first.checkpoint.head, await privateHash('fork'));
     expect((await verifyPrivateHeader(fork, { vault: f.vault, author: f.identity }, { contentsHash: fork.contentsHash, checkpoint: verified.checkpoint })).decision).toBe('merge');
     const third = await header(f, 3, verified.checkpoint.head);
-    expect((await verifyPrivateHeader(third, { vault: f.vault, author: f.identity }, { contentsHash: third.contentsHash, checkpoint: paired, predecessors: [next] })).decision).toBe('verified');
+    expect((await verifyPrivateHeader(third, { vault: f.vault, author: f.identity }, { contentsHash: third.contentsHash, checkpoint: paired })).decision).toBe('verified');
+    const skipped = await header(f, 999, await privateHash('immediate predecessor only'));
+    expect((await verifyPrivateHeader(skipped, { vault: f.vault, author: f.identity }, { contentsHash: skipped.contentsHash, checkpoint: paired })).checkpoint.version).toBe(999);
+    expect((await verifyPrivateHeader(skipped, { vault: f.vault, author: f.identity }, { contentsHash: skipped.contentsHash, checkpoint: verified.checkpoint, paired })).checkpoint.version).toBe(999);
   });
   it('merges independently verified higher versions and ties, while tombstones beat longer live forks', async () => {
     const f = await privateFixture(), c = await created(f), trust = { vault: f.vault, author: f.identity }, options = { sessions: [f.session] };

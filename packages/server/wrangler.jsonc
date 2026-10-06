@@ -16,6 +16,7 @@
         "name": "REGISTRY",
         "class_name": "RegistryFresh"
       },
+      { "name": "PRIVATE_VAULTS", "class_name": "PrivateVaultObject" },
       {
         "name": "ENCLAVES",
         "class_name": "EnclaveFresh"
@@ -37,7 +38,8 @@
     {
       "tag": "v3-delete-old-storage",
       "deleted_classes": ["Registry", "EnclaveObject"]
-    }
+    },
+    { "tag": "v4-private-vault", "new_sqlite_classes": ["PrivateVaultObject"] }
   ],
   "send_email": [
     {

@@ -17,3 +17,5 @@ export * from './blobs.js';
 export * from './projects.js';
 export * from './private.js';
 export * from './private-transfer.js';
+export * from './private-crypto.js';
+export * from './private-vault.js';

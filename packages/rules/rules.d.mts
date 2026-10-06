@@ -46,6 +46,7 @@ declare const rules: {
   private_header(retained: bigint, incoming: bigint, same: boolean, predecessor: boolean, paired: boolean): PrivateHeaderDecision;
   private_merge(left: bigint, right: bigint, leftDeleted: boolean, rightDeleted: boolean, same: boolean): PrivateMergeChoice;
   private_capacity(bytes: number): boolean;
+  private_slots(dirty: List<bigint>, randomOrder: List<bigint>): List<bigint>;
   private_sync_due(open: boolean, elapsed: bigint): boolean;
   project_ready(version: Version): boolean;
   project_client(client: Version, minimum: Version, control: boolean, artifact: boolean, project: boolean): boolean;

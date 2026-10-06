@@ -5,3 +5,4 @@ export type { AddInput, ItemView, JourneyOptions } from './journey.js';
 export type { ArtifactInput, ArtifactItem, ArtifactView, ArtifactVersion, ArtifactComment, LocalAttachment } from './artifacts.js';
 export type { ProjectView, ParticipationExplanation } from './projects.js';
 export { createWayfindingServer } from './mcp.js';
+export { openPersonPrivateVault } from './private-store.js';

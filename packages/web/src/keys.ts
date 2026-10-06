@@ -1,5 +1,6 @@
 import { createAgeIdentity, createSigningIdentity, deriveRecipient, importSigningKey } from '@ai-wayfinding/core';
 import type { JourneyKey } from '@ai-wayfinding/core';
+import { closePrivateVaults } from './private-store.js';
 
 export interface SealedPersonKeys { version: 1; identity: string; signing: string }
 const encoder = new TextEncoder();
@@ -70,6 +71,7 @@ export function onPersonKeysCleared(callback: (() => void) | null): void { onCle
 
 /** Clear only this page's decrypted material; a reload must not sign the person out. */
 export function lockPersonKeys(): void {
+  closePrivateVaults();
   const hadKeys = unlocked !== null || openJourneyKeys.size > 0;
   unlocked?.clear();
   unlocked = null;

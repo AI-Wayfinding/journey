@@ -171,6 +171,8 @@ export class Registry {
             return { ok: true };
           }
           case 'agentGet': return this.one('SELECT id,journeyId,principal,recipient,signingKey,requestedScope,scope,expires,status,remembered,createdAt,name,keyStorage FROM agent_sessions WHERE id=?', input.id);
+          case 'agentPrincipal': return this.one("SELECT id,keyStorage,status FROM agent_sessions WHERE journeyId=? AND principal=? AND status='approved'", input.journeyId, input.principal);
+          case 'privateAgents': return this.sql.exec("SELECT principal FROM agent_sessions WHERE journeyId=? AND status='approved' AND keyStorage!='link' AND expires>?", input.journeyId, now).toArray();
           case 'agentAttempt': {
             const row = this.one('SELECT code,status,createdAt,failedAttempts FROM agent_sessions WHERE id=?', input.id);
             if (!row || row.status !== 'pending' || Number(row.createdAt) + 600_000 <= now) return { matched: false, available: false };

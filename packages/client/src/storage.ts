@@ -1,4 +1,5 @@
 import * as age from 'age-encryption';
+import { closeNodePrivateVaults } from './private-store.js';
 import { spawn } from 'node:child_process';
 import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -81,6 +82,7 @@ export async function loadRemembered(options: StoreOptions = {}): Promise<Rememb
   return validate(value);
 }
 export async function forgetRemembered(options: StoreOptions = {}): Promise<void> {
+  closeNodePrivateVaults();
   if (options.folder) { await rm(location(options.folder), { force: true }); return; }
   const { platform, run } = supported(options);
   try { await (platform === 'darwin' ? run('security', ['delete-generic-password', '-s', service, '-a', account]) : run('secret-tool', ['clear', 'service', service, 'account', account])); } catch { /* No saved key. */ }
