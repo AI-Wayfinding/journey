@@ -43,7 +43,9 @@ describe('verified Stage 0 controls (Worker and SQLite seam)', () => {
       expect((await request(`/v1/journeys/${j.id}/log`, 'POST', body, as(owner))).ok).toBe(false);
       expect(await snapshot(j)).toBe(before);
     }
-    expect((await submit(j, owner, control, { unnamed: 'SECRET extra' })).status).toBe(201);
+    expect((await submit(j, owner, control, { unnamed: 'SECRET extra' })).status).toBe(400);
+    expect(await snapshot(j)).toBe(before);
+    expect((await submit(j, owner, control)).status).toBe(201);
     const committed = await snapshot(j);
     expect(committed).not.toContain('SECRET'); expect(committed).not.toContain('Private label');
     expect((await submit(j, owner, control)).status).toBe(409);

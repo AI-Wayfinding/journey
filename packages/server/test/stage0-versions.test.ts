@@ -39,6 +39,6 @@ describe('Stage 0 version and format barrier', () => {
     expect((await request(`/v1/journeys/${j.id}/export`, 'GET', undefined, headers)).status).toBe(200);
     const lower = await proof(j, owner, 'client.minVersion', { version: '0.1.3' });
     expect((await request(`/v1/journeys/${j.id}/log`, 'POST', { control: lower }, headers)).status).toBe(403);
-    expect(await (await request(`/v1/journeys/${j.id}/protocol`, 'GET', undefined, as(owner))).json()).toEqual({ minClientVersion: '0.1.7', controlFormat: 'control-proof-v1', artifactFormat: 'artifact-v1', projectFormat: 'project-v1' });
+    expect(await (await request(`/v1/journeys/${j.id}/protocol`, 'GET', undefined, as(owner))).json()).toEqual({ minClientVersion: '0.1.7', controlFormat: 'control-proof-v1', artifactFormat: 'artifact-v1', projectFormat: 'project-v1', privateFormat: 'private-v1' });
   });
 });

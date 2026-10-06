@@ -34,10 +34,10 @@ export class EnclaveObject {
   private identity(state: LogState, subject: Subject): boolean {
     const member = state.members[subject.principal]?.member;
     const row = this.one('SELECT accountHash FROM principals WHERE id=?', subject.principal);
-    return !!member && (subject.agent ? member.kind === 'agent' : member.kind === 'person' && !!subject.accountHash && row?.accountHash === subject.accountHash);
+    return !!member && (subject.agent ? member.kind === 'agent' && subject.agentJourney === state.journey : member.kind === 'person' && !!subject.accountHash && row?.accountHash === subject.accountHash);
   }
   private version(state: LogState, subject: Subject): boolean {
-    try { return rules.project_ready(ruleVersion(state.minClientVersion)) ? rules.project_client(ruleVersion(subject.clientVersion ?? ''), ruleVersion(state.minClientVersion), subject.controlFormat === 'control-proof-v1', subject.artifactFormat === 'artifact-v1', subject.projectFormat === 'project-v1') : rules.artifact_ready(ruleVersion(state.minClientVersion)) ? rules.artifact_client(ruleVersion(subject.clientVersion ?? ''), ruleVersion(state.minClientVersion), subject.controlFormat === 'control-proof-v1', subject.artifactFormat === 'artifact-v1') : rules.server_version(ruleVersion(subject.clientVersion ?? ''), ruleVersion(state.minClientVersion), subject.controlFormat === 'control-proof-v1'); } catch { return false; }
+    try { return rules.private_ready(ruleVersion(state.minClientVersion)) ? rules.private_client(ruleVersion(subject.clientVersion ?? ''), ruleVersion(state.minClientVersion), subject.controlFormat === 'control-proof-v1', subject.artifactFormat === 'artifact-v1', subject.projectFormat === 'project-v1', subject.privateFormat === 'private-v1') : rules.project_ready(ruleVersion(state.minClientVersion)) ? rules.project_client(ruleVersion(subject.clientVersion ?? ''), ruleVersion(state.minClientVersion), subject.controlFormat === 'control-proof-v1', subject.artifactFormat === 'artifact-v1', subject.projectFormat === 'project-v1') : rules.artifact_ready(ruleVersion(state.minClientVersion)) ? rules.artifact_client(ruleVersion(subject.clientVersion ?? ''), ruleVersion(state.minClientVersion), subject.controlFormat === 'control-proof-v1', subject.artifactFormat === 'artifact-v1') : rules.server_version(ruleVersion(subject.clientVersion ?? ''), ruleVersion(state.minClientVersion), subject.controlFormat === 'control-proof-v1'); } catch { return false; }
   }
   private access(state: LogState, subject: Subject, write = false, checkVersion = true): boolean {
     const model = normalizedMembers(state, [subject.principal], Date.now());
@@ -55,6 +55,10 @@ export class EnclaveObject {
   async fetch(request: Request): Promise<Response> {
     try {
       if (request.method === 'PUT' && new URL(request.url).pathname === '/blob') return await this.upload(request);
+      if (new URL(request.url).pathname === '/private-vault') {
+        const input = JSON.parse(request.headers.get('X-Private-Message') ?? '') as Extract<EnclaveMessage, { op: 'privateAccess' }>;
+        return await this.serialized(() => this.handle(input, request));
+      }
       const input = await request.json() as EnclaveMessage;
       return await this.serialized(() => this.handle(input));
     } catch { return failure('invalid-request', 400); }
@@ -132,7 +136,7 @@ export class EnclaveObject {
     const result = await stub.fetch('https://internal/allocate', { method: 'POST' });
     if (!result.ok) throw new Error('Member allocation failed');
   }
-  private async handle(input: EnclaveMessage): Promise<Response> {
+  private async handle(input: EnclaveMessage, vaultRequest?: Request): Promise<Response> {
     const now = Date.now();
     if (input.op === 'create') {
       const data = input.data;
@@ -142,7 +146,7 @@ export class EnclaveObject {
       if (!result.ok || creator.kind !== 'person' || creator.id !== data.creator.id || !data.creatorHash) return failure('invalid-request', 400);
       const state = result.state;
       if (data.control.envelope.outside.epoch !== 1 || data.wraps.length !== 1 || data.wraps[0]?.principal !== creator.id || data.wraps[0]?.epoch !== 1) return failure('invalid-request', 400);
-      const s: Subject = { principal: creator.id, accountHash: data.creatorHash, clientVersion: data.clientVersion, controlFormat: data.controlFormat, artifactFormat: data.artifactFormat, projectFormat: data.projectFormat };
+      const s: Subject = { principal: creator.id, accountHash: data.creatorHash, clientVersion: data.clientVersion, controlFormat: data.controlFormat, artifactFormat: data.artifactFormat, projectFormat: data.projectFormat, privateFormat: data.privateFormat };
       if (!this.version(state, s)) return this.upgrade(state);
       await this.provision(data.id, creator.id);
       this.state.storage.transactionSync(() => {
@@ -181,14 +185,22 @@ export class EnclaveObject {
         const model = normalizedMembers(state, [subject.principal, principal], now);
         const credential = { $: subject.agent ? subject.privateCredential === 'authenticated' ? 'PrivateAuthenticatedAgent' as const : 'PrivateUnknownCredential' as const : 'PrivatePersonCredential' as const };
         const allowed = input.write && subject.agent ? rules.private_write(model.members, model.id(principal), model.id(subject.principal), credential, ruleVersion(state.minClientVersion), state.pendingRotation === true, true) : rules.private_audience(model.members, model.id(principal), model.id(subject.principal), credential);
-        return allowed ? Response.json({ allowed: true, principal }) : failure('forbidden', 403);
+        if (!allowed) return failure('forbidden', 403);
+        if (vaultRequest) {
+          const stub = this.env.PRIVATE_VAULTS.get(this.env.PRIVATE_VAULTS.idFromName(JSON.stringify([state.journey, principal])));
+          return stub.fetch('https://internal/' + new URL(vaultRequest.url).search, { method: vaultRequest.method, headers: { 'X-Private-Agent': subject.agent ? '1' : '0' }, ...(input.write ? { body: vaultRequest.body } : {}) });
+        }
+        return Response.json({ allowed: true, principal });
       }
+      case 'privateWrapEligible':
       case 'privateWrapAccess': {
         const member = state.members[subject.principal]!.member, agent = state.members[input.agent]?.member;
         const person = member.kind === 'agent' ? member.addedBy : member.id;
-        if (!person || !agent || agent.kind !== 'agent' || subject.agent && (input.ciphertext !== undefined || subject.privateCredential !== 'authenticated' || input.agent !== subject.principal)) return failure('forbidden', 403);
-        const model = normalizedMembers(state, [person, input.agent], now);
-        if (!rules.private_audience(model.members, model.id(person), model.id(input.agent), { $: 'PrivateAuthenticatedAgent' })) return failure('forbidden', 403);
+        if (!person || !agent || agent.kind !== 'agent') return failure('forbidden', 403);
+        const model = normalizedMembers(state, [person, subject.principal, input.agent], now);
+        const credential = { $: subject.agent ? subject.privateCredential === 'authenticated' ? 'PrivateAuthenticatedAgent' as const : 'PrivateUnknownCredential' as const : 'PrivatePersonCredential' as const };
+        if (!rules.private_wrap_access(model.members, model.id(person), model.id(subject.principal), model.id(input.agent), credential, input.op === 'privateWrapEligible' || input.ciphertext !== undefined)) return failure('forbidden', 403);
+        if (input.op === 'privateWrapEligible') return Response.json({ allowed: true });
         const stub = this.env.PRIVATE_VAULTS.get(this.env.PRIVATE_VAULTS.idFromName(JSON.stringify([state.journey, person])));
         return stub.fetch('https://internal/agent-wrap?agent=' + encodeURIComponent(input.agent), input.ciphertext ? { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ciphertext: input.ciphertext, expires: Date.parse(agent.expiresAt!) }) } : {});
       }
@@ -224,7 +236,7 @@ export class EnclaveObject {
       default: return failure('invalid-request', 400); // No opaque legacy writes or remove/re-add renewal.
     }
   }
-  private protocol(state: LogState) { return { minClientVersion: state.minClientVersion, controlFormat: 'control-proof-v1', ...(rules.artifact_ready(ruleVersion(state.minClientVersion)) ? { artifactFormat: 'artifact-v1' } : {}), ...(rules.project_ready(ruleVersion(state.minClientVersion)) ? { projectFormat: 'project-v1' } : {}) }; }
+  private protocol(state: LogState) { return { minClientVersion: state.minClientVersion, controlFormat: 'control-proof-v1', ...(rules.artifact_ready(ruleVersion(state.minClientVersion)) ? { artifactFormat: 'artifact-v1' } : {}), ...(rules.project_ready(ruleVersion(state.minClientVersion)) ? { projectFormat: 'project-v1' } : {}), ...(rules.private_ready(ruleVersion(state.minClientVersion)) ? { privateFormat: 'private-v1' } : {}) }; }
   private upgrade(state: LogState): Response { return Response.json({ error: { code: 'client-too-old' }, ...this.protocol(state) }, { status: 426 }); }
   private async project(state: LogState, creator: Member, subject: Subject, input: Extract<EnclaveMessage, { op: 'controlWrite' }>): Promise<Response> {
     const control = input.control, proof = control.proof;

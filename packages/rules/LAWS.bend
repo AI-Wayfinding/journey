@@ -556,6 +556,29 @@ law project_replay_uses_authority_version_and_revision:
   {R.project_apply(members, actor, minimum, pending, R.ProjectIndex{items, pairs, placements}, artifacts, revision, action) == R.project_authorized(R.project_ready(minimum) && R.project_previous(action, revision) && R.project_authority(members, actor, pairs, pending, action), R.ProjectIndex{items, pairs, placements}, artifacts, actor, revision, action) : R.ProjectTransition}
 
 # Stage 3: laws exercise the production private functions, not a parallel model.
+law private_link_read_requires_live_access:
+  for +members: +List<R.Member>
+  for +actor: Nat
+  {R.private_link_read(members, actor) == (R.access_read(R.member_access(R.find(members, actor), members)) && Bool.not(R.private_audience(members, actor, actor, R.PrivateLinkCredential{}))) : Bool}
+law private_wrap_fetch_requires_agent:
+  for members: +List<R.Member>
+  for author: Nat
+  for actor: Nat
+  for target: Nat
+  {R.private_wrap_access(members, author, actor, target, R.PrivatePersonCredential{}, False{}) == False{} : Bool}
+law private_wrap_delivery_requires_person:
+  for members: +List<R.Member>
+  for author: Nat
+  for actor: Nat
+  for target: Nat
+  {R.private_wrap_access(members, author, actor, target, R.PrivateAuthenticatedAgent{}, True{}) == False{} : Bool}
+law private_wrap_fetch_requires_self:
+  for +members: +List<R.Member>
+  for +author: Nat
+  for +actor: Nat
+  for +target: Nat
+  for +credential: R.PrivateCredential
+  {R.private_wrap_access(members, author, actor, target, credential, False{}) == (Nat.is_eq(actor, target) && R.private_credential(R.Agent{}, credential) && R.private_audience(members, author, actor, credential)) : Bool}
 law private_link_excluded:
   for kind: R.MemberKind
   {R.private_credential(kind, R.PrivateLinkCredential{}) == False{} : Bool}

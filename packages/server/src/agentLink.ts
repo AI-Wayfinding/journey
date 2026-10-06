@@ -1,4 +1,5 @@
-import { effectiveProjectParticipants, selectProjectArtifacts, isArtifactAction, readArtifactPayload, type ArtifactPayload, CLIENT_VERSION, canReadContent, controlDefinitions, deriveRecipient, itemVersions, meetsMinClientVersion, open, openLinkIdentity, parseRecord, unwrapJourneyKey, verifyControlProofs, readControlProof } from '@ai-wayfinding/core';
+import rules from '@ai-wayfinding/rules';
+import { normalizedMembers, effectiveProjectParticipants, selectProjectArtifacts, isArtifactAction, readArtifactPayload, type ArtifactPayload, CLIENT_VERSION, canReadContent, controlDefinitions, deriveRecipient, itemVersions, meetsMinClientVersion, open, openLinkIdentity, parseRecord, unwrapJourneyKey, verifyControlProofs, readControlProof } from '@ai-wayfinding/core';
 import type { ControlProof, Member, Envelope, JourneyKey, LogEntry, LogState, ProtocolRecord } from '@ai-wayfinding/core';
 
 /**
@@ -96,7 +97,7 @@ async function readJourney(identity: string, memberId: string, journeyId: string
       comments.push(`${comment.actor}: ${(await readArtifactPayload(row.proof, row.envelope, key)).body.text}`);
     }
     const attachments = payload.attachments.map(a => `${a.name} (${a.mime}, ${a.blob.size} bytes)`);
-    // Unbounded private metadata joins the paged text, not page-header fields.
+    // Journey-visible encrypted metadata joins paged text, not page-header fields.
     artifacts.push({ id: item.id, type: c.kind, title: payload.title.slice(0, 256), tags: payload.tags.slice(0, 8).map(t => t.slice(0, 64)), body: [payload.title, payload.tags.join(', '), body, ...attachments, ...comments].join('\n'), createdAt: rows[item.versions[0]!.seq]!.proof.at, updatedAt: row.proof.at, author: { name: item.author, kind: 'person' }, writer: { name: version.actor, kind: 'person' }, version: version.id });
   }
   return { state, genesis, records, artifacts };
@@ -123,6 +124,8 @@ export async function readLink(row: LinkRow, secret: string, origin: string, cal
   const selection = selector ?? 'main';
   const identity = await openLinkIdentity(secret, row.blob, row.journeyId, row.memberId);
   const { state, genesis, records, artifacts } = await readJourney(identity, row.memberId, row.journeyId, call);
+  const model = normalizedMembers(state, [row.memberId], now);
+  if (!rules.private_link_read(model.members, model.id(row.memberId))) throw new LinkEnded();
   const selected = new Set(selectProjectArtifacts(state, selection));
   const mine = state.members[row.memberId]!.member;
   const expires = Math.min(row.expires, mine.expiresAt ? Date.parse(mine.expiresAt) : row.expires);

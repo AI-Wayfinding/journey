@@ -37,6 +37,8 @@ declare const rules: {
   private_ready(version: Version): boolean;
   private_client(client: Version, minimum: Version, control: boolean, artifact: boolean, project: boolean, privateFormat: boolean): boolean;
   private_audience(members: List<Member>, author: bigint, actor: bigint, credential: PrivateCredential): boolean;
+  private_link_read(members: List<Member>, actor: bigint): boolean;
+  private_wrap_access(members: List<Member>, author: bigint, actor: bigint, target: bigint, credential: PrivateCredential, write: boolean): boolean;
   private_write(members: List<Member>, author: bigint, actor: bigint, credential: PrivateCredential, minimum: Version, pending: boolean, current: boolean): boolean;
   private_copy_access(source: boolean, destination: boolean, different: boolean, visibility: JourneySettings['visibility']): boolean;
   private_apply(allowed: boolean, value: Maybe<PrivateCopy>, id: bigint, actor: bigint, record: bigint, seq: bigint, previous: bigint, next: PrivateAction, projects: List<ProjectInfo>): PrivateTransition;
