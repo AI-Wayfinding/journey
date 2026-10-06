@@ -13,3 +13,6 @@ packages/*/dist/
 
 # Core copies the committed Bend runtime and declarations before compiling.
 packages/core/src/rules/
+
+# Local agent harness state.
+.pi/
