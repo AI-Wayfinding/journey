@@ -265,3 +265,48 @@ test('oversized private files refuse fixed-vault capacity without a server or lo
     expect((await durable(owner.page, trip.id)).branches).toHaveLength(0); // Dummy commit cannot leak a partially staged file.
   } finally { await owner.context.close(); }
 });
+
+
+test('browser proposals refuse stale edits, unsupported content, foreign backups and project/destination elevation without mutation', async ({ browser }) => {
+  test.setTimeout(300_000); const owner = await browserPerson(browser);
+  try {
+    await signUp(owner.page, `private-negative-${Date.now()}@example.org`); await frozen(owner.page); const source = await createTrip(owner.page, 'Negative source');
+    await navigate(owner.page, '/'); const destination = await createTrip(owner.page, 'Negative destination');
+    await addPrivate(owner.page, source.path, 'NEGATIVE BASELINE', 'Committed original'); await scheduled(owner.page);
+    const secondContext = await browser.newContext({ storageState: await owner.context.storageState() });
+    try {
+      const second = await device(secondContext, owner.page, source.id);
+      await second.evaluate(async () => { const w = (window as any).privateWork; (window as any).oldPrivateCopy = (await w.copies('all'))[0]; });
+      await second.evaluate(async () => { const w = (window as any).privateWork; await w.save({ title: 'CURRENT VERSION', tags: [], content: { kind: 'document', markdown: 'Current' }, attachments: [] }, (window as any).oldPrivateCopy); });
+      const reject = (operation: 'stale' | 'unsupported' | 'foreign' | 'project') => second.evaluate(async operation => {
+        const w = (window as any).privateWork, core = (window as any).Stage3;
+        try {
+          if (operation === 'foreign') { const key = await core.createAgeIdentity(); await w.restore(await core.sealIdentity('{}', [key.recipient])); }
+          else if (operation === 'project') await w.place((await w.copies('all'))[0], core.newId());
+          else await w.save({ title: 'DISALLOWED INPUT', tags: [], content: operation === 'unsupported' ? { kind: 'html', html: '<script>bad()</script>' } : { kind: 'document', markdown: 'Stale overwrite' }, attachments: [] }, operation === 'stale' ? (window as any).oldPrivateCopy : undefined);
+          return 'accepted';
+        } catch (error) { return (error as Error).message; }
+      }, operation);
+      const before = await durable(owner.page, source.id), trace = observe(second);
+      expect(await reject('stale')).toContain('conflict'); expect(await reject('unsupported')).toBe('Unsupported artifact type'); expect(await reject('foreign')).not.toBe('accepted'); expect(await reject('project')).toContain('conflict');
+      expect(trace).toEqual([]); expect((await durable(owner.page, source.id)).head).toBe(before.head);
+      await second.clock.runFor(300_000); await expect.poll(async () => (await durable(owner.page, source.id)).branches[0]!.bundle.records.length).toBe(2);
+      const committed = await durable(owner.page, source.id); expect(committed.branches[0]!.bundle.payloads.at(-1)!.payload.body.title).toBe('CURRENT VERSION');
+      const destinationDevice = await device(secondContext, owner.page, destination.id);
+      const project = await destinationDevice.evaluate(async () => { const core = (window as any).Stage3, ctx = (window as any).privateContext; return core.createProject(ctx, 'Read-only participant'); });
+      const destinationPrincipal = await principal(owner.page, destination.id);
+      await change(owner.page, destination.id, 'member.role', { member: destinationPrincipal, role: 'read-only' });
+      await destinationDevice.evaluate(async project => { const core = (window as any).Stage3, ctx = (window as any).privateContext; await core.participateProject(await core.verifiedJourney(ctx.id, ctx.principal, ctx.keys), 'project.join', project); }, project);
+      await second.evaluate(async ({ id, destinationPrincipal }) => {
+        const core = (window as any).Stage3;
+        (window as any).destinationWork = await core.BrowserPrivateArtifacts.open(await core.verifiedJourney(id, destinationPrincipal, (window as any).privateContext.keys));
+      }, { id: destination.id, destinationPrincipal });
+      const destBefore = await durable(owner.page, destination.id);
+      expect(await second.evaluate(async () => {
+        const source = (window as any).privateWork, dest = (window as any).destinationWork;
+        try { await source.copyTo((await source.copies('all'))[0], dest); return 'accepted'; } catch (error) { return (error as Error).message; }
+      })).toContain('Private write authority denied');
+      expect((await durable(owner.page, destination.id)).head).toBe(destBefore.head); expect((await durable(owner.page, destination.id)).branches).toHaveLength(0);
+    } finally { await secondContext.close(); }
+  } finally { await owner.context.close(); }
+});
