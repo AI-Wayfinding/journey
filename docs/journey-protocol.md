@@ -219,10 +219,13 @@ A private attachment descriptor is exactly `{v:1,vault,copy,id,generation,size,c
 ```text
 {format:'private-v1',version:1,vault,author,scope,authorityHistories,
  records,payloads,copyKeys:[{copy,key}],
+ sourceHistories?:[{vault,records,payloads}],
  blobs:[{descriptor,ciphertext}],unavailableDeletedBlobs}
 ```
 
 Scopes are `author-backup`, `agent-handoff` and `agent-return`. Bend selects the single derived recipient; live audience checks still apply to every copy. No root/index key, arbitrary recipients, grants or caller index is accepted. Verification checks complete signed copy histories and independent membership histories, exact descriptors, authenticated decrypted bytes and every live reference before returning named fields. Historical recovery is author-backup only. Deleted histories remain verifiable while their unavailable bytes are listed; other copies remain independent. Bundle verification does not itself commit a vault or replace a checkpoint.
+
+A cross-journey copy carries complete signed source histories in `sourceHistories`. Each history is verified against its own derived member vault ID, the same pinned author signing key and recipient, and independently verified source journey authority. Source records retain their original vault IDs and signatures. They supply provenance only: no source keys, ciphertext or source copies enter the destination's live view. The destination's own records must still carry its trust vault ID. Historical replay binds the origin's `{journey,copy,artifact,version,recordHash}` to the verified source version prefix, so later source edits or deletion do not invalidate a stored snapshot. Live copying still requires current write access in both journeys.
 
 ### Fixed slots, scheduled patches and retained checkpoints
 

@@ -42,7 +42,7 @@ export async function artifactAppend(f: ArtifactFixture, actor: Awaited<ReturnTy
 export const artifactResult = (f: ArtifactFixture, keyed = true) => verifyControlProofs(f.controls.map(c => c.proof), f.controls.map(c => c.envelope), f.trust, keyed ? [f.key] : []);
 
 // Portable Stage 3 fixtures use complete signed Stage 0–2 authority histories.
-import { PRIVATE_FORMAT, PRIVATE_SLOT_COUNT, newPrivateId, privateIdentity, privateAuthority, privatePersonSession, verifyPrivateContext, privateHash, signPrivateRecord, verifyPrivateRecords, signPrivateHeader } from '../src/index.js';
+import { PRIVATE_FORMAT, PRIVATE_SLOT_COUNT, newPrivateId, privateIdentity, privateAuthority, privatePersonSession, verifyPrivateContext, privateHash, signPrivateRecord, verifyPrivateRecords, signPrivateHeader, memberVaultId } from '../src/index.js';
 import type { PrivateRecord, PrivatePayload, PrivateIdentity, PrivateContext, PrivateHeader, ProtocolRecord } from '../src/index.js';
 export const now = Date.parse('2026-01-02T00:00:00.000Z');
 export type Actor = Awaited<ReturnType<typeof person>>;
@@ -60,7 +60,7 @@ export async function privateFixture() {
   for (const p of [reader, writer]) await artifactAppend(f, author, 'member.add', { member: p.member, kind: 'agent', grants: [] });
   await artifactAppend(f, f.guide, 'member.add', { member: foreign.member, kind: 'agent', grants: [] });
   const context = await contextFor(f), identity = privateIdentity(author.member), session = await privatePersonSession(context, identity, author.key, author.identity);
-  return { f, author, reader, writer, foreign, context, identity, session, vault: newPrivateId(), copy: newPrivateId(), artifact: newPrivateId() };
+  return { f, author, reader, writer, foreign, context, identity, session, vault: await memberVaultId(context.journey, author.member.id, identity.signingKey, identity.recipient), copy: newPrivateId(), artifact: newPrivateId() };
 }
 export async function record(context: PrivateContext, actor: Actor, vault: string, copy: string, artifact: string, author: PrivateIdentity, type: PrivateRecord['type'] = 'private.create', old: readonly PrivateRecord[] = [], payload: ProtocolRecord = content(), body: JsonObject = {}) {
   const defaults: JsonObject = type === 'private.create' || type === 'private.version' || type === 'private.copy' ? { version: newId(), typeHash: await artifactTypeHash('document'), blobs: [], predecessor: type === 'private.version' ? old.filter(r => ['private.create', 'private.version', 'private.copy'].includes(r.type)).at(-1)!.body.version : null }

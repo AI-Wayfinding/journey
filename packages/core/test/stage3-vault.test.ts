@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { PrivateVault, PRIVATE_SLOT_BYTES, PRIVATE_HEADER_BYTES, privateDecode, privateHash, privateAuthorityHistory, privateRandomBytes, selectPrivateSlots, verifyVaultCacheAdvance, validateVaultCache, openPrivateFrame, sealPrivateFrame, signPrivateHeader, encodeVaultPatch, newId, newPrivateId, privatePersonSession, privateAgentSession, privateIdentity, privateSnapshotHash } from '../src/index.js';
+import { PrivateVault, PRIVATE_SLOT_BYTES, PRIVATE_HEADER_BYTES, privateDecode, privateHash, privateAuthorityHistory, privateRandomBytes, selectPrivateSlots, verifyVaultCacheAdvance, validateVaultCache, openPrivateFrame, sealPrivateFrame, signPrivateHeader, encodeVaultPatch, newId, newPrivateId, privatePersonSession, privateAgentSession, privateIdentity, privateSnapshotHash, memberVaultId, privateCopies } from '../src/index.js';
 import type { PrivateBundle, PrivateRecord, PrivatePayload, VaultOptions, VaultCacheRecord, VaultPatch, VaultWire } from '../src/index.js';
 import { encode } from '../src/codec.js';
 import { privateFixture, created, record, content, artifactFixture, artifactAppend, contextFor, marker, agent, now } from './stage0-fixture.js';
@@ -120,13 +120,25 @@ describe('scheduled fixed member vault controller', () => {
     await artifactAppend(destination, destination.guide, 'member.add', { member: { id: principal, kind: 'person', signingKey: f.f.identity.signingKey, recipient: f.f.identity.recipient }, kind: 'person', grants: [] });
     await artifactAppend(destination, destination.guide, 'member.role', { member: principal, role: 'read-write' });
     const context = await contextFor(destination), session = await privatePersonSession(context, f.f.identity, f.f.author.key, f.f.author.identity), copy = newPrivateId();
+    const vault = await memberVaultId(context.journey, principal, f.f.identity.signingKey, f.f.identity.recipient);
+    expect(vault).not.toBe(f.f.vault);
     const original = f.bundle.records[0]!, payload = f.bundle.payloads[0]!.payload;
-    const copied = await record(context, f.f.author, f.f.vault, copy, f.f.artifact, f.f.identity, 'private.copy', [], content(), { origin: { journey: f.f.context.journey, copy: f.f.copy, artifact: f.f.artifact, version: original.body.version, recordHash: await privateHash(original) }, destination: { journey: context.journey, copy }, snapshotHash: await privateSnapshotHash(payload) });
+    const copied = await record(context, f.f.author, vault, copy, f.f.artifact, f.f.identity, 'private.copy', [], content(), { origin: { journey: f.f.context.journey, copy: f.f.copy, artifact: f.f.artifact, version: original.body.version, recordHash: await privateHash(original) }, destination: { journey: context.journey, copy }, snapshotHash: await privateSnapshotHash(payload) });
     const deletion = await record(f.f.context, f.f.author, f.f.vault, f.f.copy, f.f.artifact, f.f.identity, 'private.delete', f.bundle.records, marker());
     f.options.contexts = [f.f.context, context]; f.options.sessions = [f.f.session, session];
-    const bundle = { ...f.bundle, authorityHistories: [...f.bundle.authorityHistories, privateAuthorityHistory(context)], records: [...f.bundle.records, deletion.record, copied.record], payloads: [...f.bundle.payloads, deletion.payload, copied.payload], copyKeys: [...f.bundle.copyKeys, { copy, key: encode(privateRandomBytes(32)) }] };
-    await f.controller.open(); await f.controller.stage(bundle); f.time(300000); await f.controller.tick(); f.controller.close();
-    const reopened = new PrivateVault(f.options); await reopened.open(); expect(reopened.branches[0]!.bundle.records).toHaveLength(3); reopened.close();
+    f.options.trust = { vault, author: f.f.identity };
+    const bundle: PrivateBundle = { ...f.bundle, vault, authorityHistories: [...f.bundle.authorityHistories, privateAuthorityHistory(context)], records: [copied.record], payloads: [copied.payload], copyKeys: [{ copy, key: encode(privateRandomBytes(32)) }], sourceHistories: [{ vault: f.f.vault, records: [...f.bundle.records, deletion.record], payloads: [...f.bundle.payloads, deletion.payload] }] };
+    await f.controller.open();
+    await f.controller.stage(bundle);
+    expect(f.controller.branches).toEqual([]);
+    f.time(300000); expect(await f.controller.tick()).toBe(true);
+    expect(f.controller.branches[0]!.bundle.records).toEqual([copied.record]);
+    f.controller.close();
+    const reopened = new PrivateVault({ ...f.options, cache: undefined, source: undefined, sessions: [session] }); await reopened.open();
+    expect(reopened.branches[0]!.bundle.records).toEqual([copied.record]);
+    expect(reopened.branches[0]!.bundle.sourceHistories![0]!.records).toEqual([...f.bundle.records, deletion.record]);
+    expect(privateCopies(reopened.branches[0]!.view)).toHaveLength(1);
+    reopened.close();
   }, 60000);
   it('reopens historical signed records without live sessions but refuses offline writes and wrong signing keys before upload', async () => {
     const f = await fixture(); await f.controller.open(); await f.controller.stage(f.bundle); f.time(300000); await f.controller.tick();
