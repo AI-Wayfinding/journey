@@ -118,7 +118,7 @@ export class BrowserPrivateArtifacts {
     await this.writer(); await destination.writer();
     if (canonical(this.session.identity) !== canonical(destination.session.identity)) throw new Error('Private copy author keys differ');
     const source = await this.verified(), selected = privateCopies(source.view).find(c => c.copy === copy.copy && !c.deleted);
-    if (!selected || selected.head !== copy.head) throw new Error('Private copy source changed');
+    if (!selected || canonical(selected.records) !== canonical(copy.records)) throw new Error('Private copy source snapshot changed');
     const content = await this.content(selected);
     const bundle = destination.bundle(), id = newPrivateId();
     bundle.copyKeys.push({ copy: id, key: encode(crypto.getRandomValues(new Uint8Array(32))) });
