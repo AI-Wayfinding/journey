@@ -5,7 +5,7 @@ import { mkdir, writeFile, rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { browserPerson, signUp } from './person.js';
 import { createTrip, downloadBytes, joinTrip } from './stage1-fixtures.js';
-import { addPrivate, durable, frozen, scheduled, device, observe, headers, controls, change, principal, navigate, firstDeviceCheckpoint, signedAgent, forkSnapshot } from './stage3-fixtures.js';
+import { addPrivate, durable, frozen, scheduled, device, observe, headers, controls, change, principal, navigate, firstDeviceCheckpoint, signedAgent, forkSnapshot, credentialAgent, credentialRead, adapterPage, deterministicVault } from './stage3-fixtures.js';
 
 // These tests use real browser code, real signed controls, Durable Objects and
 // server vault bytes. No save-triggered sync or in-memory-only success oracle.
@@ -308,5 +308,205 @@ test('browser proposals refuse stale edits, unsupported content, foreign backups
       })).toContain('Private write authority denied');
       expect((await durable(owner.page, destination.id)).head).toBe(destBefore.head); expect((await durable(owner.page, destination.id)).branches).toHaveLength(0);
     } finally { await secondContext.close(); }
+  } finally { await owner.context.close(); }
+});
+
+
+// Supplying a handle, a person principal, or a known agent ID must never grant
+// another credential the author's ciphertext, wraps or possession audience.
+test('removed, expired, link and foreign-agent browser credentials cannot obtain the author vault or handoff audience', async ({ browser }) => {
+  test.setTimeout(300_000); const owner = await browserPerson(browser), guest = await browserPerson(browser);
+  try {
+    await signUp(owner.page, `private-credentials-${Date.now()}@example.org`); const trip = await createTrip(owner.page);
+    await signUp(guest.page, `private-foreign-${Date.now()}@example.org`); await joinTrip(owner.page, guest.page, trip.path);
+    const foreign = await credentialAgent(guest.page, trip.id), own = await credentialAgent(owner.page, trip.id), removed = await credentialAgent(owner.page, trip.id), link = await credentialAgent(owner.page, trip.id, 'link');
+    await frozen(owner.page); await navigate(owner.page, '/'); await addPrivate(owner.page, trip.path, 'CREDENTIAL PRIVATE CANARY', 'No foreign audience'); await scheduled(owner.page);
+    const saved = await durable(owner.page, trip.id), secondContext = await browser.newContext({ storageState: await owner.context.storageState() });
+    try {
+      const second = await device(secondContext, owner.page, trip.id);
+      const readPath = `/v1/journeys/${trip.id}/private-vault?slots=00,01`, wrapPath = `/v1/journeys/${trip.id}/private-agent-wrap/${own.principal}`;
+      const allowed = await credentialRead(second, own, readPath); expect(allowed.status).toBe(200); expect(allowed.bytes).toBe(2_129_987);
+      expect((await credentialRead(second, own, wrapPath)).status).toBe(200);
+      await change(owner.page, trip.id, 'member.remove', { member: removed.principal });
+
+      await owner.page.clock.setSystemTime(new Date()); await navigate(owner.page, trip.path); await expect(owner.page.getByRole('heading', { name: 'Artifacts journey', exact: true })).toBeVisible(); // existing guide rotation completes before testing the audience
+      // Expiry uses a real server credential and actual server wall time. Only the
+      // browser's vault timer is virtual; moving it cannot expire server auth.
+      const expired = await credentialAgent(owner.page, trip.id, 'memory', 5_000);
+      await expect.poll(() => Date.now(), { timeout: 10_000 }).toBeGreaterThan(expired.expiresAt);
+      await second.evaluate(async () => { const w = (window as any).privateWork, core = (window as any).Stage3; core.closePrivateVaults(); (window as any).privateWork = await core.BrowserPrivateArtifacts.open(await core.verifiedJourney(w.ctx.id, w.ctx.principal, w.ctx.keys)); });
+      const before = await durable(owner.page, trip.id);
+
+      expect(await second.evaluate(async principal => (await (window as any).privateWork.challenge(principal)).message.principal, own.principal)).toBe(own.principal);
+      for (const [name, agent] of [['removed', removed], ['expired', expired], ['link', link]] as const) {
+        for (const path of [readPath, wrapPath, `/v1/journeys/${trip.id}/private-agent-wrap/${agent.principal}`]) {
+          const denied = await credentialRead(second, agent, path, { 'X-Principal': saved.current.actor });
+          expect([401, 403], name).toContain(denied.status); expect(denied.frame).toBeNull(); expect(denied.text).not.toContain('ciphertext'); expect(denied.text).not.toContain('CREDENTIAL PRIVATE CANARY');
+        }
+      }
+      // A foreign agent has its own person's separate vault, not the requested
+      // author's vault, even when it supplies that author's principal.
+      const other = await credentialRead(second, foreign, readPath, { 'X-Principal': saved.current.actor });
+      expect(other.status).toBe(200); expect(other.frame).not.toBe(saved.snapshot.frame);
+      const guestVault = await durable(guest.page, trip.id); expect(guestVault.vault).not.toBe(saved.vault); expect(other.frame).toBe(guestVault.snapshot.frame); expect(guestVault.branches).toEqual([]);
+      await expect(second.evaluate(async ({ frame, identity, recipient }) => (window as any).Stage3.openPrivateFrame(frame, identity, recipient), { frame: saved.snapshot.frame, identity: foreign.identity, recipient: saved.author.recipient })).rejects.toThrow();
+      expect((await credentialRead(second, foreign, wrapPath)).status).toBe(403);
+      for (const agent of [removed, expired, link, foreign]) {
+        expect(await second.evaluate(async principal => { try { await (window as any).privateWork.challenge(principal); return 'accepted'; } catch (error) { return (error as Error).message; } }, agent.principal)).toBe('Authenticated own agent required');
+      }
+      const audience = await second.evaluate(async () => { const w = (window as any).privateWork; return (await (await fetch(`/v1/journeys/${w.ctx.id}/private-agents`, { headers: { 'X-Principal': w.ctx.principal, 'X-Client-Version': '0.1.7', 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': 'artifact-v1', 'X-Project-Format': 'project-v1', 'X-Private-Format': 'private-v1' } })).json()).agents.map((a: { principal: string }) => a.principal); });
+      expect(audience).toEqual([own.principal]); expect((await durable(owner.page, trip.id)).head).toBe(before.head);
+      expect(privateCopies(before.branches[0]!.view)).toHaveLength(1); expect(before.branches[0]!.bundle.payloads[0]!.payload.body.title).toBe('CREDENTIAL PRIVATE CANARY');
+    } finally { await secondContext.close(); }
+  } finally { await owner.context.close(); await guest.context.close(); }
+});
+
+// Reuse one browser profile across two real accounts. Cache database names must
+// be memberVaultId bindings, and old decrypted controllers must stay unusable.
+test('sign-out and author switching clear private viewers, keys and pending state without crossing member vaults', async ({ browser }) => {
+  test.setTimeout(300_000); const owner = await browserPerson(browser), guest = await browserPerson(browser);
+  try {
+    const aliceEmail = `private-switch-a-${Date.now()}@example.org`; await signUp(owner.page, aliceEmail); const trip = await createTrip(owner.page);
+    await signUp(guest.page, `private-switch-b-${Date.now()}@example.org`); await joinTrip(owner.page, guest.page, trip.path);
+    await frozen(owner.page); await navigate(owner.page, '/'); const alicePath = await addPrivate(owner.page, trip.path, 'AUTHOR A PRIVATE CANARY', 'A committed secret'); await scheduled(owner.page);
+    const a = await durable(owner.page, trip.id);
+    await frozen(guest.page); await navigate(guest.page, '/'); const bobPath = await addPrivate(guest.page, trip.path, 'AUTHOR B PRIVATE CANARY', 'B independent secret'); await scheduled(guest.page); const b = await durable(guest.page, trip.id);
+    expect(b.vault).not.toBe(a.vault);
+    const secondContext = await browser.newContext({ storageState: await owner.context.storageState() });
+    try {
+      const second = await device(secondContext, owner.page, trip.id);
+      await second.evaluate(async () => { const w = (window as any).privateWork; await w.save({ title: 'A UNSENT CANARY', tags: [], content: { kind: 'document', markdown: 'Must clear on sign-out' }, attachments: [] }); });
+      await navigate(owner.page, alicePath); await expect(owner.page.getByRole('heading', { name: 'AUTHOR A PRIVATE CANARY', exact: true })).toBeVisible();
+      const trace = observe(owner.page); await owner.page.getByRole('button', { name: 'Sign out', exact: true }).click(); await expect(owner.page.getByRole('heading', { name: 'Sign in', exact: true })).toBeVisible();
+      expect(await owner.page.locator('main').textContent()).not.toContain('AUTHOR A PRIVATE CANARY'); await expect(owner.page.locator('#private-viewer, #private-versions, #private-count')).toHaveCount(0);
+
+      const signedOutKeys = await adapterPage(owner.context);
+      expect(await signedOutKeys.evaluate(async () => (window as any).Stage3.restorePersonKeys())).toBeNull(); await signedOutKeys.close();
+      await owner.page.clock.runFor(600_000); expect(trace).toEqual([]);
+      await second.evaluate(async () => { await (window as any).Stage3.clearPersonKeys(); });
+      expect(await second.evaluate(async () => (window as any).Stage3.restorePersonKeys())).toBeNull();
+      expect(await second.evaluate(() => (window as any).Stage3.getPersonKeys())).toBeNull();
+      await expect(second.evaluate(() => (window as any).privateWork.copies('all'))).rejects.toThrow('locked');
+      await expect(second.evaluate(() => (window as any).privateWork.vault.agentContentIdentity)).rejects.toThrow('locked');
+      await second.clock.runFor(600_000);
+      // Switch cookies in the SAME IndexedDB profile. Same-key device seam below
+      // transfers B's existing keys, never A's vault or a fabricated vault ID.
+      await owner.context.addCookies((await guest.context.storageState()).cookies);
+      const bobDevice = await device(owner.context, guest.page, trip.id);
+      expect(await bobDevice.evaluate(async () => { const w = (window as any).privateWork; return (await Promise.all((await w.copies('all')).map((c: any) => w.content(c)))).map((p: any) => p.title); })).toEqual(['AUTHOR B PRIVATE CANARY']);
+      const bobNow = await durable(guest.page, trip.id); expect(bobNow.vault).toBe(b.vault); expect(bobNow.branches[0]!.bundle.records).toEqual(b.branches[0]!.bundle.records);
+      // A known A copy route must not show A's body or count to B.
+      await owner.page.goto(alicePath); await expect(owner.page.locator('main > [role="alert"]')).toContainText('Private copy unavailable'); expect(await owner.page.locator('main').textContent()).not.toContain('AUTHOR A PRIVATE CANARY');
+      await navigate(owner.page, bobPath); await expect(owner.page.getByRole('heading', { name: 'AUTHOR B PRIVATE CANARY', exact: true })).toBeVisible(); expect(await owner.page.locator('main').textContent()).not.toContain('AUTHOR A PRIVATE CANARY');
+      await bobDevice.evaluate(() => (window as any).Stage3.closePrivateVaults());
+      // The real logout revoked A's copied cookie in every profile. Sign A back
+      // in with the existing passkey rather than reviving that revoked session.
+      await owner.page.getByRole('button', { name: 'Sign out', exact: true }).click(); await expect(owner.page.getByRole('heading', { name: 'Sign in', exact: true })).toBeVisible();
+      await owner.page.getByLabel('Email address', { exact: true }).fill(aliceEmail); await owner.page.getByRole('button', { name: 'Send sign-in link', exact: true }).click(); await expect(owner.page.getByRole('heading', { name: 'Check your email', exact: true })).toBeVisible();
+      const message = await (await owner.page.request.get(`/__test/email?address=${encodeURIComponent(aliceEmail)}`)).json();
+      await owner.page.goto(/https?:\/\/[^\s]+#token=[A-Za-z0-9_-]+/.exec(message.text)![0]!); await owner.page.getByRole('button', { name: 'Sign in with passkey', exact: true }).click(); await expect(owner.page.getByRole('heading', { name: 'A place to find your way', exact: true })).toBeVisible();
+      const aliceContext = await browser.newContext({ storageState: await owner.context.storageState() });
+      try { const aliceAgain = await device(aliceContext, owner.page, trip.id); expect(await aliceAgain.evaluate(async () => (await (window as any).privateWork.copies('all')).length)).toBe(1); } finally { await aliceContext.close(); }
+    } finally { await secondContext.close(); }
+  } finally { await owner.context.close(); await guest.context.close(); }
+});
+
+
+for (const mode of ['higher', 'delete', 'live-against-delete'] as const) {
+  test(`verified same-vault fork merge selects ${mode} from durable histories and preserves it on a second device`, async ({ browser }) => {
+    test.setTimeout(300_000); const owner = await browserPerson(browser), scratch = resolve('../../.scratch/private-merge-' + mode + '-' + Date.now()); await mkdir(scratch, { recursive: true });
+    try {
+      await signUp(owner.page, `private-merge-${mode}-${Date.now()}@example.org`); await frozen(owner.page); const trip = await createTrip(owner.page);
+      const path = await addPrivate(owner.page, trip.path, 'MERGE PRIVATE CANARY', 'LOWER ARTIFACT VERSION'); await scheduled(owner.page);
+      const created = await durable(owner.page, trip.id); await expect.poll(async () => (await firstDeviceCheckpoint(owner.page, created.vault, created.current.secrets.identity)).head).toBe(created.head);
+      if (mode === 'live-against-delete') { owner.page.once('dialog', d => { void d.accept(); }); await owner.page.getByRole('button', { name: 'Delete private artifact', exact: true }).click(); await expect(owner.page).toHaveURL(trip.path + '/private'); await scheduled(owner.page); }
+      const saved = await durable(owner.page, trip.id), { changed, ...fork } = await forkSnapshot(saved, 'HIGHER ARTIFACT VERSION', mode);
+      const checkpoint = await firstDeviceCheckpoint(owner.page, saved.vault, saved.current.secrets.identity);
+      expect(checkpoint.head).toBe(saved.head); expect(fork.checkpoint.version).toBe(checkpoint.version); expect(fork.checkpoint.head).not.toBe(checkpoint.head);
+      await navigate(owner.page, trip.path + '/private/backup');
+      const put = await owner.page.request.put(`/v1/journeys/${trip.id}/private-vault`, { headers: { ...headers, 'X-Principal': saved.current.actor, 'X-Wayfinding': '1', Origin: new URL(owner.page.url()).origin, 'Content-Type': 'application/octet-stream' }, data: Buffer.from(encodeVaultPatch({ token: saved.snapshot.token, frame: fork.frame, slots: [changed, (changed + 1) % 64].map(index => ({ index, ciphertext: fork.slots[index]! })) })) }); expect(put.status()).toBe(200);
+      const remote = await durable(owner.page, trip.id); expect(remote.head).toBe(fork.checkpoint.head);
+      const remoteCopy = privateCopies(remote.branches[0]!.view)[0]!;
+      expect(remoteCopy.deleted).toBe(mode === 'delete'); expect(remoteCopy.records.filter(r => r.type === 'private.create' || r.type === 'private.version')).toHaveLength(mode === 'higher' ? 2 : mode === 'delete' ? 1 : 3);
+      await writeFile(scratch + '/fork.json', JSON.stringify(fork)); await owner.page.getByLabel('Encrypted device snapshot JSON').setInputFiles(scratch + '/fork.json'); await owner.page.getByRole('button', { name: 'Merge verified device histories', exact: true }).click();
+      await expect(owner.page.getByRole('heading', { name: 'Author-private artifacts', exact: true })).toBeVisible(); await scheduled(owner.page);
+      const merged = await durable(owner.page, trip.id); expect(merged.snapshot.checkpoint.version).toBe(saved.snapshot.checkpoint.version + 1); expect(merged.snapshot.checkpoint.prev).toBe(remote.head); expect(merged.branches).toHaveLength(1);
+
+      await expect.poll(async () => (await firstDeviceCheckpoint(owner.page, merged.vault, merged.current.secrets.identity)).head).toBe(merged.head); await navigate(owner.page, trip.path + '/private');
+      const winner = privateCopies(merged.branches[0]!.view)[0]!;
+      if (mode === 'higher') {
+        expect(winner.records.map(r => r.type)).toEqual(['private.create', 'private.version']); expect(winner.head).toBe(remoteCopy.head);
+        await navigate(owner.page, path); await expect(owner.page.locator('#private-viewer')).toContainText('HIGHER ARTIFACT VERSION');
+      } else {
+        expect(winner.deleted).toBe(true); expect(winner.records.at(-1)!.type).toBe('private.delete');
+        expect(winner.records).toEqual(mode === 'delete' ? remoteCopy.records : privateCopies(saved.branches[0]!.view)[0]!.records);
+        await expect(owner.page.locator('#private-count')).toHaveText('0 matching author-private artifacts');
+        await navigate(owner.page, path); await expect(owner.page.locator('main > [role="alert"]')).toContainText('Private copy unavailable'); await expect(owner.page.locator('#private-viewer')).toHaveCount(0);
+      }
+      const secondContext = await browser.newContext({ storageState: await owner.context.storageState() });
+      try {
+        const second = await device(secondContext, owner.page, trip.id, { ...merged.snapshot.checkpoint, freshness: 'paired' });
+        expect(await second.evaluate(() => (window as any).privateWork.vault.branches.map((b: any) => b.bundle.records))).toEqual([winner.records]);
+        const copies = await second.evaluate(async () => (await (window as any).privateWork.copies('all')).map((c: any) => ({ copy: c.copy, head: c.head })));
+        expect(copies).toEqual(mode === 'higher' ? [{ copy: winner.copy, head: winner.head }] : []);
+        const reopened = await durable(owner.page, trip.id); expect(privateCopies(reopened.branches[0]!.view)[0]!.records).toEqual(winner.records); expect(reopened.snapshot.checkpoint.version).toBe(merged.snapshot.checkpoint.version + 1);
+      } finally { await secondContext.close(); }
+    } finally { await owner.context.close(); await rm(scratch, { recursive: true, force: true }); }
+  });
+}
+
+
+test('injected random slots and failed empty/populated commits keep exactly the matched five-minute retry schedule', async ({ browser }) => {
+  test.setTimeout(300_000); const owner = await browserPerson(browser);
+  try {
+    await signUp(owner.page, `private-random-retry-${Date.now()}@example.org`); await frozen(owner.page); const emptyTrip = await createTrip(owner.page, 'Empty retry journey');
+    await navigate(owner.page, '/'); const populatedTrip = await createTrip(owner.page, 'Populated retry journey');
+    await addPrivate(owner.page, populatedTrip.path, 'RETRY PRIVATE CANARY', 'Committed before matched failure'); await scheduled(owner.page);
+    const baseline = await durable(owner.page, populatedTrip.id), emptyBefore = await durable(owner.page, emptyTrip.id);
+    await navigate(owner.page, '/'); const context = await browser.newContext({ storageState: await owner.context.storageState() }), populatedContext = await browser.newContext({ storageState: await owner.context.storageState() });
+    try {
+      const empty = await device(context, owner.page, emptyTrip.id), populated = await device(populatedContext, owner.page, populatedTrip.id);
+      const starts = [await deterministicVault(empty), await deterministicVault(populated)];
+      const pages = [empty, populated], trips = [emptyTrip, populatedTrip];
+      const trace = (page: import('@playwright/test').Page) => page.evaluate(() => (window as any).traffic);
+      const shape = (rows: any[], start: number, id: string, actor: string) => rows.map(r => ({ at: r.at - start, method: r.method, path: r.path.replace(id, 'journey'), indices: r.indices, requestBytes: r.requestBytes, requestHeaders: { ...r.requestHeaders, 'X-Principal': r.requestHeaders['X-Principal'] === actor ? 'author' : r.requestHeaders['X-Principal'] }, status: r.status, responseBytes: r.responseBytes, responseHeaders: Object.fromEntries(Object.entries(r.responseHeaders).filter(([name]) => name !== 'date')) }));
+      const initial = await Promise.all(pages.map(trace));
+      for (const rows of initial) { expect(rows.map((r: any) => r.method)).toEqual(['GET', 'PUT']); expect(rows[0].indices).toBe('47,12'); expect(rows[1].indices).toEqual([47, 12]); }
+      const before = [await durable(owner.page, emptyTrip.id), await durable(owner.page, populatedTrip.id)];
+      // Same HTTP failure for both real scheduled writes. No alternate save or
+      // forced tick is used to retry; the portable controller owns its timer.
+      for (const page of pages) await page.route('**/private-vault', route => route.request().method() === 'PUT' ? route.fulfill({ status: 409, contentType: 'application/json', body: '{"error":{"code":"conflict"}}' }) : route.continue());
+      for (const page of pages) {
+        await page.clock.runFor(299_999); expect((await trace(page)).length).toBe(2);
+        const failed = page.waitForResponse(r => r.request().method() === 'PUT' && r.url().endsWith('/private-vault'));
+        await page.clock.runFor(1); expect((await failed).status()).toBe(409); await expect.poll(async () => (await trace(page)).at(-1).status).toBe(409);
+        const rows = await trace(page); expect(rows.at(-2).indices).toBe('31,06'); expect(rows.at(-1).indices).toEqual([31, 6]);
+
+        await expect.poll(() => page.evaluate(() => (window as any).trafficVault.busy)).toBe(false);
+        await page.clock.runFor(299_999); expect((await trace(page)).length).toBe(4);
+      }
+      for (let i = 0; i < pages.length; i++) { const held = await durable(owner.page, trips[i]!.id); expect(held.head).toBe(before[i]!.head); expect(held.snapshot.token).toBe(before[i]!.snapshot.token); await pages[i]!.unroute('**/private-vault'); }
+      for (const page of pages) {
+        const retried = page.waitForResponse(r => r.request().method() === 'PUT' && r.url().endsWith('/private-vault'));
+        await page.clock.runFor(1); expect((await retried).status()).toBe(200);
+        await expect.poll(() => page.evaluate(() => (window as any).trafficVault.retainedCheckpoint.version)).toBe(before[pages.indexOf(page)]!.snapshot.checkpoint.version + 1);
+
+        await expect.poll(() => page.evaluate(() => (window as any).trafficVault.busy)).toBe(false);
+        const rows = await trace(page); expect(rows.at(-2).indices).toBe('55,18'); expect(rows.at(-1).indices).toEqual([55, 18]);
+        await page.clock.runFor(299_999); expect((await trace(page)).length).toBe(6);
+        const next = page.waitForResponse(r => r.request().method() === 'PUT' && r.url().endsWith('/private-vault'));
+        await page.clock.runFor(1); expect((await next).status()).toBe(200);
+        await expect.poll(() => page.evaluate(() => (window as any).trafficVault.retainedCheckpoint.version)).toBe(before[pages.indexOf(page)]!.snapshot.checkpoint.version + 2);
+
+        await expect.poll(() => page.evaluate(() => (window as any).trafficVault.busy)).toBe(false);
+        const final = await trace(page); expect(final.at(-2).indices).toBe('24,03'); expect(final.at(-1).indices).toEqual([24, 3]);
+      }
+      const final = await Promise.all(pages.map(trace));
+      expect(shape(final[0], starts[0]!, emptyTrip.id, emptyBefore.current.actor)).toEqual(shape(final[1], starts[1]!, populatedTrip.id, baseline.current.actor));
+      expect(final[0].map((r: any) => [r.at - starts[0]!, r.method, r.requestBytes, r.responseBytes, r.status])).toEqual([[0, 'GET', 0, 2_129_987, 200], [0, 'PUT', 2_129_986, 76, 200], [300_000, 'GET', 0, 2_129_987, 200], [300_000, 'PUT', 2_129_986, 29, 409], [600_000, 'GET', 0, 2_129_987, 200], [600_000, 'PUT', 2_129_986, 76, 200], [900_000, 'GET', 0, 2_129_987, 200], [900_000, 'PUT', 2_129_986, 76, 200]]);
+      const emptyAfter = await durable(owner.page, emptyTrip.id), populatedAfter = await durable(owner.page, populatedTrip.id);
+      expect(emptyAfter.branches).toEqual([]); expect(populatedAfter.branches[0]!.bundle.records).toEqual(baseline.branches[0]!.bundle.records); expect(populatedAfter.branches[0]!.bundle.payloads[0]!.payload.body.title).toBe('RETRY PRIVATE CANARY');
+      for (const page of pages) await page.evaluate(() => (window as any).trafficVault.close());
+    } finally { await context.close(); await populatedContext.close(); }
   } finally { await owner.context.close(); }
 });

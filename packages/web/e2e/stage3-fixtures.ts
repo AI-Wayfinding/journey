@@ -154,8 +154,8 @@ export async function firstDeviceCheckpoint(page: Page, vault: string, identity:
   const { openIdentity } = await import('@ai-wayfinding/core');
   return JSON.parse(await openIdentity(encrypted, [identity]));
 }
-export async function device(context: BrowserContext, source: Page, id: string, paired?: PrivateCheckpoint, transferred?: { secrets: { identity: string; signing: string }; actor: string }) {
-  const secrets = transferred?.secrets ?? await personSecrets(source), actor = transferred?.actor ?? (await stored(source, id)).actor;
+export async function device(context: BrowserContext, source: Page, id: string, paired?: PrivateCheckpoint) {
+  const secrets = await personSecrets(source), actor = (await stored(source, id)).actor;
   const page = await context.newPage();
   await page.route('**/__stage3-device', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Private test device</title>' }));
   await page.goto('/__stage3-device'); await frozen(page); await page.addScriptTag({ content: await adapterBundle() });
@@ -184,8 +184,8 @@ export async function device(context: BrowserContext, source: Page, id: string, 
 }
 
 /** Real browser storage/transport with only the portable RNG seam injected. */
-export async function deterministicVault(page: Page, bundle?: import('@ai-wayfinding/core').PrivateBundle) {
-  return page.evaluate(async bundle => {
+export async function deterministicVault(page: Page) {
+  return page.evaluate(async () => {
     const core = (window as any).Stage3, ctx = (window as any).privateContext;
     core.closePrivateVaults();
     const author = core.privateIdentity(ctx.state.members[ctx.principal].member), vault = await core.memberVaultId(ctx.id, ctx.principal, author.signingKey, author.recipient);
@@ -193,7 +193,6 @@ export async function deterministicVault(page: Page, bundle?: import('@ai-wayfin
     const session = await core.privatePersonSession(context, author, ctx.keys.signingPrivateKey, ctx.keys.identity);
     (window as any).traffic = []; (window as any).orders = 0;
     const transport = core.browserVaultTransport(ctx.id, ctx.principal, async (path: string, init: RequestInit) => {
-
       const bytes = init.body ? new Uint8Array(init.body as Uint8Array) : undefined;
       const indices = bytes ? core.decodeVaultPatch(bytes).slots.map((s: { index: number }) => s.index) : new URL(path, location.origin).searchParams.get('slots');
       const row = { at: Date.now(), method: init.method, path, indices, requestBytes: bytes?.length ?? 0, requestHeaders: init.headers, status: 0, responseBytes: 0, responseHeaders: {} };
@@ -208,7 +207,6 @@ export async function deterministicVault(page: Page, bundle?: import('@ai-wayfin
     } };
     const controller = new core.PrivateVault({ ...options, cache: new core.BrowserPrivateStore(vault, options) });
     (window as any).trafficVault = controller; await controller.open();
-    if (bundle) await controller.stage(bundle);
     controller.start(); return Date.now();
-  }, bundle);
+  });
 }
