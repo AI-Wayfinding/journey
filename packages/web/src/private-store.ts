@@ -45,7 +45,7 @@ export function rememberPrivateVault(controller: { close(): void }): void { cont
 export function closePrivateVaults(): void { for (const controller of controllers) controller.close(); controllers.clear(); activeJourneys.clear(); }
 
 import type { JourneyContext } from './journey.js';
-import { api } from './journey.js';
+import { api, currentKey } from './journey.js';
 import { sealVaultAgentWrap, privateAgentAudience } from '@ai-wayfinding/core';
 
 /** Every open backfills only verified own agents with authenticated credentials. */
@@ -84,7 +84,7 @@ export async function openJourneyVault(ctx: JourneyContext, paired?: PrivateChec
   const controller = new PrivateVault(options); rememberPrivateVault(controller);
   activeJourneys.set(ctx.id, { principal: ctx.principal, controlHash: ctx.state.lastHash!, controller });
   try {
-    await controller.open(); await deliverJourneyVaultWraps(ctx, controller);
+    await controller.open(); currentKey(ctx); await deliverJourneyVaultWraps(ctx, controller); currentKey(ctx);
     // Exactly the portable fixed schedule; errors remain local to the authorized UI.
     const timer = setInterval(() => { void controller.tick().then(() => syncErrors.delete(controller), cause => syncErrors.set(controller, cause instanceof Error ? cause.message : 'Private sync failed')); }, 300000);
     rememberPrivateVault({ close: () => clearInterval(timer) });

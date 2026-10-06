@@ -34,6 +34,23 @@ export async function change(page: Page, id: string, type: string, body: JsonObj
 }
 /** Read the actual server API and independently verify all 64 slot digests, signed
  * head and complete decrypted history. Historical opens cannot write or poll. */
+export async function forkSnapshot(saved: Awaited<ReturnType<typeof durable>>, text: string) {
+  const { signPrivateRecord, newId, sealPrivateSlot, privatePlainBytes, privateDecode, sealPrivateFrame, signPrivateHeader, privateBytesHash, privateHash, canonical } = await import('@ai-wayfinding/core');
+  const bundle = structuredClone(saved.branches[0]!.bundle), old = bundle.records.at(-1)!;
+  const payload = structuredClone(bundle.payloads.find(p => p.record === old.id)!.payload);
+  payload.body.content = { kind: 'document', markdown: text };
+  const { sig: _recordSig, ...record } = old;
+  const alternate = await signPrivateRecord({ ...record, id: newId(), body: { ...record.body, version: newId() }, payloadHash: await privateHash(payload) }, await importSigningKey(saved.current.secrets.signing));
+  bundle.records[bundle.records.length - 1] = alternate; bundle.payloads[bundle.payloads.length - 1] = { record: alternate.id, payload };
+  const frame = await openPrivateFrame(saved.snapshot.frame, saved.current.secrets.identity, saved.author.recipient) as { header: PrivateHeader; root: string; directory: { branches: number[][]; initialized: number[] }; contentIdentity: string };
+  expect(frame.directory.branches[0]).toHaveLength(1);
+  const slots = saved.snapshot.slots.slice(), index = frame.directory.branches[0]![0]!;
+  slots[index] = await sealPrivateSlot(privateDecode(frame.root), saved.vault, index, privatePlainBytes(bundle));
+  const hashes = await Promise.all(slots.map(s => privateBytesHash(privateDecode(s))));
+  const { sig: _headerSig, ...header } = frame.header;
+  frame.header = await signPrivateHeader({ ...header, slots: hashes, contentsHash: await privateHash({ slots: hashes, root: frame.root, directory: frame.directory, contentIdentity: frame.contentIdentity }) }, await importSigningKey(saved.current.secrets.signing));
+  return { token: saved.snapshot.token, frame: await sealPrivateFrame(frame, saved.author.recipient), slots, checkpoint: { ...saved.snapshot.checkpoint, head: await privateHash(frame.header) }, changed: index };
+}
 export async function durable(page: Page, id: string) {
   const current = await stored(page, id), author = privateIdentity(current.state.members[current.actor]!.member);
   const vault = await memberVaultId(id, current.actor, author.signingKey, author.recipient);

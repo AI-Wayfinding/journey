@@ -1,9 +1,11 @@
 import { expect, test } from '@playwright/test';
 import { importArtifactJourney, privateCopies, createAgeIdentity, importPrivateBundle, answerPrivateChallenge, privateIdentity, openIdentity, encodeVaultPatch } from '@ai-wayfinding/core';
 import { requestAgent } from './agent.js';
+import { mkdir, writeFile, rm } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { browserPerson, signUp } from './person.js';
 import { createTrip, downloadBytes, joinTrip } from './stage1-fixtures.js';
-import { addPrivate, durable, frozen, scheduled, device, observe, headers, controls, change, principal, navigate, firstDeviceCheckpoint, signedAgent } from './stage3-fixtures.js';
+import { addPrivate, durable, frozen, scheduled, device, observe, headers, controls, change, principal, navigate, firstDeviceCheckpoint, signedAgent, forkSnapshot } from './stage3-fixtures.js';
 
 // These tests use real browser code, real signed controls, Durable Objects and
 // server vault bytes. No save-triggered sync or in-memory-only success oracle.
@@ -184,8 +186,13 @@ test('empty and populated browser lifetimes use matched two-slot dummy/dirty tra
     await navigate(owner.page, '/'); first.length = 0; await navigate(owner.page, path); await expect(owner.page.getByRole('heading', { name: 'TRAFFIC PRIVATE CANARY', exact: true })).toBeVisible();
     expect(first.filter(r => r.path.endsWith('?slots=all'))).toEqual([]); expect(first.map(r => r.method)).toEqual(['GET', 'PUT']);
     const held = await durable(owner.page, trip.id); first.length = 0;
-    await owner.page.evaluate(() => window.dispatchEvent(new Event('pagehide')));
-    await expect(owner.page.getByRole('heading', { name: 'Session locked' })).toBeVisible(); expect(await owner.page.locator('main').textContent()).not.toContain('TRAFFIC PRIVATE CANARY');
+    // Lock while a detail render is awaiting its final authority response. A
+    // careless continuation must not restore the previously decrypted viewer.
+    let locked = false;
+    await owner.page.route('**/private-agents', async route => { if (!locked) { locked = true; await owner.page.evaluate(() => window.dispatchEvent(new Event('pagehide'))); } await route.continue(); });
+    await navigate(owner.page, path);
+    await expect(owner.page.getByRole('heading', { name: 'Session locked' })).toBeVisible();
+    await expect(owner.page.locator('main > [role="alert"]')).toContainText('locked'); expect(await owner.page.locator('main').textContent()).not.toContain('TRAFFIC PRIVATE CANARY');
     await owner.page.clock.runFor(600_000); expect(first).toEqual([]); expect((await durable(owner.page, trip.id)).head).toBe(held.head);
   } finally { await owner.context.close(); }
 });
@@ -214,5 +221,47 @@ test('own authenticated read-only agent gets its wrap and possession handoff but
     expect((await durable(owner.page, trip.id)).head).toBe(saved.head);
     await navigate(owner.page, path + '/edit'); await owner.page.getByLabel('Private body', { exact: true }).fill('Reviewed agent result, recorded by the person'); await owner.page.getByRole('button', { name: 'Save private artifact', exact: true }).click(); await expect(owner.page).toHaveURL(path); await scheduled(owner.page);
     const result = await durable(owner.page, trip.id); expect(privateCopies(result.branches[0]!.view)[0]!.records.at(-1)!.actor).toEqual(saved.author); expect(result.branches[0]!.bundle.payloads.at(-1)!.payload.body.content).toEqual({ kind: 'document', markdown: 'Reviewed agent result, recorded by the person' });
+  } finally { await owner.context.close(); }
+});
+
+
+test('complete same-version forks retain both tied private versions under a higher durable signed merge', async ({ browser }) => {
+  test.setTimeout(300_000); const owner = await browserPerson(browser), scratch = resolve('../../.scratch/private-fork-' + Date.now()); await mkdir(scratch, { recursive: true });
+  try {
+    await signUp(owner.page, `private-fork-${Date.now()}@example.org`); await frozen(owner.page); const trip = await createTrip(owner.page);
+    await addPrivate(owner.page, trip.path, 'TIED PRIVATE CONTENT', 'LEFT VERIFIED VERSION'); await scheduled(owner.page);
+    const saved = await durable(owner.page, trip.id), fork = await forkSnapshot(saved, 'RIGHT VERIFIED VERSION');
+    const { changed, ...snapshot } = fork;
+    await navigate(owner.page, trip.path + '/private/backup');
+    const corrupt = structuredClone(snapshot); corrupt.slots[changed] = Buffer.alloc(1_048_576).toString('base64');
+    await writeFile(scratch + '/corrupt.json', JSON.stringify(corrupt));
+    await owner.page.getByLabel('Encrypted device snapshot JSON').setInputFiles(scratch + '/corrupt.json');
+    await owner.page.getByRole('button', { name: 'Merge verified device histories' }).click(); await expect(owner.page.locator('main > [role="alert"]')).toContainText('digest'); expect((await durable(owner.page, trip.id)).head).toBe(saved.head);
+    // Install the independently signed other device head in the real server using
+    // its atomic two-slot CAS. This does not replace the retained first-device checkpoint.
+    const put = await owner.page.request.put(`/v1/journeys/${trip.id}/private-vault`, { headers: { ...headers, 'X-Principal': saved.current.actor, 'X-Wayfinding': '1', Origin: new URL(owner.page.url()).origin, 'Content-Type': 'application/octet-stream' }, data: Buffer.from(encodeVaultPatch({ token: saved.snapshot.token, frame: snapshot.frame, slots: [changed, (changed + 1) % 64].map(index => ({ index, ciphertext: snapshot.slots[index]! })) })) }); expect(put.status()).toBe(200);
+    await writeFile(scratch + '/fork.json', JSON.stringify(snapshot));
+    await owner.page.getByLabel('Encrypted device snapshot JSON').setInputFiles(scratch + '/fork.json'); await owner.page.getByRole('button', { name: 'Merge verified device histories' }).click();
+    await expect(owner.page.getByRole('heading', { name: 'Author-private artifacts', exact: true })).toBeVisible(); await scheduled(owner.page); const merged = await durable(owner.page, trip.id);
+    expect(merged.snapshot.checkpoint.version).toBe(saved.snapshot.checkpoint.version + 1); expect(merged.branches).toHaveLength(2);
+    expect(merged.branches.map(b => b.bundle.payloads[0]!.payload.body.content).sort((a,b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))).toEqual([{ kind: 'document', markdown: 'LEFT VERIFIED VERSION' }, { kind: 'document', markdown: 'RIGHT VERIFIED VERSION' }]);
+    await navigate(owner.page, trip.path + '/private'); await expect(owner.page.getByRole('heading', { name: 'Conflicting private versions' })).toBeVisible(); await expect(owner.page.locator('main')).toContainText('LEFT VERIFIED VERSION'); await expect(owner.page.locator('main')).toContainText('RIGHT VERIFIED VERSION'); await expect(owner.page.getByRole('link', { name: 'Add a private artifact' })).toHaveCount(0);
+    const secondContext = await browser.newContext({ storageState: await owner.context.storageState() });
+    try { const second = await device(secondContext, owner.page, trip.id, { ...merged.snapshot.checkpoint, freshness: 'paired' }); expect(await second.evaluate(() => (window as any).privateWork.vault.branches.length)).toBe(2); } finally { await secondContext.close(); }
+  } finally { await owner.context.close(); await rm(scratch, { recursive: true, force: true }); }
+});
+
+
+test('oversized private files refuse fixed-vault capacity without a server or local pending mutation', async ({ browser }) => {
+  test.setTimeout(300_000); const owner = await browserPerson(browser);
+  try {
+    await signUp(owner.page, `private-capacity-${Date.now()}@example.org`); await frozen(owner.page); const trip = await createTrip(owner.page);
+    const before = await durable(owner.page, trip.id), trace = observe(owner.page);
+    await navigate(owner.page, trip.path + '/private/add'); await owner.page.getByLabel('Private title', { exact: true }).fill('CAPACITY MUST NOT SURVIVE');
+    await owner.page.getByLabel('Private attachments', { exact: true }).setInputFiles([0, 1, 2].map(i => ({ name: `large-${i}.bin`, mimeType: 'application/octet-stream', buffer: Buffer.alloc(17_000_000, i + 1) })));
+    await owner.page.getByRole('button', { name: 'Save private artifact', exact: true }).click(); await expect(owner.page.locator('main > [role="alert"]')).toContainText('Private vault is full; nothing was saved', { timeout: 60_000 });
+    expect(trace).toEqual([]); expect((await durable(owner.page, trip.id)).head).toBe(before.head);
+    await expect(owner.page.locator('#private-save-status')).toContainText('Verified committed'); await scheduled(owner.page);
+    expect((await durable(owner.page, trip.id)).branches).toHaveLength(0); // Dummy commit cannot leak a partially staged file.
   } finally { await owner.context.close(); }
 });

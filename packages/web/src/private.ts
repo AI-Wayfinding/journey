@@ -150,11 +150,12 @@ export class BrowserPrivateArtifacts {
     if (!this.challenges.delete(challenge)) throw new Error('Unknown or consumed private challenge');
     const agent = await authenticatePrivateAgent(challenge, response, 'authenticated');
     const bundle = this.bundle(); bundle.scope = 'agent-handoff';
-    return exportPrivateBundle(bundle, { trust: { vault: this.vaultId, author: this.session.identity }, contexts: [this.context], sessions: [this.session, agent], recipient: agent });
+    const ciphertext = await exportPrivateBundle(bundle, { trust: { vault: this.vaultId, author: this.session.identity }, contexts: [this.context], sessions: [this.session, agent], recipient: agent });
+    this.assertOpen(); return ciphertext;
   }
   /** The agent reads scoped content; the person reviews and signs the returned result. */
   async recordResult(content: PrivateContent, previous?: PrivateCopyState): Promise<string> { return this.save(content, previous); }
-  async backup(): Promise<string> { await this.writer(); return exportPrivateBundle(this.bundle(), { trust: { vault: this.vaultId, author: this.session.identity }, contexts: this.contexts, recipient: this.session, historical: true }); }
+  async backup(): Promise<string> { await this.writer(); const ciphertext = await exportPrivateBundle(this.bundle(), { trust: { vault: this.vaultId, author: this.session.identity }, contexts: this.contexts, recipient: this.session, historical: true }); this.assertOpen(); return ciphertext; }
   async restore(ciphertext: string): Promise<void> {
     await this.writer(); const checked = await importPrivateBundle(ciphertext, this.ctx.keys.identity, { trust: { vault: this.vaultId, author: this.session.identity }, recipient: this.session.identity, historical: true });
     const current = privateCopies((await this.verified()).view), incoming = privateCopies(checked.view);
