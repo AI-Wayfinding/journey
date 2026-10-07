@@ -7,6 +7,8 @@ import { ExpiredStateError, loadState } from './state.js';
 import type { AgentState } from './state.js';
 import { importMarkdown } from './import.js';
 import { JourneyClient } from './journey.js';
+import type { JourneyOptions } from './journey.js';
+import { pathToFileURL } from 'node:url';
 import { runMcp } from './mcp.js';
 import { forgetRemembered, loadRemembered } from './storage.js';
 import { NetworkError } from './network.js';
@@ -99,7 +101,7 @@ function cacheFolder(): string {
   if (process.platform === 'darwin') return join(homedir(), 'Library', 'Caches', 'wayfinding', 'journeys');
   return join(process.env.XDG_CACHE_HOME ?? join(homedir(), '.cache'), 'wayfinding', 'journeys');
 }
-export async function main(args = process.argv.slice(2)): Promise<void> {
+export async function main(args = process.argv.slice(2), journeyOptions: JourneyOptions = {}): Promise<void> {
   const { command, positional, flags } = parse(args);
   if (command === '--help' || command === 'help' || flags['--help']) { console.log(help); return; }
   const keyFolder = flag(flags, '--key-folder');
@@ -153,16 +155,16 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     if (statePath) {
       const state = await loadState(statePath);
       if (state.status !== 'approved') throw new Error('This journey is still pending approval. Run connect --state FILE --wait first.');
-      held = new JourneyClient(state.session, flag(flags, '--private-cache') ? { cacheRoot: flag(flags, '--private-cache') } : flags['--cache'] && !flags['--no-cache'] ? { cacheRoot: cacheFolder() } : {});
+      held = new JourneyClient(state.session, { ...journeyOptions, ...(flag(flags, '--private-cache') ? { cacheRoot: flag(flags, '--private-cache') } : flags['--cache'] && !flags['--no-cache'] ? { cacheRoot: cacheFolder() } : {}) });
     } else if (oneShot) { held = (await connect(oneShot, command === 'mcp')).client; }
     else {
       const session = await loadRemembered({ folder: keyFolder, passphrase: secret });
       if (!session) throw new Error('No remembered journey connection. Use wayfinding connect <journey-id> --remember, --state FILE for an approved file, or --journey <journey-id> to ask for approval for this command.');
-      held = new JourneyClient(session, flag(flags, '--private-cache') ? { cacheRoot: flag(flags, '--private-cache') } : flags['--no-cache'] ? {} : { cacheRoot: cacheFolder() });
+      held = new JourneyClient(session, { ...journeyOptions, ...(flag(flags, '--private-cache') ? { cacheRoot: flag(flags, '--private-cache') } : flags['--no-cache'] ? {} : { cacheRoot: cacheFolder() }) });
     }
     if ((flags['--cache'] || flags['--no-cache']) && oneShot && held) {
-      if (flags['--cache']) held = new JourneyClient(held.session, { cacheRoot: cacheFolder() });
-      if (flags['--no-cache']) held = new JourneyClient(held.session);
+      if (flags['--cache']) held = new JourneyClient(held.session, { ...journeyOptions, cacheRoot: cacheFolder() });
+      if (flags['--no-cache']) held = new JourneyClient(held.session, journeyOptions);
     }
     return held;
   };
@@ -192,7 +194,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
         const target = async () => {
           const state = await loadState(required(flag(flags, '--destination-state'), '--destination-state FILE'));
           if (state.status !== 'approved') throw new Error('Destination requires separate approved state');
-          return new JourneyClient(state.session, { cacheRoot: flag(flags, '--private-cache') });
+          return new JourneyClient(state.session, { ...journeyOptions, cacheRoot: flag(flags, '--private-cache') });
         };
         switch (action) {
           case 'init': result = await workflow.status(); break;
@@ -246,7 +248,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     console.log(JSON.stringify(result, null, 2));
   } finally { held?.close(); }
 }
-main().catch(error => {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main().catch(error => {
   if (error instanceof NetworkError && process.argv.includes('--json')) console.error(JSON.stringify({ error: error.reason, exitCode: error.exitCode, fallback: error.fallback }));
   else console.error(error instanceof Error ? error.message : String(error));
   process.exitCode = error && typeof error.exitCode === 'number' ? error.exitCode : 1; });

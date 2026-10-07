@@ -22,7 +22,7 @@ export function samePrivateContext(left: PrivateContext, right: PrivateContext):
   return stage0Rules.private_authority_snapshot(id(left.journey), id(left.head), id(right.journey), id(right.head));
 }
 export type AddInput = ArtifactInput;
-export interface JourneyOptions { fetch?: typeof fetch; cacheRoot?: string; privateNow?: () => number; privateManualSchedule?: boolean }
+export interface JourneyOptions { fetch?: typeof fetch; cacheRoot?: string; privateNow?: () => number; privateManualSchedule?: boolean; privateSchedule?: (tick: () => Promise<boolean>) => () => void }
 export interface ItemView { item: ArtifactItem; comments: ArtifactComment[]; versions: ArtifactView['versions'] }
 interface Verified { state: LogState; epochs: Map<number, JourneyKey>; log: CipherRow[] }
 const historyError = 'This journey history could not be verified. Stop and ask a member for help.';
@@ -87,6 +87,7 @@ export class JourneyClient {
   }
   private privateController?: PrivateVault;
   private privateHead?: string;
+  private stopPrivateSchedule?: () => void;
   /** Independently verified live authority for private workflows. */
   async privateAuthority() {
     const verified = await this.verified();
@@ -103,6 +104,7 @@ export class JourneyClient {
   async openPrivateVault(paired?: PrivateCheckpoint): Promise<PrivateVault> {
     const verified = await this.verified();
     if (!paired && this.privateController && this.privateHead === verified.state.lastHash) return this.privateController;
+    this.stopPrivateSchedule?.(); this.stopPrivateSchedule = undefined;
     this.privateController?.close(); this.privateController = undefined;
     const controls = verified.log.map(row => JSON.parse(Buffer.from(row.entry, 'base64url').toString()) as { proof: ControlProof; envelope: Envelope });
     const context = await verifyPrivateContext({ journey: this.session.journeyId, creator: controls[0]!.proof.body.creator as Member, controls }, { now: Date.now(), currentHead: verified.state.lastHash! });
@@ -124,7 +126,7 @@ export class JourneyClient {
     const controller = new PrivateVault(options); rememberNodePrivateVault(controller);
     try {
       await controller.open();
-      if (controller.retainedCheckpoint) {
+      if (controller.retainedCheckpoint && privateAccess(context, author, session, true)) {
         const audience = await this.request<{ agents: { principal: string }[] }>(`/journeys/${this.session.journeyId}/private-agents`);
         for (const candidate of audience.agents) {
           const target = verified.state.members[candidate.principal]?.member;
@@ -133,7 +135,11 @@ export class JourneyClient {
           await this.request(`/journeys/${this.session.journeyId}/private-agent-wrap/${target.id}`, 'PUT', { ciphertext });
         }
       }
-      if (!this.options.privateManualSchedule) controller.start(); this.privateController = controller; this.privateHead = verified.state.lastHash!; return controller; }
+      if (!this.options.privateManualSchedule) {
+        if (this.options.privateSchedule) this.stopPrivateSchedule = this.options.privateSchedule(() => controller.tick());
+        else controller.start();
+      }
+      this.privateController = controller; this.privateHead = verified.state.lastHash!; return controller; }
     catch (error) { controller.close(); throw error; }
   }
   private async writable(): Promise<Verified> {
@@ -295,5 +301,5 @@ export class JourneyClient {
     if (!scope) throw new Error('This agent is no longer a member of the journey.');
     return { journeyId: this.session.journeyId, principal: this.session.principal, scope, expiresAt: this.session.expiresAt, seq: state.lastSeq };
   }
-  close(): void { this.privateController?.close(); this.privateController = undefined; for (const value of this.keys.values()) value.key.fill(0); this.keys.clear(); }
+  close(): void { this.stopPrivateSchedule?.(); this.stopPrivateSchedule = undefined; this.privateController?.close(); this.privateController = undefined; for (const value of this.keys.values()) value.key.fill(0); this.keys.clear(); }
 }
