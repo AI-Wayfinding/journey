@@ -21,7 +21,7 @@ it('CLI and a live MCP connection follow current effective access, not remembere
       await sdk.connect(new StdioClientTransport({ command: process.execPath, args: [cli, 'mcp', '--state', file], stderr: 'pipe' }));
     }
     const addArgs = ['add', '--type', 'note', '--title', 'Allowed only when effective', '--body', 'body'];
-    for (const [role, scopes] of [['read-write', ['readwrite','read']], ['read-only', ['read','read']], ['read-write', ['readwrite','read']]] as const) {
+    for (const [role, scopes] of [['read-write', ['readwrite','readwrite']], ['read-only', ['read','read']], ['read-write', ['readwrite','readwrite']]] as const) {
       await change(trip, guide, 'member.role', { member: adding.principal, role });
       for (let index = 0; index < 2; index++) {
         expect(JSON.parse((await exec(process.execPath, [cli, 'status', '--state', files[index]!])).stdout).scope).toBe(scopes[index]);

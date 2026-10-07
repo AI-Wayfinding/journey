@@ -1,16 +1,50 @@
 import Base
 import ./rules.bend as R
 
-# D34: no role widening. These laws apply to the production access function.
-law agent_never_exceeds_member:
-  for setting: R.Role
-  {R.can_write(R.agent_access(R.ReadOnly{}, setting)) == False{} : Bool}
+# Agent authority is exactly its live adding person, never more or longer-lived.
+law agent_missing_parent_denied:
+  for live: Bool
+  {R.agent_live_access(None{}, live) == None{} : Maybe<&2, R.Role>}
 
-law agent_limit_survives_promotion:
-  for member: R.Role
-  {R.can_write(R.agent_access(member, R.ReadOnly{})) == False{} : Bool}
+law agent_expired_denied:
+  for id: Nat
+  for role: R.Role
+  for guide: Bool
+  for owner: Nat
+  for support: Bool
+  for parentLive: Bool
+  {R.agent_live_access(Some{R.Member{id, R.Person{}, role, guide, owner, support, parentLive}}, False{}) == None{} : Maybe<&2, R.Role>}
 
-law agents_never_guides:
+law agent_expired_parent_denied:
+  for id: Nat
+  for role: R.Role
+  for guide: Bool
+  for owner: Nat
+  for support: Bool
+  for live: Bool
+  {R.agent_live_access(Some{R.Member{id, R.Person{}, role, guide, owner, support, False{}}}, live) == None{} : Maybe<&2, R.Role>}
+
+law agent_parent_must_be_person:
+  for id: Nat
+  for role: R.Role
+  for guide: Bool
+  for owner: Nat
+  for support: Bool
+  for parentLive: Bool
+  for live: Bool
+  {R.agent_live_access(Some{R.Member{id, R.Agent{}, role, guide, owner, support, parentLive}}, live) == None{} : Maybe<&2, R.Role>}
+
+law agent_guide_inherits_person:
+  for guide: Bool
+  {R.is_guide(R.authority_person(Some{R.Member{2n, R.Agent{}, R.ReadOnly{}, False{}, 1n, False{}, True{}}}, R.Member{1n, R.Person{}, R.ReadWrite{}, guide, 0n, False{}, True{}} <> Nil{})) == guide : Bool}
+
+law agent_matches_live_person_role:
+  for role: R.Role
+  for historical: R.Role
+  {R.member_access(Some{R.Member{2n, R.Agent{}, historical, False{}, 1n, False{}, True{}}}, R.Member{1n, R.Person{}, role, True{}, 0n, False{}, True{}} <> Nil{}) == Some{role} : Maybe<&2, R.Role>}
+
+# Stored agent guide flags do not grant authority; agent_guide_inherits_person does.
+law agent_stored_guide_not_authority:
   for guide: Bool
   {R.person_guide(R.Agent{}, guide) == False{} : Bool}
 
@@ -213,7 +247,7 @@ law server_support_scope_matches:
   for actor: Nat
   {R.server_admission(R.Person{}, scope, admitted, owner, actor, True{}) == R.admission_scope(scope, Some{R.ReadOnly{}}) : Bool}
 
-# An agent cannot be admitted under another adding person or a different limit.
+# An agent cannot be admitted under another adding person; old limits are ignored.
 law server_agent_admission_requires_owner:
   for scope: Maybe<&2, R.Role>
   for admitted: Maybe<&2, R.Role>
@@ -223,14 +257,13 @@ law server_agent_admission_requires_owner:
   for e: {Nat.is_eq(owner, actor) == False{} : Bool}
   {R.server_admission(R.Agent{}, scope, admitted, owner, actor, support) == False{} : Bool}
 
-law server_agent_admission_requires_scope:
-  for +scope: Maybe<&2, R.Role>
-  for +admitted: Maybe<&2, R.Role>
-  for owner: Nat
-  for actor: Nat
+law server_agent_admission_ignores_scope:
+  for scope: Maybe<&2, R.Role>
+  for admitted: Maybe<&2, R.Role>
+  for +owner: Nat
+  for +actor: Nat
   for support: Bool
-  for e: {R.admission_scope(scope, admitted) == False{} : Bool}
-  {R.server_admission(R.Agent{}, scope, admitted, owner, actor, support) == False{} : Bool}
+  {R.server_admission(R.Agent{}, scope, admitted, owner, actor, support) == Nat.is_eq(owner, actor) : Bool}
 
 # Stage 1: content access is current inherited access, never guide authority.
 law artifacts_require_current_write:
@@ -429,7 +462,7 @@ law project_self_only:
   for +members: +List<R.Member>
   for +actor: Nat
   for +member: Nat
-  {R.project_self(members, actor, member) == (Nat.is_eq(actor, member) && R.is_person(R.find(members, actor)) && R.access_read(R.member_access(R.find(members, actor), members))) : Bool}
+  {R.project_self(members, actor, member) == R.project_self_person(R.authority_person(R.find(members, actor), members), member) : Bool}
 
 law project_agents_follow_live_people:
   for +members: +List<R.Member>
@@ -441,18 +474,18 @@ law project_agents_follow_live_people:
   for +owner: Nat
   for support: Bool
   for +live: Bool
-  {R.project_follower(Some{R.Member{id, R.Agent{}, role, guide, owner, support, live}}, members, pairs, project) == (live && R.project_person(R.find(members, owner), pairs, project)) : Bool}
+  {R.project_follower(Some{R.Member{id, R.Agent{}, role, guide, owner, support, live}}, members, pairs, project) == (live && R.project_person(R.live_person(R.find(members, owner), live), pairs, project)) : Bool}
 
-law project_agent_cannot_be_person_participant:
+law project_agent_uses_person_pair:
   for id: Nat
   for role: R.Role
   for guide: Bool
-  for owner: Nat
+  for +owner: Nat
   for support: Bool
-  for live: Bool
-  for pairs: +List<R.Participation>
-  for project: Nat
-  {R.project_person(Some{R.Member{id, R.Agent{}, role, guide, owner, support, live}}, pairs, project) == False{} : Bool}
+  for +live: Bool
+  for +pairs: +List<R.Participation>
+  for +project: Nat
+  {R.project_person(Some{R.Member{id, R.Agent{}, role, guide, owner, support, live}}, pairs, project) == (live && R.pair_active(R.pair_find(pairs, project, owner))) : Bool}
 
 law project_removed_pair_does_not_resurrect:
   {R.project_remove(R.Participation{2n, 3n, 4n, True{}} <> Nil{}, 3n, 5n) == R.Participation{2n, 3n, 5n, False{}} <> Nil{} : +List<R.Participation>}
@@ -560,35 +593,29 @@ law private_link_read_requires_live_access:
   for +members: +List<R.Member>
   for +actor: Nat
   {R.private_link_read(members, actor) == (R.access_read(R.member_access(R.find(members, actor), members)) && Bool.not(R.private_audience(members, actor, actor, R.PrivateLinkCredential{}))) : Bool}
-law private_wrap_fetch_requires_agent:
-  for members: +List<R.Member>
-  for author: Nat
-  for actor: Nat
-  for target: Nat
-  {R.private_wrap_access(members, author, actor, target, R.PrivatePersonCredential{}, False{}) == False{} : Bool}
-law private_wrap_delivery_requires_person:
-  for members: +List<R.Member>
-  for author: Nat
-  for actor: Nat
-  for target: Nat
-  {R.private_wrap_access(members, author, actor, target, R.PrivateAuthenticatedAgent{}, True{}) == False{} : Bool}
-law private_wrap_fetch_requires_self:
+law private_wrap_same_person_audience:
   for +members: +List<R.Member>
   for +author: Nat
   for +actor: Nat
   for +target: Nat
   for +credential: R.PrivateCredential
-  {R.private_wrap_access(members, author, actor, target, credential, False{}) == (Nat.is_eq(actor, target) && R.private_credential(R.Agent{}, credential) && R.private_audience(members, author, actor, credential)) : Bool}
+  for write: Bool
+  {R.private_wrap_access(members, author, actor, target, credential, write) == (R.private_audience(members, author, actor, credential) && (R.private_audience(members, author, target, R.PrivatePersonCredential{}) || R.private_audience(members, author, target, R.PrivateAuthenticatedAgent{}))) : Bool}
 law private_link_excluded:
   for kind: R.MemberKind
   {R.private_credential(kind, R.PrivateLinkCredential{}) == False{} : Bool}
 law private_unknown_excluded:
   for kind: R.MemberKind
   {R.private_credential(kind, R.PrivateUnknownCredential{}) == False{} : Bool}
-law private_agent_author_not_parent:
+law private_agent_author_resolves_to_person:
+  for +members: +List<R.Member>
+  for +owner: Nat
   for id: Nat
-  for parent: Nat
-  {R.private_related_kind(R.Agent{}, id, parent, R.Person{}, 0n) == Nat.is_eq(id, parent) : Bool}
+  for role: R.Role
+  for guide: Bool
+  for support: Bool
+  for +live: Bool
+  {R.authority_person(Some{R.Member{id, R.Agent{}, role, guide, owner, support, live}}, members) == R.live_person(R.find(members, owner), live) : Maybe<&2, R.Member>}
 law private_person_agent_inheritance:
   for id: Nat
   for key: Nat
@@ -626,7 +653,7 @@ law private_destination_denial:
   for different: Bool
   for visibility: R.Visibility
   {R.private_copy_access(source, False{}, different, visibility) == False{} : Bool}
-law private_first_pins_author_and_actor:
+law private_first_pins_writer:
   for id: Nat
   for actor: Nat
   for record: Nat
@@ -637,7 +664,7 @@ law private_first_pins_author_and_actor:
   for version: Nat
   for kind: Nat
   for blobs: +List<Nat>
-  {R.private_first(id, actor, record, R.PrivateCreate{artifact, author, writer, journey, version, kind, blobs}) == R.private_guard(Nat.is_eq(author, actor) && Nat.is_eq(writer, actor), R.PrivateCopy{id, artifact, author, journey, version, record, 0n, False{}, R.ArtifactVersion{version, actor, blobs} <> Nil{}, version <> Nil{}, 0n, 0n, kind}) : R.PrivateTransition}
+  {R.private_first(id, actor, record, R.PrivateCreate{artifact, author, writer, journey, version, kind, blobs}) == R.private_guard(Nat.is_eq(writer, actor), R.PrivateCopy{id, artifact, author, journey, version, record, 0n, False{}, R.ArtifactVersion{version, actor, blobs} <> Nil{}, version <> Nil{}, 0n, 0n, kind}) : R.PrivateTransition}
 law private_deleted_edit_denied:
   for id: Nat
   for artifact: Nat
@@ -771,9 +798,10 @@ law private_fork_bad_predecessor_denied:
   {R.private_header(2n, 2n, False{}, False{}, True{}) == R.PrivateHeaderConflict{} : R.PrivateHeaderDecision}
 law private_signed_skipped_versions:
   {R.private_header(2n, 999n, False{}, True{}, True{}) == R.PrivateVerifiedFreshness{} : R.PrivateHeaderDecision}
-law private_bundle_handoff_not_person:
+law private_bundle_handoff_all_kinds:
+  for kind: R.MemberKind
   for same: Bool
-  {R.private_bundle_recipient(R.PrivateHandoff{}, R.Person{}, same) == False{} : Bool}
+  {R.private_bundle_recipient(R.PrivateHandoff{}, kind, same) == True{} : Bool}
 law private_bundle_backup_only_author:
   for kind: R.MemberKind
   for same: Bool

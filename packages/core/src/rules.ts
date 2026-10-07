@@ -1,6 +1,7 @@
 import rules from './rules/rules.mjs';
 import type { Control, List, Member as RuleMember, Role, Transition, JourneySettings, JourneyControl } from './rules/rules.mjs';
 import { ruleVersion } from './versions.js';
+import { addingPerson } from './membership.js';
 import type { LogState, Member } from './log.js';
 
 export const contentRole = (scope: Member['scope']): Role => ({ $: scope === 'read' ? 'ReadOnly' : 'ReadWrite' });
@@ -27,11 +28,12 @@ export function normalizedMembers(state: LogState, extraIds: readonly string[] =
     live: now === undefined || value.expiresAt === undefined || Date.parse(value.expiresAt) > now,
   });
   const members = ruleList(Object.values(state.members).map(v => member(v.member, v.grants.includes('members.manage'))));
-  return { members, id, member, ids };
+  const authorityId = (principal: string | undefined): bigint => principal === undefined ? 0n : id(addingPerson(state, principal, now)?.id);
+  return { members, id, member, ids, authorityId };
 }
 export function isPersonGuide(state: LogState, principal: string): boolean {
-  const model = normalizedMembers(state, [principal]);
-  return rules.is_guide(rules.find(model.members, model.id(principal)));
+  const model = normalizedMembers(state, [principal], Date.now());
+  return rules.is_guide(rules.find(model.members, model.authorityId(principal)));
 }
 export function canWriteContent(state: LogState, principal: string, now = Date.now()): boolean {
   const model = normalizedMembers(state, [principal], now);
@@ -48,13 +50,14 @@ export function effectiveScope(state: LogState, principal: string, now = Date.no
 }
 export function replayControl(state: LogState, actor: string, operation: Control['$'], target?: string, addition?: Member, guide = false, role: Role = { $: 'ReadWrite' }, now?: number): { transition: Transition; model: ReturnType<typeof normalizedMembers>; journey: ReturnType<typeof replayJourneyControl> } {
   const model = normalizedMembers(state, [actor, ...(target ? [target] : []), ...(addition ? [addition.id, ...(addition.addedBy ? [addition.addedBy] : [])] : [])], now);
+  const authority = model.authorityId(actor);
   let control: Control;
   switch (operation) {
-    case 'Add': control = { $: 'Add', actor: model.id(actor), member: model.member(addition!, guide) }; break;
-    case 'Guide': control = { $: 'Guide', actor: model.id(actor), target: model.id(target), guide }; break;
-    case 'RoleChange': control = { $: 'RoleChange', actor: model.id(actor), target: model.id(target), role }; break;
-    case 'Settings': case 'Rotate': control = { $: operation, actor: model.id(actor) }; break;
-    default: control = { $: operation, actor: model.id(actor), target: model.id(target) }; break;
+    case 'Add': control = { $: 'Add', actor: authority, member: model.member(addition!, guide) }; break;
+    case 'Guide': control = { $: 'Guide', actor: authority, target: model.id(target), guide }; break;
+    case 'RoleChange': control = { $: 'RoleChange', actor: authority, target: model.id(target), role }; break;
+    case 'Settings': case 'Rotate': control = { $: operation, actor: authority }; break;
+    default: control = { $: operation, actor: authority, target: model.id(target) }; break;
   }
   const result = replayJourneyControl(state, model, { $: operation === 'RoleChange' || operation === 'Renew' ? 'NewControl' : 'LegacyControl', control });
   const transition: Transition = result.$ === 'JourneyAccepted' ? { $: 'Accepted', members: result.state.members }
@@ -84,16 +87,16 @@ export function projectMembers(state: LogState, transition: Extract<Transition, 
 export { rules as stage0Rules };
 
 export function canControl(state: LogState, actor: string, operation: Control['$'], target?: string, guide = false): boolean {
-  return replayControl(state, actor, operation, target, undefined, guide).transition.$ === 'Accepted';
+  return replayControl(state, actor, operation, target, undefined, guide, undefined, Date.now()).transition.$ === 'Accepted';
 }
 export function canRenameAgent(state: LogState, actor: string, target: string): boolean {
-  const model = normalizedMembers(state, [actor, target]);
-  return rules.rename_authority(model.members, model.id(actor), rules.find(model.members, model.id(target)));
+  const model = normalizedMembers(state, [actor, target], Date.now());
+  return rules.rename_authority(model.members, model.authorityId(actor), rules.find(model.members, model.id(target)));
 }
 
 export function ownsAgent(state: LogState, actor: string, target: string): boolean {
-  const model = normalizedMembers(state, [actor, target]);
-  return rules.own_agent(model.members, model.id(actor), rules.find(model.members, model.id(target)));
+  const model = normalizedMembers(state, [actor, target], Date.now());
+  return rules.own_agent(model.members, model.authorityId(actor), rules.find(model.members, model.id(target)));
 }
 
 export function ruleSettings(state: LogState): JourneySettings {
@@ -105,6 +108,8 @@ export function ruleSettings(state: LogState): JourneySettings {
     : rules.legacy_settings('', '');
 }
 export function replayJourneyControl(state: LogState, model: ReturnType<typeof normalizedMembers>, control: JourneyControl) {
+  if (control.$ === 'Configure') control = { $: 'Configure', actor: model.authorityId(model.ids[Number(control.actor) - 1]), settings: control.settings };
+  else if (control.$ === 'Minimum') control = { $: 'Minimum', actor: model.authorityId(model.ids[Number(control.actor) - 1]), version: control.version };
   return rules.journey_replay(ruleList([control]), { $: 'JourneyAccepted', state: {
     $: 'JourneyState', members: model.members, settings: ruleSettings(state), minimum: ruleVersion(state.minClientVersion), pending: state.pendingRotation === true,
   } });
@@ -176,7 +181,7 @@ export function replayProject(state: LogState, type: ProjectActionType, body: Js
     case 'project.create': action = { $: 'ProjectCreate', id }; break;
     case 'project.purpose': action = { $: 'ProjectPurpose', id, predecessor }; break;
     case 'project.state': action = { $: 'ProjectStateChange', id, predecessor, phase: { $: phases[body.state as ProjectState] } }; break;
-    case 'project.join': case 'project.leave': action = { $: type === 'project.join' ? 'ProjectJoin' : 'ProjectLeave', id, member: model.id(body.member as string), predecessor }; break;
+    case 'project.join': case 'project.leave': action = { $: type === 'project.join' ? 'ProjectJoin' : 'ProjectLeave', id, member: model.authorityId(body.member as string), predecessor }; break;
     case 'artifact.project': action = { $: 'ArtifactProject', id: model.id(body.artifact as string), project: id, author: model.id(body.author as string), writer: model.id(body.actor as string), predecessor }; break;
   }
   return { transition: rules.project_apply(model.members, model.id(actor), ruleVersion(state.minClientVersion), state.pendingRotation === true, index, reserved, revision(state.lastSeq + 1), action), model, projectId };

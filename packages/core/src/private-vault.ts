@@ -126,8 +126,8 @@ export class PrivateVault {
   constructor(private readonly options: VaultOptions) {}
   get freshness(): 'paired' | 'unverified' { return this.checkpoint?.freshness ?? 'unverified'; }
   get retainedCheckpoint(): PrivateCheckpoint | undefined { return this.checkpoint ? { vault: this.checkpoint.vault, author: copyPrivateIdentity(this.checkpoint.author), version: this.checkpoint.version, head: this.checkpoint.head, prev: this.checkpoint.prev, freshness: this.checkpoint.freshness } : undefined; }
-  /** Available only on a person's device, for encrypting per-agent delivery. */
-  get agentContentIdentity(): string { this.assertOpen(); if ((this.options.actor ?? this.options.trust.author).kind !== 'person' || !this.current?.contentIdentity) throw new Error('Private content key unavailable'); return this.current.contentIdentity; }
+  /** Dedicated vault key for delivery to the person's authenticated agents. */
+  get agentContentIdentity(): string { this.assertOpen(); if (!this.current?.contentIdentity) throw new Error('Private content key unavailable'); return this.current.contentIdentity; }
   get branches(): readonly { bundle: PrivateBundle; view: PrivateView }[] { this.assertOpen(); if (!this.available) throw new Error('Private vault history is still synchronizing'); return structuredClone(this.verifiedBranches.map(b => ({ bundle: b.bundle }))).map((b, i) => ({ bundle: b.bundle, view: this.verifiedBranches[i]!.view })); }
   private assertOpen(): void { if (!this.active) throw new Error('Private vault is locked'); }
   private alive(generation: number): void { this.assertOpen(); if (generation !== this.generation) throw new Error('Private vault operation cancelled'); }
@@ -231,13 +231,12 @@ export class PrivateVault {
         }
       } else if (this.checkpoint || this.options.paired) throw new Error('Private vault rollback');
       const actor = this.options.actor ?? this.options.trust.author;
-      if (actor.kind === 'agent') {
-        if (!remote || !this.options.contentIdentity) throw new Error('Agents cannot initialise a private vault');
-        const context = this.options.contexts?.find(c => { try { return !!privateBinding(c, actor); } catch { return false; } });
-        const session = this.options.sessions?.find(s => canonical(s.identity) === canonical(actor));
-        if (!context || !session || !privateAccess(context, this.options.trust.author, session)) throw new Error('Private agent authority denied');
+      if (this.options.contexts?.length) {
+        const session = this.options.sessions?.find(s => canonical(s.identity) === canonical(actor) && this.options.contexts?.some(c => c.journey === s.binding.journey && privateAccess(c, this.options.trust.author, s)));
+        const context = this.options.contexts.find(c => c.journey === session?.binding.journey && !!session && privateAccess(c, this.options.trust.author, session));
+        if (!context || !session || !privateAccess(context, this.options.trust.author, session)) throw new Error('Private vault authority denied');
         if (!privateAccess(context, this.options.trust.author, session, true)) {
-          for (const row of wire.slots) { if (await privateBytesHash(privateDecode(row.ciphertext, PRIVATE_SLOT_BYTES)) !== remote.header.slots[row.index]) throw new Error('Private fetched slot digest mismatch'); this.slots[row.index] = row.ciphertext; this.hashes[row.index] = remote.header.slots[row.index]!; }
+          for (const row of wire.slots) { if (remote && await privateBytesHash(privateDecode(row.ciphertext, PRIVATE_SLOT_BYTES)) !== remote.header.slots[row.index]) throw new Error('Private fetched slot digest mismatch'); this.slots[row.index] = row.ciphertext; this.hashes[row.index] = remote?.header.slots[row.index] ?? this.hashes[row.index]!; }
           this.current = remote; this.token = wire.token; await this.refreshBranches(); return true;
         }
       }
@@ -256,9 +255,9 @@ export class PrivateVault {
         }
       } finally { root.fill(0); }
       if (this.pendingBranches && [...this.pending.keys()].every(i => indices.includes(i))) dir.branches = this.pendingBranches.map(b => b.slice());
-      const context = actor.kind === 'agent' ? this.options.contexts!.find(c => { try { return !!privateBinding(c, actor); } catch { return false; } })! : undefined;
+      const context = actor.kind === 'agent' ? this.options.contexts!.find(c => this.options.sessions?.some(s => canonical(s.identity) === canonical(actor) && s.binding.journey === c.journey && privateAccess(c, this.options.trust.author, s, true)))! : undefined;
       // Old person-only frames migrate on the next scheduled commit, never on a private save.
-      const contentIdentity = remote?.contentIdentity ?? (await createAgeIdentity()).identity;
+      const contentIdentity = remote?.contentIdentity ?? this.options.contentIdentity ?? (await createAgeIdentity()).identity;
       const header = await signPrivateHeader({ format: PRIVATE_FORMAT, v: 1, vault: this.options.trust.vault, author: copyPrivateIdentity(this.options.trust.author), version: (remote?.header.version ?? 0) + 1, prev: remote ? await privateHash(remote.header) : null, contentsHash: await contents(hashes, rootText, dir, contentIdentity), slots: hashes, ...(context ? { writer: copyPrivateIdentity(actor), authority: privateAuthority(context, actor) } : {}) }, this.options.signingKey);
       const frame = await sealPrivateFrame({ header, root: rootText, directory: dir, contentIdentity }, this.options.trust.author.recipient, await deriveRecipient(contentIdentity));
       const checked = await verifyPrivateHeader(header, this.options.trust, { checkpoint: this.checkpoint, contentsHash: header.contentsHash, contexts: this.options.contexts });

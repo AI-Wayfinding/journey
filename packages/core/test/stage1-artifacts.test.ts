@@ -130,7 +130,7 @@ describe('signed artifact replay calls production Bend', () => {
     await artifactAppend(f, f.guide, 'member.add', { kind: 'person', member: p.member, grants: [] });
     for (const a of [bot, limited]) await artifactAppend(f, p, 'member.add', { kind: 'agent', member: a.member, grants: [] });
     const body = await artifactBody(bot.member.id); await artifactAppend(f, bot, 'artifact.create', body); expect((await artifactResult(f)).ok).toBe(true);
-    await artifactAppend(f, limited, 'artifact.create', await artifactBody(limited.member.id)); expect((await artifactResult(f)).ok).toBe(false); f.controls.pop();
+    await artifactAppend(f, limited, 'artifact.create', await artifactBody(limited.member.id)); expect((await artifactResult(f)).ok).toBe(true);
     await artifactAppend(f, bot, 'journey.settings', { name: 'Agent takeover', description: '', defaultRole: 'read-write', visibility: 'private', joiningPolicy: 'invitation-only' }); expect((await artifactResult(f)).ok).toBe(false); f.controls.pop();
     await artifactAppend(f, f.guide, 'member.role', { member: p.member.id, role: 'read-only' });
     for (const a of [p, bot]) { await artifactAppend(f, a, 'artifact.create', await artifactBody(a.member.id)); expect((await artifactResult(f)).ok).toBe(false); f.controls.pop(); }

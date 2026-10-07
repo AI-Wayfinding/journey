@@ -25,6 +25,21 @@ async function destinationBundle(f: Awaited<ReturnType<typeof copyFixture>>) {
 // Knowing a private origin, or choosing a public destination, must not create
 // access, reveal that origin publicly or change its pinned author.
 describe('private copy contracts in private and public destination models', () => {
+  it('copies an agent-authored record with a distinct sibling signer between person vaults', async () => {
+    const f = await copyFixture('private'), author = privateIdentity(f.source.writer.member), actor = privateIdentity(f.source.reader.member);
+    const first = await record(f.source.context, f.source.writer, f.source.vault, f.source.copy, f.source.artifact, author);
+    const source = await verifyPrivateRecords([first.record], [first.payload], [f.source.context], { vault: f.source.vault, author: f.source.identity }, { historical: true });
+    const principal = f.destination.controls.find(c => c.proof.type === 'member.add')!.proof.body.member as { id: string };
+    const destinationPerson = { ...f.source.author, member: { ...f.source.author.member, id: principal.id } };
+    for (const bot of [f.source.writer, f.source.reader]) await artifactAppend(f.destination, destinationPerson, 'member.add', { member: { ...bot.member, id: newId(), addedBy: principal.id }, kind: 'agent', grants: [] });
+    const context = await contextFor(f.destination), session = await privateAgentSession(context, actor, f.source.reader.key, f.source.reader.identity, 'authenticated');
+    const sourceSession = await privateAgentSession(f.source.context, actor, f.source.reader.key, f.source.reader.identity, 'authenticated');
+    const copied = await record(context, f.source.reader, f.vault, f.copy, f.source.artifact, author, 'private.copy', [], content(), { origin: { journey: f.source.context.journey, copy: f.source.copy, artifact: f.source.artifact, version: first.record.body.version, recordHash: await privateHash(first.record) }, destination: { journey: context.journey, copy: f.copy }, snapshotHash: await privateSnapshotHash(first.payload.payload) });
+    const view = await verifyPrivateRecords([copied.record], [copied.payload], [f.source.context, context], f.trust, { source, sessions: [sourceSession, session] });
+    expect(privateCopies(view)[0]!.author).toEqual(author);
+    expect(privateCopies(view)[0]!.records[0]!.actor).toEqual(actor);
+    expect(privateCopies(view)[0]!.records[0]!.sig).toBe(copied.record.sig);
+  });
   it('durably replays independently signed histories with real distinct member vault IDs', async () => {
     const f = await copyFixture('private');
     expect(f.trust.vault).not.toBe(f.source.vault);

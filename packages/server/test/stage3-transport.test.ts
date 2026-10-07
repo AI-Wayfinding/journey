@@ -30,20 +30,22 @@ describe('Stage 3 private authority transport', () => {
     expect((await request(`/v1/journeys/${old.j.id}/protocol`, 'GET', undefined, as(old.owner))).status).toBe(200);
   }, 60000);
 
-  it('allows inherited read-only agent reads and own wraps but refuses all their vault PUTs and missing/unknown credential classes', async () => {
+  it('shares person vault and sibling wraps regardless of legacy scope, denying foreign and unknown credentials', async () => {
     const { owner, j } = await fixture(), readonly = await addAgent(j, owner, 'read'), write = await addAgent(j, owner, 'readwrite'), guest = await addPerson(j, owner), foreign = await addAgent(j, guest, 'readwrite');
     const put = `/v1/journeys/${j.id}/private-vault`, get = put + '?slots=00,01', wrapPath = `/v1/journeys/${j.id}/private-agent-wrap/${readonly.principal}`;
     expect((await binary(put, as(owner), encodeVaultPatch(await patch(j, as(owner))))).status).toBe(200);
     const ciphertext = await sealIdentity((await createAgeIdentity()).identity, [readonly.age.recipient]);
     expect((await request(wrapPath, 'PUT', { ciphertext }, as(owner))).status).toBe(200);
-    const before = await wire(j, as(owner));
+    let before = await wire(j, as(owner));
     expect(await wire(j, await agentHeaders(readonly, 'GET', get))).toEqual(before);
     const received = await request(wrapPath, 'GET', undefined, await agentHeaders(readonly, 'GET', wrapPath));
     expect(received.status).toBe(200); expect(await received.json()).toEqual({ ciphertext });
     const bytes = encodeVaultPatch({ ...await patch(j, as(owner)), token: before.token });
-    expect((await binary(put, await signedBinary(readonly, put, bytes), bytes)).status).toBe(403);
-    expect((await request(wrapPath, 'PUT', { ciphertext }, await agentHeaders(readonly, 'PUT', wrapPath, { ciphertext }))).status).toBe(403);
-    expect((await request(wrapPath, 'GET', undefined, await agentHeaders(write, 'GET', wrapPath))).status).toBe(403);
+    expect((await binary(put, await signedBinary(readonly, put, bytes), bytes)).status).toBe(200);
+    before = await wire(j, as(owner));
+    expect(before.token).not.toBe(new TextDecoder().decode(bytes.subarray(0, 64)));
+    expect((await request(wrapPath, 'PUT', { ciphertext }, await agentHeaders(readonly, 'PUT', wrapPath, { ciphertext }))).status).toBe(200);
+    expect((await request(wrapPath, 'GET', undefined, await agentHeaders(write, 'GET', wrapPath))).status).toBe(200);
     expect((await request(wrapPath, 'PUT', { ciphertext }, as(guest))).status).toBe(403);
     expect((await request(wrapPath, 'GET', undefined, await agentHeaders(foreign, 'GET', wrapPath))).status).toBe(403);
     for (const value of ['', 'unknown']) {

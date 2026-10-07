@@ -1,9 +1,9 @@
 import { canWriteContent, canReadContent, effectiveScope } from '@ai-wayfinding/core';
-import { PrivateVault, decodeVaultWire, encodeVaultPatch, memberVaultId, privateIdentity, privateAgentSession, verifyPrivateContext, openVaultAgentWrap, privateAccess } from '@ai-wayfinding/core';
+import { PrivateVault, decodeVaultWire, encodeVaultPatch, memberVaultId, privateIdentity, privateAgentSession, verifyPrivateContext, openVaultAgentWrap, privateAccess, privateAgentAudience, sealVaultAgentWrap } from '@ai-wayfinding/core';
 import { PROJECT_FORMAT, projectPurposeHash, replayProject, sealProjectPayload, effectiveProjectParticipants, selectProjectArtifacts, projectSelector } from '@ai-wayfinding/core';
 import type { ProjectActionType } from '@ai-wayfinding/core';
 import { projectId, observedRevision, purposeText, stateValue } from './projects.js';
-import type { ProjectView, ParticipationExplanation } from './projects.js';
+import type { ProjectView } from './projects.js';
 import { CLIENT_VERSION, meetsMinClientVersion, newId, unwrapJourneyKey, verifyControlProofs, controlDefinitions, ARTIFACT_FORMAT, artifactTypeHash, canonical, readArtifactPayload, sealArtifactPayload, sealBlob, openBlob, signControlProof, importSigningKey, replayArtifact } from '@ai-wayfinding/core';
 import type { VaultOptions, VaultTransport, PrivateCheckpoint, ControlProof, Member, Envelope, JourneyKey, LogState, ArtifactActionType, ArtifactAttachment, ArtifactPayload, JsonObject } from '@ai-wayfinding/core';
 import { artifactPayload, artifactText, attachmentName, localBytes, saveDownload, skillPackage, validateLocalAttachment } from './artifacts.js';
@@ -26,13 +26,14 @@ export class JourneyClient {
   private readonly fetcher: typeof fetch;
   private readonly keys = new Map<number, JourneyKey>();
   constructor(readonly session: RememberedAgent, private readonly options: JourneyOptions = {}) { this.fetcher = options.fetch ?? networkFetch; }
-  private async response(path: string, method = 'GET', data?: Record<string, unknown> | Uint8Array, extra: Record<string, string> = {}): Promise<Response> {
+  private async response(path: string, method = 'GET', data?: Record<string, unknown> | Uint8Array, extra: Record<string, string> = {}, allowMissing = false): Promise<Response> {
     if (this.session.expiresAt <= Date.now()) throw new Error('Your journey agent access has expired. Connect again.');
     const binary = data instanceof Uint8Array;
     const body = binary ? new Uint8Array(data) : data === undefined ? '' : JSON.stringify(data);
     const route = '/v1' + path;
     const headers = await signedHeaders(this.session.signingPrivateKey, method, route, body);
     const result = await this.fetcher(this.session.server + route, { method, headers: { ...headers, 'X-Client-Version': CLIENT_VERSION, 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': ARTIFACT_FORMAT, 'X-Project-Format': 'project-v1', 'X-Private-Format': 'private-v1', 'X-Agent-Session': this.session.sessionId, ...(data === undefined ? {} : { 'Content-Type': binary ? 'application/octet-stream' : 'application/json', Origin: new URL(this.session.server).origin, 'X-Wayfinding': '1' }), ...extra }, ...(data === undefined ? {} : { body }) });
+    if (allowMissing && result.status === 404) return result;
     if (!result.ok) {
       const error = await result.json().catch(() => null) as { error?: { code?: string } } | null;
       const code = error?.error?.code ?? String(result.status);
@@ -93,18 +94,29 @@ export class JourneyClient {
     const session = await privateAgentSession(context, actor, signingKey, this.session.identity, 'authenticated');
     if (!privateAccess(context, author, session)) throw new Error('Private vault access denied');
     const vault = await memberVaultId(this.session.journeyId, person, author.signingKey, author.recipient);
-    const wrap = await this.request<{ ciphertext: string }>(`/journeys/${this.session.journeyId}/private-agent-wrap/${this.session.principal}`);
-    const contentIdentity = await openVaultAgentWrap(wrap.ciphertext, { journey: this.session.journeyId, person, agent: this.session.principal, vault, author, recipient: actor }, this.session.identity);
+    const wrap = await this.response(`/journeys/${this.session.journeyId}/private-agent-wrap/${this.session.principal}`, 'GET', undefined, {}, true);
+    const contentIdentity = wrap.status === 404 ? undefined : await openVaultAgentWrap((await wrap.json() as { ciphertext: string }).ciphertext, { journey: this.session.journeyId, person, agent: this.session.principal, vault, author, recipient: actor }, this.session.identity, context);
     const transport: VaultTransport = { read: async indices => decodeVaultWire(new Uint8Array(await (await this.response(`/journeys/${this.session.journeyId}/private-vault?slots=${indices === 'all' ? 'all' : indices.map(i => String(i).padStart(2, '0')).join(',')}`)).arrayBuffer()), indices), commit: async patch => (await this.response(`/journeys/${this.session.journeyId}/private-vault`, 'PUT', encodeVaultPatch(patch))).json() };
     const options: VaultOptions = { actor, contentIdentity, trust: { vault, author }, identity: this.session.identity, signingKey, contexts: [context], sessions: [session], paired, transport };
     if (this.options.cacheRoot) options.cache = new NodePrivateStore(this.options.cacheRoot, vault, options);
     const controller = new PrivateVault(options); rememberNodePrivateVault(controller);
-    try { await controller.open(); controller.start(); this.privateController = controller; this.privateHead = verified.state.lastHash!; return controller; }
+    try {
+      await controller.open();
+      if (controller.retainedCheckpoint) {
+        const audience = await this.request<{ agents: { principal: string }[] }>(`/journeys/${this.session.journeyId}/private-agents`);
+        for (const candidate of audience.agents) {
+          const target = verified.state.members[candidate.principal]?.member;
+          if (!target || target.kind !== 'agent' || !privateAgentAudience(context, author, privateIdentity(target))) continue;
+          const ciphertext = await sealVaultAgentWrap({ journey: this.session.journeyId, person, agent: target.id, vault, author, recipient: privateIdentity(target) }, controller.agentContentIdentity, signingKey, { writer: actor, context });
+          await this.request(`/journeys/${this.session.journeyId}/private-agent-wrap/${target.id}`, 'PUT', { ciphertext });
+        }
+      }
+      controller.start(); this.privateController = controller; this.privateHead = verified.state.lastHash!; return controller; }
     catch (error) { controller.close(); throw error; }
   }
   private async writable(): Promise<Verified> {
     const verified = await this.verified();
-    if (!canWriteContent(verified.state, this.session.principal)) throw new Error('This journey is read-only for this agent, or a key update is pending. Its access follows the adding person’s current role and its original approval limit.');
+    if (!canWriteContent(verified.state, this.session.principal)) throw new Error('This journey is read-only for this agent, or a key update is pending. Its access follows the adding person’s current role.');
     return verified;
   }
   private async views(verified: Verified): Promise<ArtifactView[]> {
@@ -242,9 +254,12 @@ export class JourneyClient {
     await this.commitProject('project.state', { format: PROJECT_FORMAT, project, state: stateValue(state), predecessor: observedRevision(predecessor) }, {});
     return this.projectShow(project);
   }
-  async projectParticipation(id: string): Promise<ParticipationExplanation> {
-    const project = await this.projectShow(id);
-    return { project: project.id, inherited: true, message: 'Agents inherit their adding person’s project participation. Ask that person to join or leave this project in the browser. No action was posted.' };
+  async projectParticipation(id: string, action: 'join' | 'leave'): Promise<ProjectView> {
+    const verified = await this.verified(), project = this.projectView(projectId(id), verified);
+    const member = verified.state.members[this.session.principal]!.member.addedBy!;
+    const pair = project.participation.find(row => row.member === member);
+    await this.commitProject(action === 'join' ? 'project.join' : 'project.leave', { format: PROJECT_FORMAT, project: project.id, member, predecessor: pair?.revision ?? null }, {});
+    return this.projectShow(project.id);
   }
   async artifactProject(id: string, project: string | null, predecessor: number | null): Promise<ArtifactItem> {
     const target = project === null ? null : projectId(project), revision = observedRevision(predecessor);

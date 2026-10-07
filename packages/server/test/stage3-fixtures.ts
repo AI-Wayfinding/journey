@@ -1,6 +1,6 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { expect } from 'vitest';
-import { PrivateVault, newPrivateId, privateIdentity, privatePersonSession, verifyPrivateContext, hashControlProof, privateAuthority, privateAuthorityHistory, signPrivateRecord, privateHash, artifactTypeHash, decodeVaultWire, encodeVaultPatch, importSigningKey, newId, privateEncode, privateRandomBytes, PRIVATE_HEADER_BYTES, PRIVATE_SLOT_BYTES, type VaultOptions, type PrivateBundle, type VaultCacheRecord, type Member, type VaultPatch } from '@ai-wayfinding/core';
+import { PrivateVault, memberVaultId, newPrivateId, privateIdentity, privatePersonSession, verifyPrivateContext, hashControlProof, privateAuthority, privateAuthorityHistory, signPrivateRecord, privateHash, artifactTypeHash, decodeVaultWire, encodeVaultPatch, importSigningKey, newId, privateEncode, privateRandomBytes, PRIVATE_HEADER_BYTES, PRIVATE_SLOT_BYTES, type VaultOptions, type PrivateBundle, type VaultCacheRecord, type Member, type VaultPatch } from '@ai-wayfinding/core';
 import worker, { type Env } from '../src/index.js';
 import { base64url } from '../src/crypto.js';
 import { fixture as stage2, change, type Journey } from './stage2-fixtures.js';
@@ -44,7 +44,7 @@ export async function controller(j: Journey, owner: { principal: string; cookie:
   const creator = j.controls[0]!.proof.body.creator as Member;
   const context = await verifyPrivateContext({ journey: j.id, creator, controls: j.controls }, { now: Date.now(), currentHead: await hashControlProof(j.controls.at(-1)!.proof) });
   const author = privateIdentity({ id: owner.principal, kind: 'person', signingKey: owner.signing.publicKey, recipient: owner.age.recipient });
-  const key = await importSigningKey(owner.signing.privateKey), session = await privatePersonSession(context, author, key, owner.age.identity), vaultId = newPrivateId(), copy = newPrivateId();
+  const key = await importSigningKey(owner.signing.privateKey), session = await privatePersonSession(context, author, key, owner.age.identity), vaultId = await memberVaultId(j.id, owner.principal, author.signingKey, author.recipient), copy = newPrivateId();
   const content = { type: 'artifact.content', typeVersion: 1, body: { title: 'PRIVATE TITLE CANARY', tags: ['PRIVATE TAG CANARY'], content: { kind: 'document', markdown: 'PRIVATE BODY CANARY' }, attachments: [] } };
   const record = await signPrivateRecord({ format: 'private-v1', v: 1, id: newId(), vault: vaultId, copy, seq: 0, prev: null, at: new Date().toISOString(), actor: author, authority: privateAuthority(context, author), type: 'private.create', body: { artifact: newPrivateId(), author: { kind: author.kind, signingKey: author.signingKey, recipient: author.recipient }, actor: { kind: author.kind, signingKey: author.signingKey, recipient: author.recipient }, version: newId(), typeHash: await artifactTypeHash('document'), blobs: [], predecessor: null }, payloadHash: await privateHash(content) }, key);
   const bundle: PrivateBundle = { format: 'private-v1', version: 1, vault: vaultId, author, scope: 'author-backup', authorityHistories: [privateAuthorityHistory(context)], records: [record], payloads: [{ record: record.id, payload: content }], copyKeys: [{ copy, key: privateEncode(privateRandomBytes(32)) }], blobs: [], unavailableDeletedBlobs: [] };

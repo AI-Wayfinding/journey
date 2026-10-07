@@ -153,7 +153,7 @@ export class BrowserPrivateArtifacts {
     const ciphertext = await exportPrivateBundle(bundle, { trust: { vault: this.vaultId, author: this.session.identity }, contexts: [this.context], sessions: [this.session, agent], recipient: agent });
     this.assertOpen(); return ciphertext;
   }
-  /** The agent reads scoped content; the person reviews and signs the returned result. */
+  /** Record a result supplied through this person's browser session. */
   async recordResult(content: PrivateContent, previous?: PrivateCopyState): Promise<string> { return this.save(content, previous); }
   async backup(): Promise<string> { await this.writer(); const ciphertext = await exportPrivateBundle(this.bundle(), { trust: { vault: this.vaultId, author: this.session.identity }, contexts: this.contexts, recipient: this.session, historical: true }); this.assertOpen(); return ciphertext; }
   async restore(ciphertext: string): Promise<void> {

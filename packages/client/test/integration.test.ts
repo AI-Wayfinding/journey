@@ -10,7 +10,7 @@ import { root, scratch, as, request, person, journey, signedControl, approve, co
 const exec = promisify(execFile), server = 'http://localhost:18787';
 localServer();
 describe('real journey server in workerd', () => {
-  it('approves an agent, adds, lists, searches, comments and reads; refuses read-only and removed agents', async () => {
+  it('approves an agent, adds, lists, searches, comments and reads regardless of legacy scope; refuses removed agents', async () => {
     const owner = await person(), trip = await journey(owner), client = await connected(owner, trip);
     const added = await client.add({ type: 'resource', title: 'Visible journey title', body: 'Only in journey ciphertext', tags: ['journey'] });
     expect(added.authoredBy).toBe('agent');
@@ -20,7 +20,7 @@ describe('real journey server in workerd', () => {
     expect((await client.comment(added.id, 'Journey comment')).authoredBy).toBe('agent');
     expect((await client.comments(added.id))[0]?.body).toBe('Journey comment');
     const reader = await connected(owner, trip, 'read');
-    await expect(reader.add({ type: 'resource', title: 'Denied', body: 'no', tags: [] })).rejects.toThrow('read-only');
+    expect((await reader.add({ type: 'resource', title: 'Legacy scope is not a limit', body: 'Allowed', tags: [] })).authoredBy).toBe('agent');
     reader.close();
     await refresh(trip, owner);
     const last = trip.entries.at(-1)!;
@@ -35,7 +35,7 @@ describe('real journey server in workerd', () => {
     const statePath = join(scratch, 'agent-' + newId() + '.json');
     try {
       const cli = join(root, 'packages/client/dist/cli.js');
-      const created = await exec(process.execPath, [cli, 'connect', trip.id, '--scope', 'read', '--name', 'File agent', '--server', server, '--state', statePath, '--no-wait', '--json']);
+      const created = await exec(process.execPath, [cli, 'connect', trip.id, '--name', 'File agent', '--server', server, '--state', statePath, '--no-wait', '--json']);
       const pending = JSON.parse(created.stdout) as { link: string; code: string; requestId: string; expiresAt: string; status: string };
       expect(pending).toMatchObject({ link: expect.any(String), code: expect.any(String), requestId: expect.any(String), expiresAt: expect.any(String), status: 'pending' });
       expect((await lstat(statePath)).mode & 0o777).toBe(0o600);
@@ -91,7 +91,7 @@ describe('real journey server in workerd', () => {
   }, 30_000);
   it('calls list, add and search through the stdio MCP SDK client', async () => {
     const owner = await person(), trip = await journey(owner);
-    const transport = new StdioClientTransport({ command: process.execPath, args: [join(root, 'packages/client/dist/cli.js'), 'mcp', '--connect', trip.id, '--server', server, '--scope', 'readwrite', '--name', 'MCP assistant'], stderr: 'pipe' });
+    const transport = new StdioClientTransport({ command: process.execPath, args: [join(root, 'packages/client/dist/cli.js'), 'mcp', '--connect', trip.id, '--server', server, '--name', 'MCP assistant'], stderr: 'pipe' });
     let approval: Promise<void> | undefined;
     transport.stderr?.on('data', (chunk: Buffer) => {
       const match = /agent-sessions\/([A-Za-z0-9_-]+)[^\n]*\nSix-digit code: (\d{6})/.exec(chunk.toString());

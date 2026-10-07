@@ -6,8 +6,8 @@ import rules from './rules/rules.mjs';
 import type { PrivateBundleScope } from './rules/rules.mjs';
 import {
   PRIVATE_FORMAT, privateObject, privateShape, validPrivateId, validatePrivateIdentity, copyPrivateIdentity,
-  copyPrivateRecord, validatePrivateBlob, copyPrivateBlob, privateBytesHash, verifyPrivateContext,
-  verifyPrivateRecords, privateCopies, privateAccess, privateAuthorityHistory, privateBinding, memberVaultId,
+  copyPrivateRecord, validatePrivateBlob, copyPrivateBlob, privateBytesHash, verifyPrivateContext, privateAgentAudience,
+  verifyPrivateRecords, privateCopies, privateAccess, privateAuthorityHistory, privateVaultOwner, memberVaultId,
 } from './private.js';
 import type { PrivateIdentity, PrivateRecord, PrivatePayload, PrivateBlob, PrivateContext, PrivateSession, PrivateView, PrivateAuthorityHistory } from './private.js';
 
@@ -27,8 +27,13 @@ export interface PrivateBundleOptions {
   historical?: boolean;
 }
 const bundleScopes: Record<PrivateBundle['scope'], PrivateBundleScope> = { 'author-backup': { $: 'PrivateBackup' }, 'agent-handoff': { $: 'PrivateHandoff' }, 'agent-return': { $: 'PrivateReturn' } };
-function bundleRecipient(bundle: PrivateBundle, recipient: PrivateIdentity): boolean {
-  return rules.private_bundle_recipient(bundleScopes[bundle.scope], { $: recipient.kind === 'agent' ? 'Agent' : 'Person' }, canonical(recipient) === canonical(bundle.author));
+function bundleRecipient(bundle: PrivateBundle, recipient: PrivateIdentity, options: PrivateBundleOptions): boolean {
+  const contexts = options.contexts ?? [];
+  // Historical/offline recovery has no live credential to authorize a new key
+  // recipient. Live backups and returns use the same person audience as reads.
+  const same = canonical(recipient) === canonical(bundle.author)
+    || !options.historical && contexts.length > 0 && contexts.every(context => privateAgentAudience(context, bundle.author, recipient));
+  return rules.private_bundle_recipient(bundleScopes[bundle.scope], { $: recipient.kind === 'agent' ? 'Agent' : 'Person' }, same);
 }
 /** HKDF domain contract shared with the later vault adapter; no journey keys. */
 export async function privateDerivedKey(key: Uint8Array, vault: string, copy: string, purpose: 'history' | 'blob'): Promise<CryptoKey> {
@@ -74,7 +79,7 @@ export async function verifyPrivateBundle(value: unknown, options: PrivateBundle
     const copies = privateCopies(view);
     for (const copy of copies) {
       const context = contexts.find(c => c.journey === copy.journey);
-      if (!context || history.vault !== await memberVaultId(copy.journey, privateBinding(context, copy.author).principal, copy.author.signingKey, copy.author.recipient)) throw new Error('Private source vault mismatch');
+      if (!context || history.vault !== await memberVaultId(copy.journey, privateVaultOwner(context, copy.author).id, options.trust.author.signingKey, options.trust.author.recipient)) throw new Error('Private source vault mismatch');
     }
     provenance.push(view); sourceHistories.push({ vault: history.vault, records: copies.flatMap(c => c.records), payloads: copies.flatMap(c => c.payloads) });
   }
@@ -105,7 +110,7 @@ export async function verifyPrivateBundle(value: unknown, options: PrivateBundle
 /** There is one derived recipient, not a recipients/grants parameter. */
 export async function exportPrivateBundle(bundle: PrivateBundle, options: PrivateBundleOptions & { recipient: PrivateSession; contexts: readonly PrivateContext[] }): Promise<string> {
   const verified = await verifyPrivateBundle(bundle, options);
-  if (!bundleRecipient(verified.bundle, options.recipient.identity)) throw new Error('Invalid private bundle recipient');
+  if (!bundleRecipient(verified.bundle, options.recipient.identity, options)) throw new Error('Invalid private bundle recipient');
   for (const copy of privateCopies(verified.view)) {
     const context = options.contexts.find(c => c.journey === copy.journey);
     if (!context || !privateAccess(context, copy.author, options.recipient)) throw new Error('Private bundle recipient outside audience');
@@ -116,7 +121,7 @@ export async function importPrivateBundle(ciphertext: string, identity: AgeIdent
   if (!validatePrivateIdentity(options.recipient) || await deriveRecipient(identity) !== options.recipient.recipient) throw new Error('Private bundle recipient key mismatch');
   const parsed: unknown = JSON.parse(await openIdentity(ciphertext, [identity]));
   const verified = await verifyPrivateBundle(parsed, options);
-  if (!bundleRecipient(verified.bundle, options.recipient)) throw new Error('Invalid private bundle recipient');
+  if (!bundleRecipient(verified.bundle, options.recipient, options)) throw new Error('Invalid private bundle recipient');
   if (!options.historical) {
     for (const copy of privateCopies(verified.view)) {
       const context = options.contexts?.find(c => c.journey === copy.journey), actor = options.sessions?.find(s => s.binding.journey === copy.journey && canonical(s.identity) === canonical(options.recipient));

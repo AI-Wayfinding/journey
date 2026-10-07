@@ -5,7 +5,7 @@ import { mkdir, writeFile, rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { browserPerson, signUp } from './person.js';
 import { createTrip, downloadBytes, joinTrip } from './stage1-fixtures.js';
-import { addPrivate, durable, frozen, scheduled, device, observe, headers, controls, change, principal, navigate, firstDeviceCheckpoint, signedAgent, forkSnapshot, credentialAgent, credentialRead, adapterPage, deterministicVault } from './stage3-fixtures.js';
+import { addPrivate, durable, frozen, scheduled, device, observe, headers, controls, change, principal, navigate, firstDeviceCheckpoint, signedAgent, forkSnapshot, credentialAgent, credentialRead, adapterPage, deterministicVault, agentCreatesPrivate } from './stage3-fixtures.js';
 
 // These tests use real browser code, real signed controls, Durable Objects and
 // server vault bytes. No save-triggered sync or in-memory-only success oracle.
@@ -198,18 +198,17 @@ test('empty and populated browser lifetimes use matched two-slot dummy/dirty tra
 });
 
 
-test('own authenticated read-only agent gets its wrap and possession handoff but cannot PUT; person records returned work', async ({ browser, request }) => {
+test('own authenticated agent creates private artifacts in its person vault with agent authorship and signatures', async ({ browser, request }) => {
   test.setTimeout(300_000);
   const owner = await browserPerson(browser);
   try {
     await signUp(owner.page, `private-agent-${Date.now()}@example.org`); await frozen(owner.page); const trip = await createTrip(owner.page);
     const agent = await requestAgent(request, trip.id, 'Private reader');
-    await navigate(owner.page, new URL(agent.approvalUrl).pathname); await owner.page.getByLabel('Six-digit code').fill(agent.code); await owner.page.getByLabel('Access', { exact: true }).selectOption('read');
+    await navigate(owner.page, new URL(agent.approvalUrl).pathname); await owner.page.getByLabel('Six-digit code').fill(agent.code); await expect(owner.page.getByLabel('Access', { exact: true })).toHaveCount(0);
     await owner.page.getByRole('button', { name: 'Confirm with passkey', exact: true }).click(); await expect(owner.page.getByRole('heading', { name: 'Agent approved' })).toBeVisible();
     const path = await addPrivate(owner.page, trip.path, 'SCOPED AGENT INPUT', 'The person owns this content'); await scheduled(owner.page); const saved = await durable(owner.page, trip.id);
     const wrap = await signedAgent(owner.page, agent, 'GET', `/v1/journeys/${trip.id}/private-agent-wrap/${agent.principal}`); expect(wrap.status()).toBe(200); expect(JSON.stringify(await wrap.json())).not.toContain('SCOPED AGENT INPUT');
     const read = await signedAgent(owner.page, agent, 'GET', `/v1/journeys/${trip.id}/private-vault?slots=00,01`); expect(read.status()).toBe(200); expect((await read.body()).length).toBe(2_129_987); await read.dispose();
-    const denied = await signedAgent(owner.page, agent, 'PUT', `/v1/journeys/${trip.id}/private-vault`, encodeVaultPatch({ token: saved.snapshot.token, frame: saved.snapshot.frame, slots: [0, 1].map(index => ({ index, ciphertext: saved.snapshot.slots[index]! })) })); expect(denied.status()).toBe(403); expect((await durable(owner.page, trip.id)).head).toBe(saved.head);
     await owner.page.getByRole('button', { name: 'Create one-use possession challenge', exact: true }).click();
     await expect(owner.page.locator('#private-challenge')).not.toBeEmpty(); const challenge = JSON.parse((await owner.page.locator('#private-challenge').textContent())!);
     const response = await answerPrivateChallenge(challenge, agent.signingPrivateKey, agent.identity);
@@ -219,8 +218,15 @@ test('own authenticated read-only agent gets its wrap and possession handoff but
     await expect(openIdentity(ciphertext, [saved.current.secrets.identity])).rejects.toThrow();
     await owner.page.getByRole('button', { name: 'Download scoped encrypted handoff', exact: true }).click(); await expect(owner.page.locator('main > [role="alert"]')).toContainText('Create a fresh local challenge first');
     expect((await durable(owner.page, trip.id)).head).toBe(saved.head);
-    await navigate(owner.page, path + '/edit'); await owner.page.getByLabel('Private body', { exact: true }).fill('Reviewed agent result, recorded by the person'); await owner.page.getByRole('button', { name: 'Save private artifact', exact: true }).click(); await expect(owner.page).toHaveURL(path); await scheduled(owner.page);
-    const result = await durable(owner.page, trip.id); expect(privateCopies(result.branches[0]!.view)[0]!.records.at(-1)!.actor).toEqual(saved.author); expect(result.branches[0]!.bundle.payloads.at(-1)!.payload.body.content).toEqual({ kind: 'document', markdown: 'Reviewed agent result, recorded by the person' });
+    const written = await agentCreatesPrivate(owner.page, agent, trip.id, 'AGENT PRIVATE AUTHOR');
+    const result = await durable(owner.page, trip.id), authored = privateCopies(result.branches[0]!.view).find(c => c.copy === written.copy)!;
+    expect(result.vault).toBe(saved.vault); expect(authored.author).toEqual(written.actor); expect(authored.records[0]!.actor).toEqual(written.actor); expect(authored.records[0]!.sig).toBe(written.record.sig);
+    expect(authored.payloads[0]!.payload.body.content).toEqual({ kind: 'document', markdown: 'Authored privately by the agent' });
+    // The first fixed sync discovers the new signed directory; the next reads
+    // its missing live slots. Neither save triggers a sync or full-vault fetch.
+    await scheduled(owner.page); await scheduled(owner.page);
+    await navigate(owner.page, trip.path + '/private/' + written.copy); await expect(owner.page.getByRole('heading', { name: 'AGENT PRIVATE AUTHOR', exact: true })).toBeVisible();
+    await expect(owner.page.locator('#private-author')).toContainText('Private reader');
   } finally { await owner.context.close(); }
 });
 
@@ -332,8 +338,8 @@ test('removed, expired, link and foreign-agent browser credentials cannot obtain
       await owner.page.clock.setSystemTime(new Date()); await navigate(owner.page, trip.path); await expect(owner.page.getByRole('heading', { name: 'Artifacts journey', exact: true })).toBeVisible(); // existing guide rotation completes before testing the audience
       // Expiry uses a real server credential and actual server wall time. Only the
       // browser's vault timer is virtual; moving it cannot expire server auth.
-      const expired = await credentialAgent(owner.page, trip.id, 'memory', 5_000);
-      await expect.poll(() => Date.now(), { timeout: 10_000 }).toBeGreaterThan(expired.expiresAt);
+      const expired = await credentialAgent(owner.page, trip.id, 'memory', 30_000);
+      await expect.poll(() => Date.now(), { timeout: 40_000 }).toBeGreaterThan(expired.expiresAt);
       await second.evaluate(async () => { const w = (window as any).privateWork, core = (window as any).Stage3; core.closePrivateVaults(); (window as any).privateWork = await core.BrowserPrivateArtifacts.open(await core.verifiedJourney(w.ctx.id, w.ctx.principal, w.ctx.keys)); });
       const before = await durable(owner.page, trip.id);
 

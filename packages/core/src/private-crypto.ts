@@ -2,8 +2,8 @@ import { asBuffer, decode, encode, text, utf8 } from './codec.js';
 import { canonical } from './log.js';
 import { deriveRecipient, openIdentity, sealIdentity } from './keys.js';
 import type { AgeIdentity } from './keys.js';
-import { PRIVATE_SLOT_BYTES, privateBytesHash, validPrivateId, copyPrivateIdentity, privateHash, signPrivateMessage, privateObject, privateShape, validatePrivateIdentity } from './private.js';
-import type { PrivateIdentity } from './private.js';
+import { PRIVATE_SLOT_BYTES, privateBytesHash, validPrivateId, copyPrivateIdentity, privateHash, signPrivateMessage, privateObject, privateShape, validatePrivateIdentity, privateAgentAudience } from './private.js';
+import type { PrivateIdentity, PrivateContext } from './private.js';
 
 export const PRIVATE_CHUNK_BYTES = PRIVATE_SLOT_BYTES - 32;
 export const PRIVATE_HEADER_BYTES = 32768;
@@ -69,24 +69,31 @@ export const privatePlainValue = (bytes: Uint8Array): unknown => JSON.parse(text
 
 /** Only a dedicated content identity is shared; never a person's identity/signing key. */
 export interface VaultAgentBinding { journey: string; person: string; agent: string; vault: string; author: PrivateIdentity; recipient: PrivateIdentity }
+export interface VaultAgentSigner { writer: PrivateIdentity; context: PrivateContext }
 function vaultAgentBinding(value: VaultAgentBinding): VaultAgentBinding {
   if (!privateObject(value) || !privateShape(value, ['journey', 'person', 'agent', 'vault', 'author', 'recipient']) || ![value.journey, value.person, value.agent].every(v => typeof v === 'string' && v.length > 0 && v.length <= 128) || !validPrivateId(value.vault) || !validatePrivateIdentity(value.author) || value.author.kind !== 'person' || !validatePrivateIdentity(value.recipient) || value.recipient.kind !== 'agent') throw new Error('Invalid private agent wrap binding');
   return { journey: value.journey, person: value.person, agent: value.agent, vault: value.vault, author: copyPrivateIdentity(value.author), recipient: copyPrivateIdentity(value.recipient) };
 }
-export async function sealVaultAgentWrap(binding: VaultAgentBinding, contentIdentity: string, signingKey: CryptoKey): Promise<string> {
+export async function sealVaultAgentWrap(binding: VaultAgentBinding, contentIdentity: string, signingKey: CryptoKey, signer?: VaultAgentSigner): Promise<string> {
   const clean = vaultAgentBinding(binding);
   // Check that the shared secret is a real age key and not the person's key.
   if (await deriveRecipient(contentIdentity) === clean.author.recipient) throw new Error('Person identity must never be delegated');
-  const message = { domain: 'wayfinding/private/agent-wrap/v1', binding: clean, contentIdentity };
+  if (signer && !privateAgentAudience(signer.context, clean.author, signer.writer)) throw new Error('Private agent wrap signer denied');
+  const message = { domain: 'wayfinding/private/agent-wrap/v1', binding: clean, contentIdentity, ...(signer ? { writer: copyPrivateIdentity(signer.writer) } : {}) };
   const sig = await signPrivateMessage(message, signingKey);
   return sealIdentity(canonical({ message, sig }), [clean.recipient.recipient]);
 }
-export async function openVaultAgentWrap(ciphertext: string, binding: VaultAgentBinding, identity: AgeIdentity): Promise<string> {
+export async function openVaultAgentWrap(ciphertext: string, binding: VaultAgentBinding, identity: AgeIdentity, context?: PrivateContext): Promise<string> {
   const clean = vaultAgentBinding(binding);
   if (await deriveRecipient(identity) !== clean.recipient.recipient) throw new Error('Private agent identity mismatch');
   const value: unknown = JSON.parse(await openIdentity(ciphertext, [identity]));
-  if (!privateObject(value) || !privateShape(value, ['message', 'sig']) || !privateObject(value.message) || !privateShape(value.message, ['domain', 'binding', 'contentIdentity']) || value.message.domain !== 'wayfinding/private/agent-wrap/v1' || canonical(value.message.binding) !== canonical(clean) || typeof value.message.contentIdentity !== 'string' || typeof value.sig !== 'string') throw new Error('Private agent wrap binding mismatch');
-  const publicKey = await crypto.subtle.importKey('raw', asBuffer(decode(clean.author.signingKey)), 'Ed25519', false, ['verify']);
+  if (!privateObject(value) || !privateShape(value, ['message', 'sig']) || !privateObject(value.message) || !privateShape(value.message, ['domain', 'binding', 'contentIdentity', ...(value.message.writer === undefined ? [] : ['writer'])]) || value.message.domain !== 'wayfinding/private/agent-wrap/v1' || canonical(value.message.binding) !== canonical(clean) || typeof value.message.contentIdentity !== 'string' || typeof value.sig !== 'string') throw new Error('Private agent wrap binding mismatch');
+  let signer = clean.author;
+  if (value.message.writer !== undefined) {
+    if (!validatePrivateIdentity(value.message.writer) || !context || !privateAgentAudience(context, clean.author, value.message.writer)) throw new Error('Private agent wrap signer denied');
+    signer = copyPrivateIdentity(value.message.writer);
+  }
+  const publicKey = await crypto.subtle.importKey('raw', asBuffer(decode(signer.signingKey)), 'Ed25519', false, ['verify']);
   if (!await crypto.subtle.verify('Ed25519', publicKey, asBuffer(decode(value.sig)), asBuffer(utf8(canonical(value.message))))) throw new Error('Private agent wrap signature mismatch');
   if (await deriveRecipient(value.message.contentIdentity) === clean.author.recipient) throw new Error('Person identity must never be delegated');
   return value.message.contentIdentity;

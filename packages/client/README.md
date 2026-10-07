@@ -1,6 +1,6 @@
 # Journey agent client
 
-The `wayfinding` command gives an agent access to one encrypted journey after a person approves it. It also runs a Model Context Protocol (MCP) server over standard input and output. Agents can create, read, edit, delete and comment on artifacts; **they cannot change journey membership or access**. Read-only agents cannot write artifacts. A participating agent may change project purpose/state, even when read-only; this never grants artifact, comment, placement or upload permission.
+The `wayfinding` command gives an agent access to one encrypted journey after a person approves it. It also runs a Model Context Protocol (MCP) server over standard input and output. Authenticated member agents have exactly their adding person's live capabilities (D45), including content, guide controls and private access. They sign as themselves. Old stored agent scopes are accepted and ignored. A read-only person and their agents cannot write content; project participation permits metadata changes, not content-write elevation.
 
 ## Install
 
@@ -50,7 +50,7 @@ Without `--remember`, the one-shot `connect` command does not save keys. It clos
 ### Connect when each command runs in a fresh process
 
 ```sh
-wayfinding connect YOUR_JOURNEY_ID --scope read --name "Research assistant" --state "$HOME/wayfinding-agent.json" --no-wait
+wayfinding connect YOUR_JOURNEY_ID --name "Research assistant" --state "$HOME/wayfinding-agent.json" --no-wait
 # Open the printed link in a browser and approve after checking the six-digit code.
 wayfinding connect --state "$HOME/wayfinding-agent.json" --wait --timeout 600
 wayfinding list --state "$HOME/wayfinding-agent.json"
@@ -95,7 +95,7 @@ Files are explicit regular local paths, not symlinks or remote URLs. Each versio
 
 Artifact IDs stay stable. Every edit requires the observed predecessor version; stale edits fail with a conflict. Title, content, tags and attachments form a complete version. Omit files to retain existing attachments; MCP can supply a replacement `files` list (including `[]`). Any currently read-write member can edit or delete, not only the creator. Signed controls fix the original author and record the actual version writer. `show` includes versions and whole-artifact comments; comments optionally cite a version (`comment --version VERSION` or MCP `onVersion`). Deletion hides all versions/comments/downloads but retains signed and encrypted metadata history. This is not secure erasure; downloaded copies cannot be recalled.
 
-Each read checks the full signed journey controls and their encrypted labels. Before a write, the client checks them again and uses the compiled Bend access rules. An agent's effective access follows the adding person's current role, limited by its original approval: a read-write agent loses writes while its person is read-only, and a read-only agent never gains writes. `status` reports that current effective access. Removing the person ends their agents' access. The client also checks the required version before encrypting an item or comment locally. Server requests are signed with the method, path and query, body digest, timestamp, and fresh nonce. If access ends, the client says so and stops. Decrypted items remain in memory for the process lifetime; keys are also stored in a file only when you explicitly use `--state`.
+Each read checks the full signed journey controls and their encrypted labels. Before a write, the client checks them again and uses the compiled Bend access rules. An agent's effective access equals the adding person's current role and guide authority. Old approval scopes do not cap it. `status` reports that current effective access. Removing the person ends their agents' access. The client also checks the required version before encrypting an item or comment locally. Server requests are signed with the method, path and query, body digest, timestamp, and fresh nonce. If access ends, the client says so and stops. Decrypted items remain in memory for the process lifetime; keys are also stored in a file only when you explicitly use `--state`.
 
 Stage 1 requires client 0.1.5 and the `artifact-v1` capability. Older clients must update. If the required minimum rises or an unsupported control appears, CLI and MCP stop before returning content or writing. Run `npm install -g @ai-wayfinding/client@latest`, then retry with the same connection; do not request approval again. Legacy journeys were purged by server schema v2, not migrated. A live agent link shows current signed journey settings and remains read-only; its server must be updated if it cannot understand the controls.
 
@@ -118,9 +118,9 @@ wayfinding list --project <project-id> --type document --tag resource
 wayfinding search "question" --project all --type document --tag resource
 ```
 
-`project list` includes empty and archived projects. `project show` returns purpose, state, revision, signed history, person participation records and effective participants (including live agents). Creation requires ordinary content-write access, starts `getting-started` and joins nobody. People join or leave themselves in the browser. Agent `join` and `leave` only explain inherited participation; they post no action. An agent follows its adding person, including when added after that person joined. Leaving or removal ends that inherited participation.
+`project list` includes empty and archived projects. `project show` returns purpose, state, revision, signed history, person participation records and effective participants (including live agents). Creation requires ordinary content-write access, starts `getting-started` and joins nobody. People and their agents may sign join/leave actions for the person's participation. Agent `join` and `leave` post those signed actions, preserving the agent as actor. An agent follows its adding person, including when added after that person joined. Leaving or removal ends that inherited participation.
 
-Participating agents may edit purpose/state under their person's participation, regardless of read-only approval or role. States are `getting-started`, `active`, `looking-for-others` and `archived`. Set another explicit state to reopen. Archives remain readable. Archive is a state label, not a content-write freeze: current content-write authority still permits artifacts, comments and placement. Metadata permission never permits artifact creation/edit/deletion, comments, placement or blob uploads. A key update blocks ordinary writes, not authorized project metadata.
+Participating agents may edit purpose/state under their person's participation, regardless of the person's content role; stored agent approval scopes are ignored. States are `getting-started`, `active`, `looking-for-others` and `archived`. Set another explicit state to reopen. Archives remain readable. Archive is a state label, not a content-write freeze: current content-write authority still permits artifacts, comments and placement. Metadata permission never permits artifact creation/edit/deletion, comments, placement or blob uploads. A key update blocks ordinary writes, not authorized project metadata.
 
 For purpose/state use the `revision` observed in `project show`; for placement use `placementRevision` from `show`, initially `null`. These are signed proof sequence numbers, not artifact version IDs. A stale edit conflicts: reread and decide again. Placement requires current content-write access even without project participation. It assigns, moves or clears one project pointer without changing the artifact's author, content version or attachments.
 
@@ -162,7 +162,9 @@ For Claude Desktop, after completing the two-step file-backed connection above, 
 
 The earlier `--connect` example instead asks for approval when MCP starts. For Claude Code, use `claude mcp add wayfinding -- wayfinding mcp --connect YOUR_JOURNEY_ID`. For Codex, use `codex mcp add wayfinding -- wayfinding mcp --connect YOUR_JOURNEY_ID`. Use the absolute path to the built `cli.js` with `node` if `wayfinding` is not on the host's PATH. When the MCP process begins, the person sees the link and code in the host's standard-error log; approve it before the MCP connection finishes. Some hosts hide stderr: run `wayfinding connect <journey-id> --remember` in a terminal first, then configure `wayfinding mcp` without `--connect`.
 
-The person manages other members and any key rotation in the browser. An agent cannot approve itself, change someone's scope, add or remove members, or rotate journey keys. If the person previously rotated the journey key, the current approval API may not provide this agent the old epoch wraps needed to verify *all* earlier history; this client stops with a missing-key message rather than writing without verification.
+The server/core authorize member and guide controls through the agent's live adding person. Authenticated agents receive every historical epoch wrap at admission, just like people. They never impersonate a person's signature. The current CLI/MCP provides content, project and private-vault APIs; it does not yet expose every guide/account workflow as a command. This is a missing interface, not an agent-only authorization ban.
+
+`JourneyClient.openPrivateVault()` uses the person's vault with the agent's own keys and encrypted content-key wrap. The agent may initialize, create, edit and sign private content when its person can; private author/writer attribution stays the actual agent. The person and sibling authenticated agents share that vault. URL link credentials are excluded.
 
 ## Agent link (fallback)
 

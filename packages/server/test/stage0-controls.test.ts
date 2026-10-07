@@ -94,7 +94,7 @@ describe('verified Stage 0 controls (Worker and SQLite seam)', () => {
     const { owner, j } = await fixture();
     const keys = [j.key];
     for (const epoch of [2, 3]) {
-      const removed = await addAgent(j, owner);
+      const removed = await addAgent(j, owner, 'read', false, keys);
       expect((await change(j, owner, 'member.remove', { member: removed.principal })).status).toBe(201);
       const members = (await state(j)).members;
       const key = generateJourneyKey(epoch);
@@ -134,7 +134,7 @@ describe('verified Stage 0 controls (Worker and SQLite seam)', () => {
     for (const w of stored.wraps) expect((await unwrapJourneyKey({ epoch: w.epoch, recipient: member.id, ciphertext: w.wrap }, guest.age.identity)).key).toEqual(keys[w.epoch - 1]!.key);
     if (support) expect((await request(`/v1/journeys/${j.id}/seq`, 'POST', {}, as(guest))).status).toBe(403);
 
-    const agent = await agentRequest(j, owner);
+    const agent = await agentRequest(j, owner, 'read', false, keys);
     const extraHistory = await wraps(j, [agent.member], keys[0]!);
     const beforeAgent = await snapshot(j);
     const rejectedAgent = await enclaveStub(j.id).fetch(new Request('https://internal', { method: 'POST', body: JSON.stringify({ op: 'controlWrite', journeyId: j.id, subject: { principal: owner.principal, accountHash: ownerHash, clientVersion: '0.1.4', controlFormat: 'control-proof-v1' }, control: agent.approval.control, admission: { id: agent.principal, kind: 'agent', recipient: agent.member.recipient, signingKey: agent.member.signingKey, scope: 'read', expiresAt: agent.expiresAt }, wraps: [...extraHistory, { principal: agent.principal, epoch: 3, wrap: agent.approval.wrap }] }) }));
@@ -142,8 +142,9 @@ describe('verified Stage 0 controls (Worker and SQLite seam)', () => {
     expect(await snapshot(j)).toBe(beforeAgent);
     expect((await request(`/v1/agent-sessions/${agent.id}/approve`, 'POST', agent.approval, as(owner))).status).toBe(200);
     const path = `/v1/journeys/${j.id}/wraps/me`;
-    const agentWraps = await (await request(path, 'GET', undefined, await agentHeaders(agent, 'GET', path))).json() as { wraps: { epoch: number }[] };
-    expect(agentWraps.wraps.map(w => w.epoch)).toEqual([3]);
+    const agentWraps = await (await request(path, 'GET', undefined, await agentHeaders(agent, 'GET', path))).json() as { wraps: { epoch: number; wrap: string }[] };
+    expect(agentWraps.wraps.map(w => w.epoch)).toEqual([1, 2, 3]);
+    for (const w of agentWraps.wraps) expect((await unwrapJourneyKey({ epoch: w.epoch, recipient: agent.principal, ciphertext: w.wrap }, agent.age.identity)).key).toEqual(keys[w.epoch - 1]!.key);
   });
   it('purges only legacy journey data on schema upgrade; no migration or caller history trust', async () => {
     const { owner, j } = await fixture();

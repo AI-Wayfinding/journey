@@ -34,12 +34,20 @@ it('delivers only verified own agents at approval and backfill without delegatin
   });
   vi.stubGlobal('fetch', fetcher);
   try {
-    const controller = { agentContentIdentity: content.identity } as PrivateVault;
+    const controller = { retainedCheckpoint: { version: 1 }, agentContentIdentity: content.identity } as PrivateVault;
     await deliverJourneyVaultWraps(ctx, controller); await deliverJourneyVaultWraps(ctx, controller);
     expect(deliveries).toHaveLength(2);
     const author = privateIdentity(creator), vault = await memberVaultId(journey, person, author.signingKey, author.recipient);
     for (const ciphertext of deliveries) expect(await openVaultAgentWrap(ciphertext, { journey, person, agent: own.member.id, vault, author, recipient: privateIdentity(own.member) }, own.age.identity)).toBe(content.identity);
     expect(fetcher.mock.calls.filter(([, init]) => init?.method === 'PUT').map(([url]) => String(url))).toEqual(Array(2).fill(`/v1/journeys/${journey}/private-agent-wrap/${own.member.id}`));
+  } finally { vi.unstubAllGlobals(); }
+});
+it('does not demand a key wrap from an uninitialized read-only vault during agent approval', async () => {
+  const fetcher = vi.fn(); vi.stubGlobal('fetch', fetcher);
+  try {
+    const controller = { retainedCheckpoint: undefined, get agentContentIdentity(): string { throw Error('No initialized content key'); } } as PrivateVault;
+    await deliverJourneyVaultWraps({} as JourneyContext, controller);
+    expect(fetcher).not.toHaveBeenCalled();
   } finally { vi.unstubAllGlobals(); }
 });
 describe('browser encrypted member cache', () => {

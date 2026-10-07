@@ -10,7 +10,7 @@ const headers = { 'X-Client-Version': '0.1.7', 'X-Control-Format': 'control-proo
 const request = (path: string, auth: Record<string, string>, body?: Uint8Array) => worker.fetch(new Request('https://app.wayfinding.support' + path, { method: body ? 'PUT' : 'GET', headers: { ...headers, ...auth, Origin: 'https://app.wayfinding.support', 'X-Wayfinding': '1', 'Content-Type': 'application/octet-stream' }, ...(body ? { body: Uint8Array.from(body) } : {}) }), { ...env, RP_ID: 'app.wayfinding.support', ORIGIN: 'https://app.wayfinding.support', EMAIL_HASH_KEY: 'test-key' } as Env);
 
 describe('dedicated fixed ciphertext member vault in workerd SQLite', () => {
-  it('stores only encrypted own-agent wraps, fetches only to that agent, and deletes on removal and expiry', async () => {
+  it('stores only encrypted same-person agent wraps and deletes on removal and expiry', async () => {
     const { owner, j } = await fixture(), own = await addAgent(j, owner, 'readwrite'), guest = await addPerson(j, owner), foreign = await addAgent(j, guest, 'readwrite'), link = await addAgent(j, owner, 'read', true);
     const path = (id: string) => `/v1/journeys/${j.id}/private-agent-wrap/${id}`;
     const secret = (await createAgeIdentity()).identity, ciphertext = await sealIdentity(secret, [own.age.recipient]);
@@ -23,7 +23,7 @@ describe('dedicated fixed ciphertext member vault in workerd SQLite', () => {
     expect((await jsonRequest(path(foreign.principal), 'PUT', { ciphertext }, as(owner))).status).toBe(403);
     expect((await jsonRequest(path(link.principal), 'PUT', { ciphertext }, as(owner))).status).toBe(403);
     expect((await jsonRequest(path(own.principal), 'PUT', { ciphertext }, as(owner))).status).toBe(200);
-    expect((await request(path(own.principal), as(owner))).status).toBe(403);
+    expect((await request(path(own.principal), as(owner))).status).toBe(200);
     expect((await request(path(own.principal), as(guest))).status).toBe(403);
     expect((await request(path(own.principal), await agentHeaders(foreign, 'GET', path(own.principal)))).status).toBe(403);
     expect((await request(path(own.principal), await agentHeaders(link, 'GET', path(own.principal)))).status).toBe(403);
@@ -107,7 +107,7 @@ describe('dedicated fixed ciphertext member vault in workerd SQLite', () => {
     }
     expect(await runInDurableObject(vault(j.id, owner.principal), (_o, s) => s.storage.sql.exec('SELECT id,hex(substr(ciphertext,1,32)) AS fingerprint FROM slots ORDER BY id').toArray())).toEqual(before);
   });
-  it('routes own authenticated write-agent commits to the initialised person vault, denying initialisation, read-only, removed, foreign and link agents', async () => {
+  it('routes every same-person agent commit to the person vault and denies live read-only, removed, foreign and link agents', async () => {
     const { owner, j } = await fixture(), agent = await addAgent(j, owner, 'readwrite');
     expect((await change(j, owner, 'client.minVersion', { version: '0.1.7' })).status).toBe(201);
     const path = `/v1/journeys/${j.id}/private-vault?slots=00,01`, putPath = `/v1/journeys/${j.id}/private-vault`;
@@ -125,15 +125,25 @@ describe('dedicated fixed ciphertext member vault in workerd SQLite', () => {
       const signature = base64url(new Uint8Array(await crypto.subtle.sign('Ed25519', await importSigningKey(actor.signing.privateKey), new TextEncoder().encode(['PUT', putPath, hash, timestamp, nonce].join('\n')))));
       return request(putPath, { 'X-Agent-Session': actor.id, 'X-Agent-Timestamp': timestamp, 'X-Agent-Nonce': nonce, 'X-Agent-Signature': signature }, bytes);
     };
-    expect((await write(agent, own.token)).status).toBe(403);
-    expect(await read(as(owner))).toEqual(own);
-    expect((await request(putPath, as(owner), encodeVaultPatch(patch))).status).toBe(200);
+    expect((await write(agent, own.token)).status).toBe(200);
+    const first = await read(as(owner));
+    expect(first.frame).toBe(patch.frame);
+    expect(first.token).not.toBe(own.token);
+    expect((await request(putPath, as(owner), encodeVaultPatch({ ...patch, token: first.token }))).status).toBe(200);
     const initial = await read(as(owner));
     expect((await write(agent, initial.token)).status).toBe(200);
-    const committed = await read(as(owner)); expect(committed.frame).toBe(patch.frame); expect(committed.slots).toEqual(patch.slots); expect(committed.token).not.toBe(initial.token);
+    let committed = await read(as(owner)); expect(committed.frame).toBe(patch.frame); expect(committed.slots).toEqual(patch.slots); expect(committed.token).not.toBe(initial.token);
     const readonly = await addAgent(j, owner, 'read');
-    expect((await write(readonly, committed.token)).status).toBe(403);
+    expect((await write(readonly, committed.token)).status).toBe(200);
+    const siblingCommit = await read(as(owner));
+    expect(siblingCommit.token).not.toBe(committed.token);
+    expect(siblingCommit.frame).toBe(patch.frame);
+    committed = siblingCommit;
+    expect((await change(j, owner, 'member.role', { member: owner.principal, role: 'read-only' })).status).toBe(201);
+    for (const actor of [agent, readonly]) expect((await write(actor, committed.token)).status).toBe(403);
+    expect((await request(putPath, as(owner), encodeVaultPatch({ ...patch, token: committed.token }))).status).toBe(403);
     expect(await read(as(owner))).toEqual(committed);
+    expect((await change(j, owner, 'member.role', { member: owner.principal, role: 'read-write' })).status).toBe(201);
     expect(await read(await agentHeaders(agent, 'GET', path))).toEqual(committed);
     const foreign = await fixture(), foreignAgent = await addAgent(foreign.j, foreign.owner, 'readwrite');
     expect((await request(path, await agentHeaders(foreignAgent, 'GET', path))).status).toBe(403);
@@ -144,7 +154,7 @@ describe('dedicated fixed ciphertext member vault in workerd SQLite', () => {
     const link = await addAgent(j, owner, 'read', true);
     expect((await request(path, await agentHeaders(link, 'GET', path))).status).toBe(403);
     expect(await read(as(owner))).toEqual(committed);
-    expect((await write(guestAgent, committed.token)).status).toBe(403); // guest vault is uninitialised, never owner's
+    expect((await write(guestAgent, committed.token)).status).toBe(409); // CAS belongs to guest vault, never owner's
     expect((await write(foreignAgent, committed.token)).status).toBe(403);
     expect((await write(link, committed.token)).status).toBe(403);
     expect((await change(j, owner, 'member.remove', { member: agent.principal })).status).toBe(201);

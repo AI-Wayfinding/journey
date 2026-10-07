@@ -7,7 +7,7 @@ it('hands personal removal to a remaining read-only guide for rotation, excludin
   log = await append(log, guide, 'member.add', { member: outsider.member, grants: [], kind: 'person' });
   log = await append(log, owner, 'member.add', { member: bot.member, grants: [], kind: 'agent' });
   await rejected(await append(log, outsider, 'member.remove', { member: bot.member.id }));
-  await rejected(await append(log, bot, 'member.remove', { member: bot.member.id }));
+  expect((await state(await append(log, bot, 'member.remove', { member: bot.member.id }))).members[bot.member.id]).toBeUndefined();
   await rejected(await append(log, guide, 'member.remove', { member: guide.member.id }), 'last-holder');
   log = await append(log, guide, 'member.role', { member: guide.member.id, role: 'read-only' });
   log.push(await removeMemberEntry(await state(log), bot.member.id, owner.member.id, owner.key));

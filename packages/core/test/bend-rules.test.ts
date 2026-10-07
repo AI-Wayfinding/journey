@@ -34,7 +34,7 @@ describe('production Bend transitions and adapters', () => {
     expect(canControl(current, 'person', 'Rotate')).toBe(false);
   });
 
-  it('rechecks the adding person and original agent limit after a role change', () => {
+  it('rechecks the live adding person and ignores historical agent limits', () => {
     const current = state();
     expect(effectiveScope(current, 'agent')).toBe('read');
     expect(canWriteContent(current, 'agent')).toBe(false);
@@ -47,7 +47,7 @@ describe('production Bend transitions and adapters', () => {
     expect(current.members.person!.profile).toEqual({ name: 'Person' });
     expect(current.members.person!.member.scope).toBe('readwrite');
     expect(canWriteContent(current, 'agent')).toBe(true);
-    expect(canWriteContent(current, 'reader')).toBe(false);
+    expect(canWriteContent(current, 'reader')).toBe(true);
     current.members.person!.member.expiresAt = '2000-01-01T00:00:00.000Z';
     expect(canReadContent(current, 'agent')).toBe(false);
     delete current.members.person;

@@ -57,7 +57,7 @@ test('stored projects: explicit participation, inherited new agents, read-only m
     await expect(guest.page.locator('#project-history')).toContainText(guestId);
     const agent = await requestAgent(request, trip.id, 'Following agent');
     await guest.page.goto(new URL(agent.approvalUrl).pathname); await guest.page.getByLabel('Six-digit code').fill(agent.code);
-    await guest.page.getByLabel('Access', { exact: true }).selectOption('read'); await guest.page.getByRole('button', { name: 'Confirm with passkey' }).click();
+    await expect(guest.page.getByLabel('Access', { exact: true })).toHaveCount(0); await guest.page.getByRole('button', { name: 'Confirm with passkey' }).click();
     await expect(guest.page.getByRole('heading', { name: 'Agent approved' })).toBeVisible();
     await guest.page.goto(project.path); await guest.page.reload();
     await expect(guest.page.locator('#project-participants')).toContainText('Following agent');

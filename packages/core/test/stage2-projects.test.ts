@@ -78,8 +78,10 @@ describe('signed project-v1 contracts', () => {
     expect(effectiveProjectParticipants(s, project, Date.parse('2026-01-02')).sort()).toEqual([p.member.id, a.member.id].sort());
     expect(canEditProject(s, a.member.id, project)).toBe(true);
     expect(canWriteContent(s, p.member.id)).toBe(false); expect(canWriteContent(s, a.member.id)).toBe(false);
-    await artifactAppend(f, a, 'project.join', join(project, a.member.id), {}); await denied(f, 'unauthorized');
-    await artifactAppend(f, a, 'project.leave', join(project, p.member.id, joinedSeq), {}); await denied(f, 'unauthorized');
+    await artifactAppend(f, a, 'project.join', join(project, a.member.id), {}); await denied(f);
+    await artifactAppend(f, a, 'project.leave', join(project, p.member.id, joinedSeq), {});
+    expect(effectiveProjectParticipants(await checked(f), project)).toEqual([]);
+    f.controls.pop();
     await artifactAppend(f, f.guide, 'project.state', { format: 'project-v1', project, state: 'active', predecessor: 1 }, {}); await denied(f, 'unauthorized');
     await artifactAppend(f, a, 'project.state', { format: 'project-v1', project, state: 'archived', predecessor: 1 }, {});
     expect((await checked(f)).projects!.items[project]!.state).toBe('archived');

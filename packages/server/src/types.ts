@@ -5,7 +5,7 @@ export type Scope = 'read' | 'readwrite';
 export interface Principal { id: string; kind: Kind; scope: Scope; expiresAt?: number; accountHash?: string }
 export interface EpochWrap { principal: string; epoch: number; wrap: string }
 export interface ControlInput { proof: ControlProof; envelope: Envelope }
-export interface Admission { id: string; kind: Kind; recipient: string; signingKey: string; accountHash?: string; support?: boolean; scope?: Scope; expiresAt?: number }
+export interface Admission { id: string; kind: Kind; recipient: string; signingKey: string; accountHash?: string; support?: boolean; scope?: Scope; expiresAt?: number; link?: boolean }
 export interface CreateJourney { id: string; name: string; creatorEmail: string; creatorHash: string; creator: Principal; control: ControlInput; wraps: EpochWrap[]; recoveryWrap: string; minClientVersion: string; clientVersion?: string; controlFormat?: string; artifactFormat?: string; projectFormat?: string; privateFormat?: string }
 export interface RecordInput { envelope: Envelope }
 export type ErrorCode = 'invalid-request' | 'unauthorized' | 'forbidden' | 'csrf' | 'not-found' | 'conflict' | 'old-epoch' | 'rate-limited' | 'too-large' | 'internal';

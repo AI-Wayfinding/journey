@@ -50,6 +50,9 @@ import { sealVaultAgentWrap, privateAgentAudience } from '@ai-wayfinding/core';
 
 /** Every open backfills only verified own agents with authenticated credentials. */
 export async function deliverJourneyVaultWraps(ctx: JourneyContext, controller: PrivateVault): Promise<void> {
+  // An empty read-only vault has no content key yet. Approval still succeeds;
+  // the first authorized initialization backfills the person's agents on open.
+  if (!controller.retainedCheckpoint) return;
   const context = await verifyPrivateContext({ journey: ctx.id, creator: ctx.controls[0]!.proof.body.creator as Member, controls: ctx.controls }, { now: Date.now(), currentHead: ctx.state.lastHash! });
   const author = privateIdentity(ctx.state.members[ctx.principal]!.member);
   const vault = await memberVaultId(ctx.id, ctx.principal, author.signingKey, author.recipient);

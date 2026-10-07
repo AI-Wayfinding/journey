@@ -28,7 +28,7 @@ export async function mcp(file: string): Promise<Client> {
   return sdk;
 }
 export async function approvedMcp(owner: Owner, trip: Fixture): Promise<Client> {
-  const transport = new StdioClientTransport({ command: process.execPath, args: [cli, 'mcp', '--connect', trip.id, '--server', server, '--scope', 'readwrite', '--name', 'Stage 1 MCP'], stderr: 'pipe' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [cli, 'mcp', '--connect', trip.id, '--server', server, '--name', 'Stage 1 MCP'], stderr: 'pipe' });
   let approval: Promise<void> | undefined, output = '';
   transport.stderr?.on('data', (chunk: Buffer) => {
     output += chunk.toString();

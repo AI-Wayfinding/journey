@@ -34,7 +34,7 @@ describe('private-v1 verified audience and records', () => {
     expect(privateAccess(f.context, f.identity, f.session, true)).toBe(true);
     const guide = await privatePersonSession(f.context, privateIdentity(f.f.guide.member), f.f.guide.key, f.f.guide.identity);
     expect(privateAccess(f.context, f.identity, guide)).toBe(false);
-    for (const [actor, write] of [[f.reader, false], [f.writer, true]] as const) {
+    for (const [actor, write] of [[f.reader, true], [f.writer, true]] as const) {
       const challenge = await createPrivateChallenge(f.context, f.session, privateIdentity(actor.member));
       const answer = await answerPrivateChallenge(challenge, actor.key, actor.identity);
       const session = await authenticatePrivateAgent(challenge, answer, 'authenticated');
@@ -55,11 +55,40 @@ describe('private-v1 verified audience and records', () => {
     expect(privateAccess(f.context, f.identity, { identity: f.identity, binding: f.session.binding })).toBe(false);
     await expect(privatePersonSession(f.context, { ...f.identity, recipient: f.foreign.member.recipient }, f.author.key, f.foreign.identity)).rejects.toThrow('admission');
   });
-  it('keeps an agent as its own author without granting its adding person access', async () => {
-    const f = await privateFixture(), identity = privateIdentity(f.writer.member), session = await privateAgentSession(f.context, identity, f.writer.key, f.writer.identity, 'authenticated');
+  it('keeps agent authors and sibling writers in their verified person vault', async () => {
+    const f = await privateFixture(), identity = privateIdentity(f.writer.member);
+    const writer = await privateAgentSession(f.context, identity, f.writer.key, f.writer.identity, 'authenticated');
+    const reader = await privateAgentSession(f.context, privateIdentity(f.reader.member), f.reader.key, f.reader.identity, 'authenticated');
+    const foreign = await privateAgentSession(f.context, privateIdentity(f.foreign.member), f.foreign.key, f.foreign.identity, 'authenticated');
     const r = await record(f.context, f.writer, f.vault, f.copy, f.artifact, identity);
-    const view = await verifyPrivateRecords([r.record], [r.payload], [f.context], { vault: f.vault, author: identity }, { sessions: [session] });
-    expect(privateCopies(view)[0]!.author).toEqual(identity); expect(privateAccess(f.context, identity, f.session)).toBe(false);
+    const edit = await record(f.context, f.reader, f.vault, f.copy, f.artifact, identity, 'private.version', [r.record], content('Sibling edit'));
+    const comment = await record(f.context, f.author, f.vault, f.copy, f.artifact, identity, 'private.comment', [r.record, edit.record], { type: 'artifact.comment-content', typeVersion: 1, body: { text: 'Parent comment' } });
+    const records = [r.record, edit.record, comment.record], payloads = [r.payload, edit.payload, comment.payload];
+    const trust = { vault: f.vault, author: f.identity }, options = { sessions: [writer, reader, f.session] };
+    const view = await verifyPrivateRecords(records, payloads, [f.context], trust, options);
+    const copy = privateCopies(view)[0]!;
+    expect(copy.author).toEqual(identity); expect(copy.records[1]!.actor).toEqual(reader.identity);
+    expect(copy.records[1]!.sig).toBe(edit.record.sig);
+    for (const session of [writer, reader, f.session]) {
+      expect(privateAccess(f.context, identity, session, true)).toBe(true);
+      expect(selectPrivateCopies(view, f.context, session, 'all')).toHaveLength(1);
+    }
+    expect(selectPrivateCopies(view, f.context, foreign, 'all')).toEqual([]);
+    const forged = await record(f.context, f.writer, f.vault, newPrivateId(), newPrivateId(), foreign.identity);
+    await expect(verifyPrivateRecords([forged.record], [forged.payload], [f.context], trust, options)).rejects.toThrow('author/vault');
+    await expect(verifyPrivateRecords([r.record], [r.payload], [f.context], { vault: f.vault, author: identity }, options)).rejects.toThrow('author/vault');
+    const deletion = await record(f.context, f.reader, f.vault, f.copy, f.artifact, identity, 'private.delete', records, marker());
+    expect(privateCopies(await verifyPrivateRecords([...records, deletion.record], [...payloads, deletion.payload], [f.context], trust, options))[0]!.deleted).toBe(true);
+    await artifactAppend(f.f, f.f.guide, 'member.role', { member: f.author.member.id, role: 'read-only' });
+    const readonly = await contextFor(f.f), readonlyWriter = await privateAgentSession(readonly, identity, f.writer.key, f.writer.identity, 'authenticated');
+    expect(privateAccess(readonly, identity, readonlyWriter)).toBe(true);
+    expect(privateAccess(readonly, identity, readonlyWriter, true)).toBe(false);
+    const denied = await record(readonly, f.writer, f.vault, newPrivateId(), newPrivateId(), identity);
+    await expect(verifyPrivateRecords([denied.record], [denied.payload], [readonly], trust, { sessions: [readonlyWriter] })).rejects.toThrow('denied');
+    await artifactAppend(f.f, f.f.guide, 'member.remove', { member: f.author.member.id });
+    const removed = await contextFor(f.f);
+    expect(privateAccess(removed, identity, writer)).toBe(false);
+    await expect(privateAgentSession(removed, identity, f.writer.key, f.writer.identity, 'authenticated')).rejects.toThrow('admission');
   });
   it('attributes actual writers and refuses stale, immutable-author, type, signature, index and payload attacks atomically', async () => {
     const f = await privateFixture(), c = await created(f), writer = await privateAgentSession(f.context, privateIdentity(f.writer.member), f.writer.key, f.writer.identity, 'authenticated');
@@ -137,8 +166,10 @@ describe('fixed private header, schedule and fork contracts', () => {
     expect(checked.header.author).toEqual(f.identity); expect(checked.header.writer).toEqual(privateIdentity(f.writer.member)); expect(checked.checkpoint.version).toBe(2);
     const next = await header(f, 3, checked.checkpoint.head);
     expect((await verifyPrivateHeader(next, trust, { checkpoint: checked.checkpoint, contentsHash: next.contentsHash })).checkpoint.version).toBe(3);
-    for (const actor of [f.foreign, f.reader]) await expect(verifyPrivateHeader(await signed(actor), trust, { contentsHash: own.contentsHash, contexts: [f.context] })).rejects.toThrow('authority');
-    await expect(verifyPrivateHeader(await signed(f.writer, f.context, 1), trust, { contentsHash: own.contentsHash, contexts: [f.context] })).rejects.toThrow('authority');
+    for (const actor of [f.foreign]) await expect(verifyPrivateHeader(await signed(actor), trust, { contentsHash: own.contentsHash, contexts: [f.context] })).rejects.toThrow('authority');
+    const initialized = await signPrivateHeader({ format: first.format, v: 1, vault: f.vault, author: f.identity, version: 1, prev: null, contentsHash: first.contentsHash, slots: first.slots, writer: privateIdentity(f.writer.member), authority: privateAuthority(f.context, privateIdentity(f.writer.member)) }, f.writer.key);
+    expect((await verifyPrivateHeader(initialized, trust, { contentsHash: first.contentsHash, contexts: [f.context] })).checkpoint.version).toBe(1);
+    await expect(verifyPrivateHeader(await signed(f.writer, f.context, 1), trust, { contentsHash: own.contentsHash, contexts: [f.context] })).rejects.toThrow('predecessor');
     await expect(verifyPrivateHeader({ ...own, vault: newPrivateId() }, trust, { contentsHash: own.contentsHash, contexts: [f.context] })).rejects.toThrow('binding');
     await expect(verifyPrivateHeader({ ...own, sig: first.sig }, trust, { contentsHash: own.contentsHash, contexts: [f.context] })).rejects.toThrow('signature');
     await expect(verifyPrivateHeader(own, trust, { contentsHash: own.contentsHash })).rejects.toThrow('authority');

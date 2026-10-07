@@ -5,7 +5,7 @@ import { agentWritesItem, requestAgent } from './agent.js';
 
 import { browserPerson, signUp } from './person.js';
 const calls = (page: Page) => page.evaluate(() => window.__passkeyCalls);
-const journeyHeaders = { 'X-Client-Version': '0.1.7', 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': 'artifact-v1', 'X-Project-Format': 'project-v1' };
+const journeyHeaders = { 'X-Client-Version': '0.1.7', 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': 'artifact-v1', 'X-Project-Format': 'project-v1', 'X-Private-Format': 'private-v1' };
 test('account name and per-journey email visibility are shared only when chosen', async ({ browser }) => {
   const owner = await browserPerson(browser), guest = await browserPerson(browser);
   try {
@@ -301,7 +301,7 @@ test('two people share a journey with PRF passkeys and same-origin assets', asyn
     await expect(alice.page.getByLabel('Name', { exact: true })).toHaveValue('Proposed <guide>');
     await alice.page.getByLabel('Name', { exact: true }).fill('Alice’s guide');
     await alice.page.getByLabel('Six-digit code').fill(agent.code);
-    await alice.page.getByLabel('Access').selectOption('readwrite');
+    await expect(alice.page.getByLabel('Access', { exact: true })).toHaveCount(0);
     await alice.page.getByRole('button', { name: 'Confirm with passkey' }).click();
     await expect(alice.page.getByRole('heading', { name: 'Agent approved' })).toBeVisible();
     await agentWritesItem(request, agent, journeyPath.split('/').at(-1)!);

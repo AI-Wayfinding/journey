@@ -40,7 +40,7 @@ async function renameMember(state: LogState, body: JsonObject, actor: string, at
 async function setProfile(state: LogState, body: JsonObject, actor: string, at?: string): Promise<EffectError | null> {
   const denied = control(state, body, actor, 'Profile', body.id as string, undefined, false, undefined, at);
   if (denied) return denied;
-  state.members[actor]!.profile = { name: body.name as string, ...(body.email === undefined ? {} : { email: body.email as string }) };
+  state.members[body.id as string]!.profile = { name: body.name as string, ...(body.email === undefined ? {} : { email: body.email as string }) };
   return null;
 }
 async function removeMember(state: LogState, body: JsonObject, actor: string, at?: string): Promise<EffectError | null> {
@@ -135,7 +135,7 @@ const shape = (body: Record<string, unknown>, required: string[], allowed: strin
 function validMember(value: unknown): value is Member {
   if (!object(value) || !shape(value, ['id', 'recipient', 'signingKey', 'kind'], ['id', 'recipient', 'signingKey', 'kind', 'name', 'scope', 'addedBy', 'expiresAt', 'support'])) return false;
   if (!isId(value.id) || !str(value.recipient) || !str(value.signingKey)) return false;
-  return value.kind === 'person' ? value.name === undefined && value.addedBy === undefined && (value.support === true ? value.scope === 'read' && typeof value.expiresAt === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(value.expiresAt) && Number.isFinite(Date.parse(value.expiresAt)) : value.support === undefined && value.scope === undefined && (value.expiresAt === undefined || str(value.expiresAt))) : value.kind === 'agent' && value.support === undefined && (value.name === undefined || validAgentName(value.name)) && (value.scope === 'read' || value.scope === 'readwrite') && str(value.addedBy) && (value.expiresAt === undefined || str(value.expiresAt));
+  return value.kind === 'person' ? value.name === undefined && value.addedBy === undefined && (value.support === true ? value.scope === 'read' && typeof value.expiresAt === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(value.expiresAt) && Number.isFinite(Date.parse(value.expiresAt)) : value.support === undefined && value.scope === undefined && (value.expiresAt === undefined || str(value.expiresAt))) : value.kind === 'agent' && value.support === undefined && (value.name === undefined || validAgentName(value.name)) && (value.scope === undefined || value.scope === 'read' || value.scope === 'readwrite') && str(value.addedBy) && (value.expiresAt === undefined || str(value.expiresAt));
 }
 const grants = (value: unknown): value is Grant[] => Array.isArray(value) && value.every(v => v === 'members.manage') && new Set(value).size === value.length;
 const memberBody = (body: JsonObject): Validation => shape(body, ['member', 'grants', 'kind']) && validMember(body.member) && body.kind === body.member.kind && grants(body.grants) ? ok : fail('Invalid member.add');

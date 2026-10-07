@@ -45,7 +45,7 @@ export async function addPerson(j: Journey, guide: Person, options: { support?: 
   expect((await submit(j, guide, await proof(j, guide, 'member.add', { member, kind: 'person', grants: options.grants ?? [] }), { wraps: await wraps(j, [member]) })).status).toBe(201);
   return guest;
 }
-export async function agentRequest(j: Journey, owner: Person, scope: 'read' | 'readwrite' = 'read', link = false) {
+export async function agentRequest(j: Journey, owner: Person, scope: 'read' | 'readwrite' = 'read', link = false, keys = [j.key]) {
   const age = await createAgeIdentity(), signing = await createSigningIdentity();
   const started = await request('/v1/agent-sessions', 'POST', { journeyId: j.id, agentPublicKey: { recipient: age.recipient, signingKey: signing.publicKey }, requestedScope: scope, ...(link ? { keyStorage: 'link', remembered: true } : {}) });
   expect(started.status).toBe(201);
@@ -54,11 +54,11 @@ export async function agentRequest(j: Journey, owner: Person, scope: 'read' | 'r
   const expiresAt = Date.now() + 3_600_000;
   const member: Member = { id: principal, recipient: age.recipient, signingKey: signing.publicKey, kind: 'agent', scope, addedBy: owner.principal, expiresAt: new Date(expiresAt).toISOString(), name: 'Bot' };
   const control = await proof(j, owner, 'member.add', { member, kind: 'agent', grants: [] });
-  const approval = { principal: owner.principal, code, scope, expiresAt, wrap: (await wraps(j, [member]))[0]!.wrap, control };
+  const approval = { principal: owner.principal, code, scope, expiresAt, wrap: (await wraps(j, [member]))[0]!.wrap, ...(link ? {} : { wraps: (await Promise.all(keys.map(key => wraps(j, [member], key)))).flat() }), control };
   return { id, principal, age, signing, member, expiresAt, approval };
 }
-export async function addAgent(j: Journey, owner: Person, scope: 'read' | 'readwrite' = 'read', link = false) {
-  const a = await agentRequest(j, owner, scope, link);
+export async function addAgent(j: Journey, owner: Person, scope: 'read' | 'readwrite' = 'read', link = false, keys = [j.key]) {
+  const a = await agentRequest(j, owner, scope, link, keys);
   expect((await request('/v1/agent-sessions/' + a.id + '/approve', 'POST', a.approval, as(owner))).status).toBe(200);
   j.controls.push(a.approval.control);
   return a;

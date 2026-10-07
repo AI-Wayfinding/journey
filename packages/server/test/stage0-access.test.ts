@@ -4,7 +4,7 @@ import { newId, seal, type JsonObject } from '@ai-wayfinding/core';
 import { fixture, as, request, addPerson, addAgent, change, settings, agentHeaders, enclaveStub } from './stage0-fixtures.js';
 
 describe('current Stage 0 content access', () => {
-  it('uses exact D34 limits on every read and write endpoint, independently of guide grants', async () => {
+  it('inherits the live person role on every read and write endpoint, ignoring legacy agent limits', async () => {
     const { owner, j } = await fixture();
     const ro = await addAgent(j, owner, 'read'), rw = await addAgent(j, owner, 'readwrite');
     const reservation = await (await request(`/v1/journeys/${j.id}/seq`, 'POST', {}, as(owner))).json() as { seq: number };
@@ -26,7 +26,7 @@ describe('current Stage 0 content access', () => {
     }
     expect((await change(j, owner, 'member.role', { member: owner.principal, role: 'read-write' })).status).toBe(201);
     const path = `/v1/journeys/${j.id}/seq`;
-    expect((await request(path, 'POST', {}, await agentHeaders(ro, 'POST', path, {}))).status).toBe(403);
+    expect((await request(path, 'POST', {}, await agentHeaders(ro, 'POST', path, {}))).status).toBe(200);
     expect((await request(path, 'POST', {}, await agentHeaders(rw, 'POST', path, {}))).status).toBe(200);
     expect((await request(`/v1/journeys/${j.id}/records`, 'POST', { envelope }, as(owner))).status).toBe(201);
   });

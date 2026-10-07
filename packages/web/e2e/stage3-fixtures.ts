@@ -1,7 +1,7 @@
 import { expect, type BrowserContext, type Page } from '@playwright/test';
 import { build } from 'esbuild';
 import { resolve } from 'node:path';
-import { PrivateVault, decodeVaultWire, privateIdentity, memberVaultId, verifyPrivateHeader, openPrivateFrame, verifyPrivateContext, importSigningKey, privateHash, privateBytesHash } from '@ai-wayfinding/core';
+import { PrivateVault, decodeVaultWire, encodeVaultPatch, openVaultAgentWrap, privateAgentSession, privateAuthority, privateAuthorityHistory, signPrivateRecord, newPrivateId, privateRandomBytes, artifactTypeHash, privateIdentity, memberVaultId, verifyPrivateHeader, openPrivateFrame, verifyPrivateContext, importSigningKey, privateHash, privateBytesHash } from '@ai-wayfinding/core';
 import type { PrivateCheckpoint, PrivateHeader, VaultCacheRecord } from '@ai-wayfinding/core';
 import { headers as previousHeaders, personSecrets } from './stage1-fixtures.js';
 import { verifyControlProofs, unwrapJourneyKey, sealControlLabels, sealProjectPayload, signControlProof, newId } from '@ai-wayfinding/core';
@@ -123,8 +123,12 @@ export async function credentialAgent(page: Page, id: string, keyStorage: 'memor
   const member: Member = { id: agent.principal, kind: 'agent', recipient: age.recipient, signingKey: signing.publicKey, addedBy: c.actor, scope: 'read', expiresAt: new Date(expiresAt).toISOString() };
   const entry = { v: 1 as const, seq: c.state.lastSeq + 1, prev: c.state.lastHash, at: new Date().toISOString(), actor: c.actor, type: 'member.add', body: { member, kind: 'agent', grants: [] } };
   const envelope = await sealControlLabels(entry, { id: newId(), journey: id, seq: entry.seq, epoch: c.key.epoch, createdAt: entry.at }, c.key);
-  const proof = await signControlProof(entry, envelope, id, await importSigningKey(c.secrets.signing)), [wrap] = await core.wrapJourneyKey(c.key, [member]);
-  const approved = await page.request.post('/v1/agent-sessions/' + pending.id + '/approve', { headers: { ...headers, 'X-Wayfinding': '1', Origin: new URL(page.url()).origin }, data: { code: pending.code, principal: c.actor, scope: 'read', expiresAt, wrap: wrap!.ciphertext, control: { proof, envelope } } });
+  const proof = await signControlProof(entry, envelope, id, await importSigningKey(c.secrets.signing));
+  const wraps = await Promise.all((keyStorage === 'link' ? [c.key] : c.keys).map(async key => {
+    const [wrap] = await core.wrapJourneyKey(key, [member]);
+    return { principal: member.id, epoch: key.epoch, wrap: wrap!.ciphertext };
+  }));
+  const approved = await page.request.post('/v1/agent-sessions/' + pending.id + '/approve', { headers: { ...headers, 'X-Wayfinding': '1', Origin: new URL(page.url()).origin }, data: { code: pending.code, principal: c.actor, scope: 'read', expiresAt, ...(keyStorage === 'link' ? { wrap: wraps[0]!.wrap } : { wraps }), control: { proof, envelope } } });
   expect(approved.status(), await approved.text()).toBe(200);
   return { id: pending.id as string, principal: agent.principal as string, identity: age.identity, signingPrivateKey: await importSigningKey(signing.privateKey), expiresAt };
 }
@@ -209,4 +213,31 @@ export async function deterministicVault(page: Page) {
     (window as any).trafficVault = controller; await controller.open();
     controller.start(); return Date.now();
   });
+}
+
+
+/** Real authenticated agent crypto/controller over the same durable person vault. */
+export async function agentCreatesPrivate(page: Page, agent: { id: string; principal: string; identity: string; signingPrivateKey: CryptoKey }, id: string, title: string) {
+  const c = await stored(page, id), author = privateIdentity(c.state.members[c.actor]!.member), actor = privateIdentity(c.state.members[agent.principal]!.member);
+  const context = await verifyPrivateContext({ journey: id, creator: c.rows[0]!.proof.body.creator as Member, controls: c.rows }, { now: Date.now(), currentHead: c.state.lastHash! });
+  const session = await privateAgentSession(context, actor, agent.signingPrivateKey, agent.identity, 'authenticated'), vault = await memberVaultId(id, c.actor, author.signingKey, author.recipient);
+  const wrap = await signedAgent(page, agent, 'GET', `/v1/journeys/${id}/private-agent-wrap/${agent.principal}`);
+  expect(wrap.status()).toBe(200);
+  const contentIdentity = await openVaultAgentWrap((await wrap.json()).ciphertext, { journey: id, person: c.actor, agent: agent.principal, vault, author, recipient: actor }, agent.identity, context);
+  const controller = new PrivateVault({ actor, contentIdentity, trust: { vault, author }, identity: agent.identity, signingKey: agent.signingPrivateKey, contexts: [context], sessions: [session], transport: {
+    read: async indices => {
+      const response = await signedAgent(page, agent, 'GET', `/v1/journeys/${id}/private-vault?slots=${indices === 'all' ? 'all' : indices.map(i => String(i).padStart(2, '0')).join(',')}`);
+      expect(response.status()).toBe(200); const bytes = new Uint8Array(await response.body()); await response.dispose(); return decodeVaultWire(bytes, indices);
+    },
+    commit: async patch => { const response = await signedAgent(page, agent, 'PUT', `/v1/journeys/${id}/private-vault`, encodeVaultPatch(patch)); expect(response.status()).toBe(200); return response.json(); },
+  } });
+  try {
+    await controller.open();
+    const copy = newPrivateId(), payload = { type: 'artifact.content', typeVersion: 1, body: { title, tags: [], content: { kind: 'document', markdown: 'Authored privately by the agent' }, attachments: [] } };
+    const record = await signPrivateRecord({ format: 'private-v1', v: 1, id: newId(), vault, copy, seq: 0, prev: null, at: new Date().toISOString(), actor, authority: privateAuthority(context, actor), type: 'private.create', body: { artifact: newPrivateId(), author: actor, actor, version: newId(), typeHash: await artifactTypeHash('document'), blobs: [], predecessor: null }, payloadHash: await privateHash(payload) }, agent.signingPrivateKey);
+    const previous = controller.branches[0]?.bundle;
+    await controller.stage({ format: 'private-v1', version: 1, vault, author, scope: 'author-backup', authorityHistories: [privateAuthorityHistory(context)], records: [...(previous?.records ?? []), record], payloads: [...(previous?.payloads ?? []), { record: record.id, payload }], copyKeys: [...(previous?.copyKeys ?? []), { copy, key: Buffer.from(privateRandomBytes(32)).toString('base64') }], blobs: previous?.blobs ?? [], unavailableDeletedBlobs: previous?.unavailableDeletedBlobs ?? [] });
+    await controller.sync(true);
+    return { copy, actor, record };
+  } finally { controller.close(); }
 }

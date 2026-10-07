@@ -50,8 +50,8 @@ describe('journey client guard', () => {
     await expect(new JourneyClient(newer.session, { fetch: newer.fetcher }).add({ type: 'note', title: 'No', body: 'No', tags: [] })).rejects.toThrow('newer format');
     expect(newer.requests.some(value => value.startsWith('POST '))).toBe(false);
   });
-  it('refuses read-only writes before reservation', async () => {
-    const f = await fixture('read');
+  it('refuses writes after the adding person becomes read-only, regardless of remembered scope', async () => {
+    const f = await fixture('read'); await f.append('member.role', { member: f.ownerId, role: 'read-only' });
     await expect(new JourneyClient(f.session, { fetch: f.fetcher }).add({ type: 'note', title: 'No', body: 'No', tags: [] })).rejects.toThrow('read-only');
     expect(f.requests.some(value => value.startsWith('POST '))).toBe(false);
   });

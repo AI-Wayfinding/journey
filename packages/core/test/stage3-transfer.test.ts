@@ -39,7 +39,8 @@ describe('Node encrypted private transfer contracts', () => {
     await expect(importPrivateBundle(encrypted, f.f.reader.identity, { trust: f.options.trust, recipient: reader.identity, historical: true })).rejects.toThrow('author-backup');
     const foreign = await privateAgentSession(f.f.context, privateIdentity(f.f.foreign.member), f.f.foreign.key, f.f.foreign.identity, 'authenticated');
     await expect(exportPrivateBundle(handoff, { ...options, recipient: foreign })).rejects.toThrow('audience');
-    await expect(exportPrivateBundle(handoff, { ...options, recipient: f.f.session })).rejects.toThrow('recipient');
+    const parentHandoff = await exportPrivateBundle(handoff, { ...options, recipient: f.f.session });
+    expect(privateCopies((await importPrivateBundle(parentHandoff, f.f.author.identity, { ...options, recipient: f.f.identity })).view)).toHaveLength(1);
     await expect(exportPrivateBundle(handoff, { ...options, recipient: { identity: reader.identity, binding: reader.binding } })).rejects.toThrow('audience');
     const writer = await privateAgentSession(f.f.context, privateIdentity(f.f.writer.member), f.f.writer.key, f.f.writer.identity, 'authenticated');
     const edit = await record(f.f.context, f.f.writer, f.f.vault, f.f.copy, f.f.artifact, f.f.identity, 'private.version', f.c.records, content('Agent proposal'));
@@ -47,9 +48,15 @@ describe('Node encrypted private transfer contracts', () => {
     const response = await exportPrivateBundle(returned, { ...writeOptions, recipient: f.f.session });
     const checked = await importPrivateBundle(response, f.f.author.identity, { ...writeOptions, recipient: f.f.identity });
     expect(privateCopies(checked.view)[0]!.records[1]!.actor).toEqual(writer.identity);
-    await expect(exportPrivateBundle(returned, { ...writeOptions, recipient: writer })).rejects.toThrow('recipient');
+    const siblingReturn = await exportPrivateBundle(returned, { ...writeOptions, recipient: writer });
+    expect(privateCopies((await importPrivateBundle(siblingReturn, f.f.writer.identity, { ...writeOptions, recipient: writer.identity })).view)[0]!.records[1]!.actor).toEqual(writer.identity);
+    const backup = await exportPrivateBundle(f.bundle, { ...options, recipient: reader });
+    expect(privateCopies((await importPrivateBundle(backup, f.f.reader.identity, { ...options, recipient: reader.identity })).view)[0]!.author).toEqual(f.f.identity);
+    await expect(exportPrivateBundle(f.bundle, { ...options, recipient: foreign })).rejects.toThrow('recipient');
+    await expect(exportPrivateBundle(f.bundle, { ...options, recipient: reader, historical: true })).rejects.toThrow('recipient');
     const readEdit = await record(f.f.context, f.f.reader, f.f.vault, f.f.copy, f.f.artifact, f.f.identity, 'private.version', f.c.records);
-    await expect(verifyPrivateBundle({ ...returned, records: [...f.c.records, readEdit.record], payloads: [...f.c.payloads, readEdit.payload] }, options)).rejects.toThrow('denied');
+    const siblingEdit = await verifyPrivateBundle({ ...returned, records: [...f.c.records, readEdit.record], payloads: [...f.c.payloads, readEdit.payload] }, options);
+    expect(privateCopies(siblingEdit.view)[0]!.records[1]!.actor).toEqual(reader.identity);
   });
   it('validates exact fields, actual ciphertext/raw digests, domains, complete blobs and deleted availability atomically', async () => {
     const f = await fixture(), a = await attachment(f);
