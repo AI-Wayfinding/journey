@@ -58,7 +58,11 @@ describe('Node private encrypted checkpoint cache', () => {
       const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
         const path = new URL(String(url)).pathname;
         if (removed) return Response.json({ error: { code: 'forbidden' } }, { status: 403 });
-        if (path.endsWith('/private-agent-wrap/' + principal)) return Response.json({ ciphertext: delivered });
+        if (path.endsWith('/private-agents')) return Response.json({ agents: [{ principal }] });
+        if (path.endsWith('/private-agent-wrap/' + principal)) {
+          if (init?.method === 'PUT') { delivered = JSON.parse(String(init.body)).ciphertext; return Response.json({ ok: true }); }
+          return delivered ? Response.json({ ciphertext: delivered }) : Response.json({ error: { code: 'not-found' } }, { status: 404 });
+        }
         if (path.endsWith('/private-vault')) {
           if (init?.method === 'PUT') return Response.json(await transport.commit(decodeVaultPatch(new Uint8Array(init.body as Uint8Array))));
           const query = new URL(String(url)).searchParams.get('slots')!;
@@ -75,6 +79,24 @@ describe('Node private encrypted checkpoint cache', () => {
         if (path.endsWith('/wraps/me')) return Response.json({ wraps: [{ epoch: 1, wrap: wrap.ciphertext }] });
         throw Error('unexpected private transport');
       });
+      // Missing wrap permits initialization only when the allocated vault has
+      // no signed frame. The agent must backfill its key without person keys.
+      const saved = { frame, token, delivered, slots: slots.slice() };
+      frame = null; delivered = ''; token = 0;
+      const initializer = new JourneyClient(session, { fetch: fetcher });
+      try {
+        const initialized = await initializer.openPrivateVault();
+        expect(initialized.retainedCheckpoint?.version).toBe(1);
+        const opened = await (await import('@ai-wayfinding/core')).openPrivateFrame(frame!, owner.age.identity, author.recipient) as { header: { writer: unknown } };
+        expect(opened.header.writer).toEqual(privateIdentity(agent));
+        expect(await openVaultAgentWrap(delivered, { journey: journeyId, person: ownerId, agent: principal, vault, author, recipient: privateIdentity(agent) }, f.age.identity, context)).not.toBe(owner.age.identity);
+      } finally { initializer.close(); }
+      const denied = new JourneyClient(session, { fetch: fetcher });
+      delivered = '';
+      try { await expect(denied.openPrivateVault()).rejects.toThrow(); }
+      finally { denied.close(); }
+      frame = saved.frame; token = saved.token; delivered = saved.delivered;
+      saved.slots.forEach((ciphertext, index) => { slots[index] = ciphertext; });
       const cacheRead = vi.spyOn(NodePrivateStore.prototype, 'read'), cacheCommit = vi.spyOn(NodePrivateStore.prototype, 'commit');
       const client = new JourneyClient(session, { fetch: fetcher, cacheRoot: folder });
       try {

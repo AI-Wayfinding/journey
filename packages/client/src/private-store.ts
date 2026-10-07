@@ -16,6 +16,7 @@ export async function openPersonPrivateVault(options: VaultOptions, context: Pri
   const controller = new PrivateVault(options); rememberNodePrivateVault(controller);
   try {
     await controller.open();
+    if (!controller.retainedCheckpoint) return controller;
     for (const member of await delivery.agents()) {
       if (member.kind !== 'agent') continue;
       const recipient = privateIdentity(member);
