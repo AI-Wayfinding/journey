@@ -123,8 +123,12 @@ export async function credentialAgent(page: Page, id: string, keyStorage: 'memor
   const member: Member = { id: agent.principal, kind: 'agent', recipient: age.recipient, signingKey: signing.publicKey, addedBy: c.actor, scope: 'read', expiresAt: new Date(expiresAt).toISOString() };
   const entry = { v: 1 as const, seq: c.state.lastSeq + 1, prev: c.state.lastHash, at: new Date().toISOString(), actor: c.actor, type: 'member.add', body: { member, kind: 'agent', grants: [] } };
   const envelope = await sealControlLabels(entry, { id: newId(), journey: id, seq: entry.seq, epoch: c.key.epoch, createdAt: entry.at }, c.key);
-  const proof = await signControlProof(entry, envelope, id, await importSigningKey(c.secrets.signing)), [wrap] = await core.wrapJourneyKey(c.key, [member]);
-  const approved = await page.request.post('/v1/agent-sessions/' + pending.id + '/approve', { headers: { ...headers, 'X-Wayfinding': '1', Origin: new URL(page.url()).origin }, data: { code: pending.code, principal: c.actor, scope: 'read', expiresAt, wrap: wrap!.ciphertext, control: { proof, envelope } } });
+  const proof = await signControlProof(entry, envelope, id, await importSigningKey(c.secrets.signing));
+  const wraps = await Promise.all((keyStorage === 'link' ? [c.key] : c.keys).map(async key => {
+    const [wrap] = await core.wrapJourneyKey(key, [member]);
+    return { principal: member.id, epoch: key.epoch, wrap: wrap!.ciphertext };
+  }));
+  const approved = await page.request.post('/v1/agent-sessions/' + pending.id + '/approve', { headers: { ...headers, 'X-Wayfinding': '1', Origin: new URL(page.url()).origin }, data: { code: pending.code, principal: c.actor, scope: 'read', expiresAt, ...(keyStorage === 'link' ? { wrap: wraps[0]!.wrap } : { wraps }), control: { proof, envelope } } });
   expect(approved.status(), await approved.text()).toBe(200);
   return { id: pending.id as string, principal: agent.principal as string, identity: age.identity, signingPrivateKey: await importSigningKey(signing.privateKey), expiresAt };
 }

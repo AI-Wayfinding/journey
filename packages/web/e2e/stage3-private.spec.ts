@@ -222,8 +222,9 @@ test('own authenticated agent creates private artifacts in its person vault with
     const result = await durable(owner.page, trip.id), authored = privateCopies(result.branches[0]!.view).find(c => c.copy === written.copy)!;
     expect(result.vault).toBe(saved.vault); expect(authored.author).toEqual(written.actor); expect(authored.records[0]!.actor).toEqual(written.actor); expect(authored.records[0]!.sig).toBe(written.record.sig);
     expect(authored.payloads[0]!.payload.body.content).toEqual({ kind: 'document', markdown: 'Authored privately by the agent' });
-    // A still-open browser sees the other signer on its fixed sync schedule.
-    await scheduled(owner.page);
+    // The first fixed sync discovers the new signed directory; the next reads
+    // its missing live slots. Neither save triggers a sync or full-vault fetch.
+    await scheduled(owner.page); await scheduled(owner.page);
     await navigate(owner.page, trip.path + '/private/' + written.copy); await expect(owner.page.getByRole('heading', { name: 'AGENT PRIVATE AUTHOR', exact: true })).toBeVisible();
     await expect(owner.page.locator('#private-author')).toContainText('Private reader');
   } finally { await owner.context.close(); }
