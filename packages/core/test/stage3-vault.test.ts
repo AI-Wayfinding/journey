@@ -207,13 +207,20 @@ describe('scheduled fixed member vault controller', () => {
     await expect(opening).rejects.toThrow('locked'); expect(controller.retainedCheckpoint).toBeUndefined(); expect(() => controller.branches).toThrow('locked'); expect(f.trace.map(t => t.method)).toEqual(['GET']);
   }, 60000);
   it('verifies both complete equal-version fork histories and retains ties under a higher signed vault head', async () => {
-    const f = await fixture(); await f.controller.open(); await f.controller.stage(f.bundle); f.time(300000); await f.controller.tick(); const base = f.snapshot();
-    const left = await record(f.f.context, f.f.author, f.f.vault, f.f.copy, f.f.artifact, f.f.identity, 'private.version', f.bundle.records, content('left'));
+    const f = await fixture();
+    // An unrelated copy must survive in every conflicting view, not only the
+    // first branch. Otherwise choosing the other tied branch loses live history.
+    const independentCopy = newPrivateId();
+    const independent = await record(f.f.context, f.f.author, f.f.vault, independentCopy, newPrivateId(), f.f.identity, 'private.create', [], content('Independent copy'));
+    f.bundle.records.push(independent.record); f.bundle.payloads.push(independent.payload);
+    f.bundle.copyKeys.push({ copy: independentCopy, key: encode(privateRandomBytes(32)) });
+    await f.controller.open(); await f.controller.stage(f.bundle); f.time(300000); await f.controller.tick(); const base = f.snapshot();
+    const left = await record(f.f.context, f.f.author, f.f.vault, f.f.copy, f.f.artifact, f.f.identity, 'private.version', f.bundle.records.filter(r => r.copy === f.f.copy), content('left'));
     await f.controller.stage({ ...f.bundle, records: [...f.bundle.records, left.record], payloads: [...f.bundle.payloads, left.payload] }); f.time(600000); await f.controller.tick(); const a = f.snapshot();
     // A second device starts at the identical checkpoint, with isolated storage.
     f.replace(base.frame); f.slots.splice(0, 64, ...base.slots); let other: VaultCacheRecord = base;
     const b = new PrivateVault({ ...f.options, cache: { read: async () => other, commit: async (_expected, value) => { other = value; } } }); await b.open();
-    const right = await record(f.f.context, f.f.author, f.f.vault, f.f.copy, f.f.artifact, f.f.identity, 'private.version', f.bundle.records, content('right'));
+    const right = await record(f.f.context, f.f.author, f.f.vault, f.f.copy, f.f.artifact, f.f.identity, 'private.version', f.bundle.records.filter(r => r.copy === f.f.copy), content('right'));
     await b.stage({ ...f.bundle, records: [...f.bundle.records, right.record], payloads: [...f.bundle.payloads, right.payload] }); f.time(900000); await b.tick();
     // Match version by signing the same complete bytes at a's version; skipped
     // versions are authorized by the pinned member, not fabricated ancestry.
@@ -222,6 +229,10 @@ describe('scheduled fixed member vault controller', () => {
     const signedFrame = await sealPrivateFrame(frame, f.f.identity.recipient); other = { ...other, frame: signedFrame, checkpoint: { ...a.checkpoint, head: await privateHash(frame.header) } }; f.replace(signedFrame);
     expect((await f.controller.merge(other))[0]!.branches).toHaveLength(2);
     f.time(1200000); await f.controller.tick(); expect(f.controller.branches).toHaveLength(2); expect(f.controller.retainedCheckpoint!.version).toBe(a.checkpoint.version + 1);
+    for (const branch of f.controller.branches) {
+      expect(privateCopies(branch.view).map(c => c.copy).sort()).toEqual([f.f.copy, independentCopy].sort());
+      expect(branch.bundle.records.find(r => r.copy === independentCopy)).toEqual(independent.record);
+    }
     f.controller.close(); b.close();
   }, 60000);
 });
