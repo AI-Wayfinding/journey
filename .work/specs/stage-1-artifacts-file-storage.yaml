@@ -10,7 +10,7 @@ intent: !md |2+
   
   There is no production data to migrate: journeys were purged and remaining fixtures are test data. “Migrate D8 categories” means a mapping in new-artifact creation/import code and tests, not a storage migration, historical rewrite, bootstrap trust path or migration checkpoint. Internal recovery records remain separate from user artifacts.
   
-  Out of scope: projects; author-private artifacts and invisible storage; interview relationships and subject access; rounds and contribution confirmation; HTML/applet execution or stores; public journeys, listing, joining-policy activation, cross-journey sharing or visibility conversion; shared-read refactoring, client/link parity and drops. General hardening, account recovery changes, historical agent key delivery and security certification remain separate backlog. Preserve the app header/footer and existing person controls. No deploy, bucket provisioning, package publication or remote actions are part of execution evidence.
+  Out of scope: projects; author-private artifacts and invisible storage; interview relationships and subject access; rounds and contribution confirmation; HTML/applet execution or stores; public journeys, listing, joining-policy activation, cross-journey sharing or visibility conversion; shared-read refactoring, client/link parity and drops. General hardening, account recovery changes and security certification remain separate backlog. Preserve the app header/footer and existing person controls. No deploy, bucket provisioning, package publication or remote actions are part of execution evidence.
   
 work:
   - id: artifact-contract

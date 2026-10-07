@@ -4,15 +4,15 @@ description: !md |2+
   Deliver a Bend rules core first, then Stage 0 journey settings, read-only/read-write roles, person guides, inherited agent access, personal controls and consistent removal. Require clients 0.1.3 and older to update; align browser, CLI/MCP and links. This is a draft plan, not implementation approval or passing evidence.
 
 intent: !md |2+
-  Decision 0001 D5, D7, D30, D32–D34, D40–D41 and ontology sections 9–10 define this stage. Amendments D31–D44 override earlier decisions. The ontology's approval remains a prerequisite to implementation; promoting this draft does not establish that approval. Keep the stage independently shippable and preserve existing encrypted text, history, recovery/export and deliberate live agent-link behavior.
+  Decision 0001 D5, D7, D30, D32–D34, D40–D41 and ontology sections 9–10 define this stage. Amendments D31–D45 override earlier decisions. The ontology's approval remains a prerequisite to implementation; promoting this draft does not establish that approval. Keep the stage independently shippable and preserve existing encrypted text, history, recovery/export and deliberate live agent-link behavior.
 
   Dan approved Bend for the rules core. Keep pure Stage 0 decisions in one `packages/rules/` folder, with `LAWS.bend` and `PROOF.bend` at that package root. Compile the implementation to `rules.mjs`, shared by core, server, web and client. TypeScript parses and verifies signatures, binds controls to ciphertext and chain position, copies named fields and performs storage/cryptography/transport; only already-verified entries cross into Bend for authority decisions and membership replay. No duplicate decision rules remain in TypeScript. The symbolic key-holding law models recipients after removal and rotation; it does not prove cryptography or erase previously downloaded keys. Later stages add their own laws, not speculative Stage 1–7 rules now.
 
-  Content role and guide authority are different: a person guide may have either role, and an agent cannot be a guide. A hostile or careless caller must not turn guide authority or a personal control into a content write, act as another person's profile, elevate an agent beyond its adding person's current access or its original read-only/read-write limit, or leave a journey without a person guide. A plain access row supplied by a caller is not proof of authority. Removed people and their agents must lose future records and keys; already downloaded keys and copies cannot be recalled. Pending rotation must block content writes and reservations while allowing authorized controls needed to complete it.
+  Content role and guide authority are different: a person guide may have either role, and an authenticated member agent inherits its person’s live guide authority. A hostile or careless caller must not turn guide authority or a personal control into a content write, act as another person's profile, elevate an agent beyond its adding person's current access, or leave a journey without a person guide. A plain access row supplied by a caller is not proof of authority. Removed people and their agents must lose future records and keys; already downloaded keys and copies cannot be recalled. Pending rotation must block content writes and reservations while allowing authorized controls needed to complete it.
 
   Settings in this stage cover editing the journey name/description and default new-person content role under guide authority, plus durable visibility type and joining-policy representation. Retain private-only journey creation and the existing invite-based admission flow. Store that flow honestly as invitation-only; do not offer immediate joining or unrestricted request admission, claim those policies work, or implement their key delivery. Represent the three D41 policies for later activation without implementing Stage 6. Default role must govern normal admissions now; existing temporary support admissions must not silently become writable or permanent. Visibility is stored separately from today's sealed transport so conversion can be added later, but cannot be changed in this release. Listing storage/discovery and public creation are Stage 6, not settings to advertise as active here.
 
-  Out of scope: artifacts/files and item migration (Stage 1); projects and agents following people into projects (Stage 2, D35); private artifacts and interview-subject access (Stages 3–4, D44); rounds, HTML/applets; public journeys, listing, full joining policies, copying and conversion (Stage 6); shared read refactoring/parity and drops (Stage 7). D43's new public/journeys-only member visibility setting, profile-picture field and public attribution are not assigned to Stage 0 by ontology section 9 and are deferred with the public-journey work. This stage keeps the existing self-managed display name and journey email opt-in; it does not invent picture storage or remove legacy email behavior. Account deletion, general security hardening, historical wraps for newly added agents, recovery/key-persistence discrepancies and a second security review remain the separate backlog.
+  Out of scope: artifacts/files and item migration (Stage 1); projects and agents following people into projects (Stage 2, D35); private artifacts and interview-subject access (Stages 3–4, D44); rounds, HTML/applets; public journeys, listing, full joining policies, copying and conversion (Stage 6); shared read refactoring/parity and drops (Stage 7). D43's new public/journeys-only member visibility setting, profile-picture field and public attribution are not assigned to Stage 0 by ontology section 9 and are deferred with the public-journey work. This stage keeps the existing self-managed display name and journey email opt-in; it does not invent picture storage or remove legacy email behavior. Account deletion, general security hardening, recovery/key-persistence discrepancies and a second security review remain the separate backlog.
 
 work:
   - id: bend-core
@@ -84,7 +84,7 @@ work:
             output_includes: Bend clean build ordering and shared consumer imports passed
           timeout_ms: 600000
       - id: bend-laws
-        statement: When packages/rules/PROOF.bend is checked against root LAWS.bend and the production pure functions, both bend PROOF.bend and bend PROOF.bend --verdict print ALL PROOFS CHECK for laws that agents never exceed their members or become guides, only person guides change settings/roles, the last person guide survives removal/leaving/guide changes, person removal removes their agents, and removal plus rotation leaves the removed person and their agents with no key for the new epoch in a symbolic key-holding model; the model also covers Stage 0 verified-control replay and does not claim a cryptographic proof or recall of old keys.
+        statement: "When packages/rules/PROOF.bend is checked against root LAWS.bend and the production pure functions, both bend PROOF.bend and bend PROOF.bend --verdict print ALL PROOFS CHECK for laws that authenticated member agents have exactly their live person's capabilities, including guide authority, only actors with live person-guide authority change settings/roles, the last person guide survives removal/leaving/guide changes, person removal removes their agents, and removal plus rotation leaves the removed person and their agents with no key for the new epoch in a symbolic key-holding model; the model also covers Stage 0 verified-control replay and does not claim a cryptographic proof or recall of old keys."
         evidence:
           kind: command
           run: !bash |
@@ -101,6 +101,13 @@ work:
             exit: 0
             output_includes: Bend proof and verdict both printed ALL PROOFS CHECK
           timeout_ms: 600000
+        amendments:
+          - criterion_id: "bend-laws"
+            before: "When packages/rules/PROOF.bend is checked against root LAWS.bend and the production pure functions, both bend PROOF.bend and bend PROOF.bend --verdict print ALL PROOFS CHECK for laws that agents never exceed their members or become guides, only person guides change settings/roles, the last person guide survives removal/leaving/guide changes, person removal removes their agents, and removal plus rotation leaves the removed person and their agents with no key for the new epoch in a symbolic key-holding model; the model also covers Stage 0 verified-control replay and does not claim a cryptographic proof or recall of old keys."
+            after: "When packages/rules/PROOF.bend is checked against root LAWS.bend and the production pure functions, both bend PROOF.bend and bend PROOF.bend --verdict print ALL PROOFS CHECK for laws that authenticated member agents have exactly their live person's capabilities, including guide authority, only actors with live person-guide authority change settings/roles, the last person guide survives removal/leaving/guide changes, person removal removes their agents, and removal plus rotation leaves the removed person and their agents with no key for the new epoch in a symbolic key-holding model; the model also covers Stage 0 verified-control replay and does not claim a cryptographic proof or recall of old keys."
+            reason: "D45 supersedes agent guide exclusion and person-only management while retaining live-person and last-guide boundaries."
+            authority: "Dan, operator decision m02829 (agent parity, D45)"
+            at: "2026-10-07T19:15:38.923Z"
       - id: bend-ts-integration
         statement: When existing TypeScript behavior suites run with in-scope rule code replaced by calls into the compiled Bend module, they pass across core/server/web/client, and source checks reject duplicate role, guide/settings authority, D34 access, removal/leaving or membership-replay decision implementations in TypeScript while allowing parsing, signature verification, named-field adapters and effects.
         evidence:
@@ -156,7 +163,7 @@ work:
             output_includes: "Test Files"
           timeout_ms: 120000
       - id: role-authority
-        statement: "When signed controls are replayed, only person guides of either content role can change settings, person roles or guide authority; agents never receive guide authority; read-only people can change only their own existing profile, add/name/manage their own agents and leave; a guide cannot impersonate another profile, obtain content writes from guide authority or remove the last person guide, and visibility type cannot be changed."
+        statement: "When signed controls are replayed, only actors with live person-guide authority of either content role can change settings, person roles or guide authority; authenticated member agents inherit exactly their person's guide authority; read-only people and their agents can change only that person's existing profile, add/name/manage that person's agents and leave; a guide cannot impersonate another profile, obtain content writes from guide authority or remove the last person guide, and visibility type cannot be changed."
         evidence:
           kind: command
           run: !bash |
@@ -165,8 +172,15 @@ work:
             exit: 0
             output_includes: "Test Files"
           timeout_ms: 120000
+        amendments:
+          - criterion_id: "role-authority"
+            before: "When signed controls are replayed, only person guides of either content role can change settings, person roles or guide authority; agents never receive guide authority; read-only people can change only their own existing profile, add/name/manage their own agents and leave; a guide cannot impersonate another profile, obtain content writes from guide authority or remove the last person guide, and visibility type cannot be changed."
+            after: "When signed controls are replayed, only actors with live person-guide authority of either content role can change settings, person roles or guide authority; authenticated member agents inherit exactly their person's guide authority; read-only people and their agents can change only that person's existing profile, add/name/manage that person's agents and leave; a guide cannot impersonate another profile, obtain content writes from guide authority or remove the last person guide, and visibility type cannot be changed."
+            reason: "D45 grants authenticated agents their live person's guide and personal controls without independent authority."
+            authority: "Dan, operator decision m02829 (agent parity, D45)"
+            at: "2026-10-07T19:15:59.695Z"
       - id: agent-access-model
-        statement: "When either person role changes, every agent's effective access is the adding person's current access limited only by the read-only/read-write choice made at addition; a read-only agent never gains writes, a read-write agent cannot write while its person is read-only, and missing, removed or expired adding people give no live access; agent links remain read-only and no independent agent grants or scopes can widen this rule."
+        statement: "When either person role changes, every authenticated member agent's effective access equals the adding person's current role, guide authority and read/write access; stored read-only/read-write choices impose no independent limit, and missing, removed or expired adding people give no live access; agent links remain read-only and no independent agent grants or scopes can widen this rule."
         evidence:
           kind: command
           run: !bash |
@@ -175,8 +189,15 @@ work:
             exit: 0
             output_includes: "Test Files"
           timeout_ms: 120000
+        amendments:
+          - criterion_id: "agent-access-model"
+            before: "When either person role changes, every agent's effective access is the adding person's current access limited only by the read-only/read-write choice made at addition; a read-only agent never gains writes, a read-write agent cannot write while its person is read-only, and missing, removed or expired adding people give no live access; agent links remain read-only and no independent agent grants or scopes can widen this rule."
+            after: "When either person role changes, every authenticated member agent's effective access equals the adding person's current role, guide authority and read/write access; stored read-only/read-write choices impose no independent limit, and missing, removed or expired adding people give no live access; agent links remain read-only and no independent agent grants or scopes can widen this rule."
+            reason: "D45 replaces stored agent caps with exact live-person capability parity; URL agent links are unchanged."
+            authority: "Dan, operator decision m02829 (agent parity, D45)"
+            at: "2026-10-07T19:15:24.316Z"
       - id: removal-model
-        statement: "When a person of either role removes their own agent, a guide removes another member or agent, or a person leaves, the common removal model permits exactly those actors, removes a person's agents, retains at least one person guide, and separates removal authority from guide-only rotation so a non-guide removal can hand rotation to a remaining guide without granting management authority."
+        statement: "When a person of either role or their authenticated member agent removes that person's agent, an actor with live person-guide authority removes another member or agent, or a person or their agent leaves for that person, the common removal model permits exactly those actors, removes a person's agents, retains at least one person guide, and separates removal authority from guide-only rotation so a non-guide removal can hand rotation to a remaining guide without granting management authority."
         evidence:
           kind: command
           run: !bash |
@@ -185,8 +206,15 @@ work:
             exit: 0
             output_includes: "Test Files"
           timeout_ms: 120000
+        amendments:
+          - criterion_id: "removal-model"
+            before: "When a person of either role removes their own agent, a guide removes another member or agent, or a person leaves, the common removal model permits exactly those actors, removes a person's agents, retains at least one person guide, and separates removal authority from guide-only rotation so a non-guide removal can hand rotation to a remaining guide without granting management authority."
+            after: "When a person of either role or their authenticated member agent removes that person's agent, an actor with live person-guide authority removes another member or agent, or a person or their agent leaves for that person, the common removal model permits exactly those actors, removes a person's agents, retains at least one person guide, and separates removal authority from guide-only rotation so a non-guide removal can hand rotation to a remaining guide without granting management authority."
+            reason: "D45 extends removal and leaving controls to the person's authenticated agents with the same live authority."
+            authority: "Dan, operator decision m02829 (agent parity, D45)"
+            at: "2026-10-07T19:16:10.117Z"
       - id: legacy-upgrade
-        statement: "When a legacy journey is upgraded, original signed entries and encrypted content remain readable to the upgraded reader, normal people retain their prior writable role, support people retain read-only expiry, person guides and each agent's original limit remain intact, missing settings reflect existing private invite-based behavior, and a guide raises the minimum above 0.1.3 before any new incompatible control entry without permitting a later minimum decrease or silent privilege expansion."
+        statement: "When a legacy journey is upgraded, original signed entries and encrypted content remain readable to the upgraded reader, normal people retain their prior writable role, support people retain read-only expiry, person guides remain intact and authenticated member agents have exactly their person's live capabilities without an original agent limit, missing settings reflect existing private invite-based behavior, and a guide raises the minimum above 0.1.3 before any new incompatible control entry without permitting a later minimum decrease or privileges beyond the live person's authority."
         evidence:
           kind: command
           run: !bash |
@@ -195,6 +223,13 @@ work:
             exit: 0
             output_includes: "Test Files"
           timeout_ms: 120000
+        amendments:
+          - criterion_id: "legacy-upgrade"
+            before: "When a legacy journey is upgraded, original signed entries and encrypted content remain readable to the upgraded reader, normal people retain their prior writable role, support people retain read-only expiry, person guides and each agent's original limit remain intact, missing settings reflect existing private invite-based behavior, and a guide raises the minimum above 0.1.3 before any new incompatible control entry without permitting a later minimum decrease or silent privilege expansion."
+            after: "When a legacy journey is upgraded, original signed entries and encrypted content remain readable to the upgraded reader, normal people retain their prior writable role, support people retain read-only expiry, person guides remain intact and authenticated member agents have exactly their person's live capabilities without an original agent limit, missing settings reflect existing private invite-based behavior, and a guide raises the minimum above 0.1.3 before any new incompatible control entry without permitting a later minimum decrease or privileges beyond the live person's authority."
+            reason: "D45 makes historical agent settings non-authoritative while preserving person roles and version controls."
+            authority: "Dan, operator decision m02829 (agent parity, D45)"
+            at: "2026-10-07T19:17:09.426Z"
   - id: server-authority
     task: "Enforce verified Stage 0 authority and current access at the server boundary"
     depends_on: ["protocol"]
@@ -220,7 +255,7 @@ work:
             output_includes: "Test Files"
           timeout_ms: 180000
       - id: server-content-access
-        statement: "When a caller reads records, history, wraps or export, reserves a sequence or submits any ordinary content write including comments or deletes, server access reflects the current verified person role and exact D34 agent rule; read-only callers including guides cannot write, role downgrade also stops an earlier reservation from completing, missing/removed/expired people and their agents cannot fetch new data, and promotion of a person never promotes an agent beyond its original limit. The server's allow/deny decisions for reads, sequence reservations, content writes, pending rotation and client version are compiled Bend functions in packages/rules, not TypeScript; LAWS.bend states and PROOF.bend proves that no caller reads without current access, no content write commits while rotation is pending, and clients 0.1.3 or older are refused."
+        statement: "When a caller reads records, history, wraps or export, reserves a sequence or submits any ordinary content write including comments or deletes, server access reflects the current verified person role and exact D45 agent parity rule; read-only callers including guides cannot write, role downgrade also stops an earlier reservation from completing, missing/removed/expired people and their agents cannot fetch new data, and promotion of a person gives their authenticated member agents exactly that person's live access without an original agent limit. The server's allow/deny decisions for reads, sequence reservations, content writes, pending rotation and client version are compiled Bend functions in packages/rules, not TypeScript; LAWS.bend states and PROOF.bend proves that no caller reads without current access, no content write commits while rotation is pending, and clients 0.1.3 or older are refused."
         evidence:
           kind: command
           run: !bash |
@@ -236,8 +271,14 @@ work:
             reason: "Server allow/deny decisions move into the proved Bend rules core."
             authority: "Dan, 2026-10-01 (m01360): yes to server allow/deny decisions in Bend"
             at: "2026-10-01T03:00:58.589Z"
+          - criterion_id: "server-content-access"
+            before: "When a caller reads records, history, wraps or export, reserves a sequence or submits any ordinary content write including comments or deletes, server access reflects the current verified person role and exact D34 agent rule; read-only callers including guides cannot write, role downgrade also stops an earlier reservation from completing, missing/removed/expired people and their agents cannot fetch new data, and promotion of a person never promotes an agent beyond its original limit. The server's allow/deny decisions for reads, sequence reservations, content writes, pending rotation and client version are compiled Bend functions in packages/rules, not TypeScript; LAWS.bend states and PROOF.bend proves that no caller reads without current access, no content write commits while rotation is pending, and clients 0.1.3 or older are refused."
+            after: "When a caller reads records, history, wraps or export, reserves a sequence or submits any ordinary content write including comments or deletes, server access reflects the current verified person role and exact D45 agent parity rule; read-only callers including guides cannot write, role downgrade also stops an earlier reservation from completing, missing/removed/expired people and their agents cannot fetch new data, and promotion of a person gives their authenticated member agents exactly that person's live access without an original agent limit. The server's allow/deny decisions for reads, sequence reservations, content writes, pending rotation and client version are compiled Bend functions in packages/rules, not TypeScript; LAWS.bend states and PROOF.bend proves that no caller reads without current access, no content write commits while rotation is pending, and clients 0.1.3 or older are refused."
+            reason: "D45 supersedes the D34 stored cap; agents follow live person promotion and downgrade exactly."
+            authority: "Dan, operator decision m02829 (agent parity, D45)"
+            at: "2026-10-07T19:18:02.989Z"
       - id: server-personal-controls
-        statement: "When a read-only person uses profile updates, own-agent approval/naming/link creation/renewal/removal or leaving, the server allows the authorized personal control with existing fresh-confirmation requirements, while denying other people's controls; either-role person guides can use settings, role, guide and existing invitation/admission controls, while non-guides and agents cannot use those management routes and no control permits an ordinary content write."
+        statement: "When a read-only person uses profile updates, own-agent approval/naming/link creation/renewal/removal or leaving, the server allows the authorized personal control with existing fresh-confirmation requirements, while denying other people's controls; authenticated member agents have the same profile, own-agent and leaving authority as their person, with URL-link creation/renewal rules unchanged; actors with live person-guide authority of either role can use settings, role, guide and existing invitation/admission controls, while actors without that authority cannot use those management routes and no control permits an ordinary content write."
         evidence:
           kind: command
           run: !bash |
@@ -246,6 +287,13 @@ work:
             exit: 0
             output_includes: "Test Files"
           timeout_ms: 180000
+        amendments:
+          - criterion_id: "server-personal-controls"
+            before: "When a read-only person uses profile updates, own-agent approval/naming/link creation/renewal/removal or leaving, the server allows the authorized personal control with existing fresh-confirmation requirements, while denying other people's controls; either-role person guides can use settings, role, guide and existing invitation/admission controls, while non-guides and agents cannot use those management routes and no control permits an ordinary content write."
+            after: "When a read-only person uses profile updates, own-agent approval/naming/link creation/renewal/removal or leaving, the server allows the authorized personal control with existing fresh-confirmation requirements, while denying other people's controls; authenticated member agents have the same profile, own-agent and leaving authority as their person, with URL-link creation/renewal rules unchanged; actors with live person-guide authority of either role can use settings, role, guide and existing invitation/admission controls, while actors without that authority cannot use those management routes and no control permits an ordinary content write."
+            reason: "D45 removes actor-kind bans on personal and guide controls; D28/D31 URL-link rules remain unchanged."
+            authority: "Dan, operator decision m02829 (agent parity, D45)"
+            at: "2026-10-07T19:18:28.723Z"
       - id: server-removal-rotation
         statement: "When an authorized own-agent removal, guide removal or self-leave commits, the server revokes the target and a removed person's agents and links immediately, protects the last person guide, sets pending rotation and refuses new reservations and all content writes including already reserved ones until rotation completes; authorized control writes remain possible and a remaining read-only or read-write guide can resume interrupted rotation with exactly the remaining recipients and next epoch, while removed principals receive no new wraps."
         evidence:
@@ -291,7 +339,7 @@ work:
             output_includes: "passed"
           timeout_ms: 600000
       - id: client-effective-access
-        statement: "When the adding person's role is downgraded and later restored in a real local journey, both CLI and MCP writes and status use current verified effective access rather than remembered approval scope; read-write agents lose writes during downgrade, read-only agents never gain them, both retain allowed reads, and removal of the adding person ends their access."
+        statement: "When the adding person's role is downgraded and later restored in a real local journey, both CLI and MCP writes and status use current verified effective access rather than remembered approval scope; all authenticated member agents lose writes during downgrade and regain them when their person does regardless of stored approval scope, retain exactly their person's allowed reads, and removal of the adding person ends their access."
         evidence:
           kind: command
           run: !bash |
@@ -300,6 +348,13 @@ work:
             exit: 0
             output_includes: "Test Files"
           timeout_ms: 600000
+        amendments:
+          - criterion_id: "client-effective-access"
+            before: "When the adding person's role is downgraded and later restored in a real local journey, both CLI and MCP writes and status use current verified effective access rather than remembered approval scope; read-write agents lose writes during downgrade, read-only agents never gain them, both retain allowed reads, and removal of the adding person ends their access."
+            after: "When the adding person's role is downgraded and later restored in a real local journey, both CLI and MCP writes and status use current verified effective access rather than remembered approval scope; all authenticated member agents lose writes during downgrade and regain them when their person does regardless of stored approval scope, retain exactly their person's allowed reads, and removal of the adding person ends their access."
+            reason: "D45 removes independent stored agent caps from CLI/MCP effective access."
+            authority: "Dan, operator decision m02829 (agent parity, D45)"
+            at: "2026-10-07T19:18:46.921Z"
       - id: interface-update-gates
         statement: "When browser, CLI, MCP or live agent-link readers encounter an upgraded minimum or unsupported control type, they fail closed with a clear update message rather than rendering partial content, writing through a stale context or suggesting approval again; legacy journeys are purged rather than read or migrated, and links remain read-only without adding Stage 7 parity features."
         evidence:
