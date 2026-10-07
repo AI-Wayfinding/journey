@@ -7,7 +7,8 @@ export default defineConfig({
   timeout: 180_000,
   use: { baseURL: origin, browserName: 'chromium', headless: true, actionTimeout: 15_000, trace: 'retain-on-failure' },
   webServer: {
-    command: `cd ../.. && npm run build -w @ai-wayfinding/web && npx wrangler dev --config packages/server/test/wrangler.jsonc --local --ip 127.0.0.1 --port ${port} --var ORIGIN:${origin} --persist-to .scratch/wrangler-e2e-${port} --log-level warn`,
+    // Start each run from an empty local store; stale state grew to 27 GB and crashed wrangler.
+    command: `cd ../.. && rm -rf .scratch/wrangler-e2e-${port} && npm run build -w @ai-wayfinding/web && npx wrangler dev --config packages/server/test/wrangler.jsonc --local --ip 127.0.0.1 --port ${port} --var ORIGIN:${origin} --persist-to .scratch/wrangler-e2e-${port} --log-level warn`,
     url: origin + '/',
     timeout: 120_000,
     reuseExistingServer: false,
