@@ -137,7 +137,10 @@ export class PrivateArtifacts {
     await this.writer(); const bytes = await localBytes(path);
     try {
       const checked = await importPrivateBundle(new TextDecoder('utf-8', { fatal: true }).decode(bytes), this.client.session.identity, { trust: this.trust(), recipient: this.authority.session.identity, contexts: [this.authority.context], sessions: [this.authority.session] });
-      await this.stage(checked.bundle); return this.status();
+      // Recipient and live authority were checked before converting the transfer
+      // into the local vault's backup representation. Historical replay must not
+      // turn a handoff/return into an offline recovery operation.
+      await this.stage({ ...checked.bundle, scope: 'author-backup' }); return this.status();
     } finally { bytes.fill(0); }
   }
   async copyTo(id: string, predecessor: string, destination: PrivateArtifacts) {

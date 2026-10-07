@@ -26,7 +26,7 @@ const privateTools = [
   ['private_backup', schema({ path: text }, ['path'])],
   ['private_import', schema({ path: text }, ['path'])],
   ['private_handoff', schema({ path: text, destinationState: text }, ['path','destinationState'])],
-  ['private_return', schema({ path: text }, ['path'])],
+  ['private_return', schema({ path: text, destinationState: text }, ['path'])],
   ['private_download', schema({ id: text, blob: text, path: text }, ['id','blob','path'])],
   ['private_checkpoint', schema({ path: text }, ['path'])]
 ].map(([name, inputSchema]) => ({ name: name as string, inputSchema: inputSchema as ReturnType<typeof schema>, description: 'Authorized private vault workflow. Explicit local paths only. Saves are staged for five-minute sync, not committed immediately. Unpaired server heads have unverified freshness; downloaded copies cannot be recalled.' }));
@@ -97,7 +97,12 @@ export function createWayfindingServer(getClient: () => Promise<JourneyClient>, 
       case 'private_project': return workflow.project(field(args, 'id'), args.project === null ? null : field(args, 'project'), args.predecessor === null ? null : field(args, 'predecessor'));
       case 'private_download': return workflow.download(field(args, 'id'), field(args, 'blob'), field(args, 'path'));
       case 'private_import': return workflow.import(field(args, 'path'));
-      case 'private_backup': case 'private_return': return workflow.backup(field(args, 'path'), name === 'private_return' ? 'agent-return' : 'author-backup');
+      case 'private_backup': return workflow.backup(field(args, 'path'));
+      case 'private_return': {
+        const destination = optionalField(args, 'destinationState') ? await target() : undefined;
+        try { return await workflow.backup(field(args, 'path'), 'agent-return', destination); }
+        finally { destination?.close(); }
+      }
       case 'private_checkpoint': return workflow.checkpoint(field(args, 'path'));
       case 'private_copy': case 'private_handoff': { const destination = await target(); try { return name === 'private_copy' ? await workflow.copyTo(field(args, 'id'), field(args, 'predecessor'), await PrivateArtifacts.open(destination)) : await workflow.backup(field(args, 'path'), 'agent-handoff', destination); } finally { destination.close(); } }
       default: throw new Error('Unknown private tool');

@@ -206,7 +206,13 @@ export async function main(args = process.argv.slice(2), journeyOptions: Journey
           case 'delete': result = await workflow.delete(required(id, 'copy ID'), observed()); break;
           case 'project': result = await workflow.project(required(id, 'copy ID'), required(text, 'project ID or none') === 'none' ? null : text!, observed() === 'null' ? null : observed()); break;
           case 'download': result = await workflow.download(required(id, 'copy ID'), required(flag(flags, '--blob'), '--blob'), required(flag(flags, '--output'), '--output PATH')); break;
-          case 'backup': case 'return': result = await workflow.backup(required(flag(flags, '--output'), '--output PATH'), action === 'return' ? 'agent-return' : 'author-backup'); break;
+          case 'backup': result = await workflow.backup(required(flag(flags, '--output'), '--output PATH')); break;
+          case 'return': {
+            const destination = flag(flags, '--destination-state') ? await target() : undefined;
+            try { result = await workflow.backup(required(flag(flags, '--output'), '--output PATH'), 'agent-return', destination); }
+            finally { destination?.close(); }
+            break;
+          }
           case 'import': result = await workflow.import(required(id, 'bundle path')); break;
           case 'checkpoint': result = await workflow.checkpoint(required(flag(flags, '--output'), '--output PATH')); break;
           case 'handoff': { const destination = await target(); try { result = await workflow.backup(required(flag(flags, '--output'), '--output PATH'), 'agent-handoff', destination); } finally { destination.close(); } break; }

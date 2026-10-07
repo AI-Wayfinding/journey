@@ -192,10 +192,28 @@ describe('Stage 3 real denial and leakage matrix', () => {
         expect(proxy.trace.filter(t => t.path.includes('/private-vault') || t.path.includes('/private-agent-wrap'))).toHaveLength(count);
         await expect(readdir(noCache)).rejects.toMatchObject({ code: 'ENOENT' });
       }
-      const guest = await addPerson(f.trip, f.owner), foreign = await connected(guest, f.trip), foreignState = await agentState(foreign.session, proxy.origin); foreign.close();
-      const foreignCache = join(scratch, 'foreign-' + newId());
-      await expect(command(foreignState, foreignCache, 'private', 'init')).rejects.toMatchObject({ stdout: '', stderr: expect.stringContaining('Private content key is unavailable') });
-      await expect(readdir(foreignCache)).rejects.toMatchObject({ code: 'ENOENT' });
+      const guest = await addPerson(f.trip, f.owner), foreign = await connected(guest, f.trip);
+      const own = await privateFixture(false, { owner: guest, trip: f.trip, agentSession: foreign.session });
+      const foreignState = await agentState(foreign.session, proxy.origin); foreign.close();
+      const foreignCache = join(scratch, 'foreign-' + newId()), foreignCredentials = await readFile(foreignState);
+      const other = await privateMcp(foreignState, foreignCache, true);
+      try {
+        // A foreign person's agent may open its own vault, but cannot read this
+        // person's copy. Baseline the scheduled open before testing the denial.
+        await tool(other.sdk, 'private_init');
+        const foreignBefore = await cacheState();
+        const ownBefore = await readFile(join(foreignCache, own.vaultId, 'checkpoint.age'));
+        const privateBefore = proxy.trace.filter(t => t.path.includes('/private-vault') || t.path.includes('/private-agent-wrap')).length;
+        const denied = await other.sdk.callTool({ name: 'private_show', arguments: { id: f.copy } });
+        expect(denied.isError).toBe(true);
+        for (const hidden of ['PERSON PRIVATE', 'New version', f.copy, f.vaultId, f.bundle.records[0]!.body.artifact]) expect(JSON.stringify(denied.content)).not.toContain(hidden);
+        expect(proxy.trace.filter(t => t.path.includes('/private-vault') || t.path.includes('/private-agent-wrap'))).toHaveLength(privateBefore);
+        expect(await cacheState()).toEqual(foreignBefore);
+        expect(await readFile(join(foreignCache, own.vaultId, 'checkpoint.age'))).toEqual(ownBefore);
+        expect(await readFile(foreignState)).toEqual(foreignCredentials);
+        expect(other.errors()).not.toContain('PERSON PRIVATE');
+      } finally { await other.close(); }
+      await expect(command(foreignState, foreignCache, 'private', 'show', f.copy)).rejects.toMatchObject({ code: 1, stdout: '', stderr: expect.not.stringContaining('PERSON PRIVATE') });
       const logs = await request(`/v1/journeys/${f.trip.id}/log`, 'GET', undefined, as(f.owner)); expect(await logs.text()).not.toContain('New version');
       expect(m.errors()).not.toContain('PERSON PRIVATE');
     } finally { await m.close(); await proxy.close(); }
@@ -243,6 +261,9 @@ describe('Stage 3 independently admitted copies and handoff', () => {
     expect(copy.content.title).toBe('Agent source'); expect(copy.copy.placement).toBeNull();
     await command(f.state, f.cache, 'private', 'delete', authored.id, '--predecessor', original.copy.head);
     expect((await command(dest.state, f.cache, 'private', 'show', copied.id)).content.title).toBe('Agent source');
+    const destinationWriter = await privateMcp(dest.state, f.cache, true);
+    try { await tool(destinationWriter.sdk, 'private_init'); await destinationWriter.advance(300_000); expect((await tool(destinationWriter.sdk, 'private_init')).status).toBe('committed'); }
+    finally { await destinationWriter.close(); }
     const nextAgent = await connected(dest.owner, dest.trip), nextState = await agentState(nextAgent.session); nextAgent.close();
     await command(dest.state, f.cache, 'private', 'init');
     const handoff = join(scratch, 'private-handoff-' + newId());
@@ -254,9 +275,17 @@ describe('Stage 3 independently admitted copies and handoff', () => {
     try {
       const c = await tool(recipient.sdk, 'private_show', { id: copied.id }); expect(c.copy.author).toEqual(original.copy.author);
       await tool(recipient.sdk, 'private_comment', { id: copied.id, text: 'Recipient private comment' });
-      const returned = join(scratch, 'private-return-' + newId()); await tool(recipient.sdk, 'private_return', { path: returned });
+      const returned = join(scratch, 'private-return-' + newId()); await tool(recipient.sdk, 'private_return', { path: returned, destinationState: dest.state });
       expect(await readFile(returned, 'utf8')).not.toContain('Recipient private comment');
       await recipient.advance(300_000);
+      expect((await tool(recipient.sdk, 'private_init')).status).toBe('committed');
+      // Import the return through the CLI into the separately approved original
+      // agent. No source journey session is supplied by either subprocess.
+      await command(dest.state, f.cache, 'private', 'import', returned);
+      const roundTrip = await command(dest.state, f.cache, 'private', 'show', copied.id);
+      expect(roundTrip.copy.author).toEqual(original.copy.author);
+      expect(roundTrip.copy.records.at(-1).actor.signingKey).toBe(nextAgent.session.signingKey);
+      expect(roundTrip.copy.payloads.at(-1).payload.body.text).toBe('Recipient private comment');
     } finally { await recipient.close(); }
   }, 240_000);
 });
