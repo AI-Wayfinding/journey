@@ -40,7 +40,7 @@ describe('real workerd admission and private denials', () => {
     } finally { await proxy.close(); }
   }, 120_000);
 
-  it.each(['expires', 'signingKey', 'keyStorage', 'unknown-version'] as const)('CLI/MCP deny real server %s with unchanged private cache and credentials', async field => {
+  it.each(['expires', 'signingKey', 'keyStorage', 'unknown-version', 'future-minimum'] as const)('CLI/MCP deny real server %s with unchanged private cache and credentials', async field => {
     const f = await privateFixture(), proxy = await privateProxy((path, method, bytes, status) => {
       if (field === 'unknown-version' && path.endsWith('/protocol') && method === 'GET' && status === 200) {
         const value = JSON.parse(bytes.toString()); value.privateFormat = 'private-v999'; return { bytes: Buffer.from(JSON.stringify(value)) };
@@ -54,6 +54,7 @@ describe('real workerd admission and private denials', () => {
     if (field === 'expires') await registryChange(f.agentSession.sessionId, field, Date.now() - 1);
     if (field === 'signingKey') await registryChange(f.agentSession.sessionId, field, (await createSigningIdentity()).publicKey);
     if (field === 'keyStorage') await registryChange(f.agentSession.sessionId, field, 'link');
+    if (field === 'future-minimum') await change(f.trip, f.owner, 'client.minVersion', { version: '0.1.8' });
     await expect(execute(process.execPath, [cli, 'private', 'show', f.copy, '--state', state, '--private-cache', f.cache], { timeout: 90_000 })).rejects.toMatchObject({ code: 1, stdout: '', stderr: expect.not.stringContaining('PERSON PRIVATE') });
     const m = await privateMcp(state, f.cache, true);
     try {
@@ -62,7 +63,7 @@ describe('real workerd admission and private denials', () => {
       expect(await cacheBytes(f.cache, f.vaultId)).toEqual(before); expect(await readFile(state)).toEqual(credentials);
       expect(proxy.trace.filter(t => t.path.includes('/private-vault'))).toEqual([]);
       expect(proxy.trace.filter(t => t.path.includes('/private-agent-wrap')).map(t => [t.method, t.status])).toEqual(field === 'keyStorage' ? [['GET', 403], ['GET', 403]] : []);
-      if (field === 'expires' || field === 'signingKey') expect(proxy.trace.some(t => t.status === 401)).toBe(true);
+      expect(proxy.trace.some(t => t.status === 401)).toBe(field === 'expires' || field === 'signingKey');
     } finally { await m.close(); await proxy.close(); }
   }, 120_000);
 });

@@ -25,14 +25,15 @@ async function ready(): Promise<void> {
 }
 export function localServer() {
 beforeAll(async () => {
+  workerOutput = '';
   await rm(scratch, { recursive: true, force: true });
   await mkdir(scratch, { recursive: true });
   // API-only suites must not depend on a previous browser build creating assets.
   const assets = join(scratch, 'assets');
   await mkdir(assets, { recursive: true });
   worker = spawn(process.execPath, [join(root, 'node_modules/wrangler/bin/wrangler.js'), 'dev', '--config', join(root, 'packages/server/test/wrangler.jsonc'), '--assets', assets, '--port', '18787', '--local', '--persist-to', scratch], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'] });
-  worker.stdout!.on('data', (value: Buffer) => { workerOutput = (workerOutput + value.toString()).slice(-8000); });
-  worker.stderr!.on('data', (value: Buffer) => { workerOutput = (workerOutput + value.toString()).slice(-8000); });
+  worker.stdout!.on('data', (value: Buffer) => { workerOutput += value.toString(); });
+  worker.stderr!.on('data', (value: Buffer) => { workerOutput += value.toString(); });
   await ready();
 }, 45_000);
 afterAll(async () => { if (worker && worker.exitCode === null) { await new Promise<void>(resolve => { worker.once('exit', () => resolve()); worker.kill('SIGTERM'); }); } await rm(scratch, { recursive: true, force: true }); });

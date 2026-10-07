@@ -1,4 +1,5 @@
 import { execFile, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { createServer } from 'node:http';
 import { writeFile, readFile, readdir } from 'node:fs/promises';
@@ -7,7 +8,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { expect } from 'vitest';
 import { join } from 'node:path';
-import { PrivateVault, artifactTypeHash, canonical, decodeVaultWire, encodeVaultPatch, importSigningKey, memberVaultId, newId, newPrivateId, privateAuthority, privateAuthorityHistory, privateHash, privateIdentity, privatePersonSession, signPrivateRecord, verifyPrivateContext } from '@ai-wayfinding/core';
+import { PrivateVault, artifactTypeHash, canonical, decodeVaultWire, decodeVaultPatch, encodeVaultPatch, importSigningKey, memberVaultId, newId, newPrivateId, privateAuthority, privateAuthorityHistory, privateHash, privateIdentity, privatePersonSession, signPrivateRecord, verifyPrivateContext } from '@ai-wayfinding/core';
 import type { Member, PrivateBundle, VaultCacheRecord } from '@ai-wayfinding/core';
 import { JourneyClient } from '../src/journey.js';
 import { openPersonPrivateVault } from '../src/private-store.js';
@@ -49,7 +50,7 @@ export async function privateFixture(populated = true, destination?: { owner: im
 
 /** Virtual scheduling is injected into the real CLI entry, not a replacement CLI.
  * Clock controls live on a loopback fixture port, never in the shipped tool schema. */
-export async function clockedCli() {
+export async function clockedCli(randomOrder?: number[]) {
   const path = join(scratch, 'clocked-cli-' + newId() + '.mjs');
   await writeFile(path, `import { createServer } from 'node:http';
 import { main } from ${JSON.stringify(pathToFileURL(cli).href)};
@@ -61,14 +62,14 @@ const control = createServer(async (req, res) => {
 await new Promise(resolve => control.listen(0, '127.0.0.1', resolve));
 console.error('PRIVATE_CLOCK=' + control.address().port);
 const args = process.argv.slice(2);
-try { await main(args, { privateNow: () => now, privateSchedule: tick => { ticks.add(tick); return () => ticks.delete(tick); } }); }
+try { await main(args, { privateNow: () => now, ${randomOrder ? 'privateRandomOrder: () => ' + JSON.stringify(randomOrder) + ',' : ''} privateSchedule: tick => { ticks.add(tick); return () => ticks.delete(tick); } }); }
 catch (error) { console.error(error.message); process.exitCode = 1; }
 if (args[0] !== 'mcp') control.close();
 `);
   return path;
 }
-export async function privateMcp(state: string, cache: string, clock = false, paired?: string) {
-  const entry = clock ? await clockedCli() : cli;
+export async function privateMcp(state: string, cache: string, clock = false, paired?: string, randomOrder?: number[]) {
+  const entry = clock ? await clockedCli(randomOrder) : cli;
   const transport = new StdioClientTransport({ command: process.execPath, args: [entry, 'mcp', '--state', state, '--private-cache', cache, ...(paired ? ['--paired', paired] : [])], stderr: 'pipe' });
   let port: number | undefined, errors = '';
   transport.stderr?.on('data', (chunk: Buffer) => { errors += chunk.toString(); port = Number(/PRIVATE_CLOCK=(\d+)/.exec(errors)?.[1]) || port; });
@@ -126,7 +127,7 @@ export async function agentState(session: import('../src/storage.js').Remembered
 /** Opaque byte-forwarding proxy preserves signing paths and body bytes. */
 export async function privateProxy(transform?: (path: string, method: string, bytes: Buffer, status: number) => { bytes: Buffer; status?: number } | Promise<{ bytes: Buffer; status?: number }>) {
   let at = 0;
-  const trace: { at: number; path: string; method: string; request: number; response: number; status: number; headers: Record<string, string | string[] | undefined> }[] = [];
+  const trace: { at: number; path: string; method: string; request: number; response: number; status: number; headers: Record<string, string | string[] | undefined>; slots?: number[] }[] = [];
   const forwarding = createServer(async (req, res) => {
     try {
       const path = req.url!, method = req.method!, chunks: Buffer[] = []; for await (const c of req) chunks.push(Buffer.from(c));
@@ -136,7 +137,7 @@ export async function privateProxy(transform?: (path: string, method: string, by
       const response = await fetch('http://localhost:18787' + path, { method, headers, ...(body.length ? { body } : {}) });
       const raw = Buffer.from(await response.arrayBuffer()), changed = await transform?.(path, method, raw, response.status);
       const bytes = changed?.bytes ?? raw, status = changed?.status ?? response.status;
-      trace.push({ at, path, method, request: body.length, response: bytes.length, status, headers: req.headers });
+      trace.push({ at, path, method, request: body.length, response: bytes.length, status, headers: req.headers, ...(method === 'PUT' && path.endsWith('/private-vault') ? { slots: decodeVaultPatch(new Uint8Array(body)).slots.map(s => s.index) } : {}) });
       res.writeHead(status, { 'Content-Type': response.headers.get('content-type') ?? 'application/octet-stream' }); res.end(bytes);
     } catch (error) { res.writeHead(500); res.end(String(error)); }
   });
@@ -151,9 +152,12 @@ export async function retained(cache: string, vault: string, identity: string): 
   const value = JSON.parse(await readFile(join(cache, vault, pointer.file), 'utf8'));
   return { token: value.token, frame: value.frame, slots: value.slots, checkpoint: JSON.parse(await openIdentity(value.checkpoint, [identity])) };
 }
+export async function fileDigest(path: string): Promise<string> {
+  return createHash('sha256').update(await readFile(path)).digest('hex');
+}
 export async function cacheBytes(cache: string, vault: string) {
   const entries = await readdir(join(cache, vault));
-  return Object.fromEntries(await Promise.all(entries.sort().map(async name => [name, (await readFile(join(cache, vault, name))).toString('base64')])));
+  return Object.fromEntries(await Promise.all(entries.sort().map(async name => [name, await fileDigest(join(cache, vault, name))])));
 }
 
 export async function privateDestination(source: Awaited<ReturnType<typeof privateFixture>>) {

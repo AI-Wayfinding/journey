@@ -22,7 +22,7 @@ export function samePrivateContext(left: PrivateContext, right: PrivateContext):
   return stage0Rules.private_authority_snapshot(id(left.journey), id(left.head), id(right.journey), id(right.head));
 }
 export type AddInput = ArtifactInput;
-export interface JourneyOptions { fetch?: typeof fetch; cacheRoot?: string; privateNow?: () => number; privateManualSchedule?: boolean; privateSchedule?: (tick: () => Promise<boolean>) => () => void }
+export interface JourneyOptions { fetch?: typeof fetch; cacheRoot?: string; privateNow?: () => number; privateRandomOrder?: () => number[]; privateManualSchedule?: boolean; privateSchedule?: (tick: () => Promise<boolean>) => () => void }
 export interface ItemView { item: ArtifactItem; comments: ArtifactComment[]; versions: ArtifactView['versions'] }
 interface Verified { state: LogState; epochs: Map<number, JourneyKey>; log: CipherRow[] }
 const historyError = 'This journey history could not be verified. Stop and ask a member for help.';
@@ -127,7 +127,7 @@ export class JourneyClient {
       if (!samePrivateContext(live.context, context) || !privateAccess(live.context, author, live.session, true)) throw new Error('Private authority changed; reopen before saving');
       return (await this.response(`/journeys/${this.session.journeyId}/private-vault`, 'PUT', encodeVaultPatch(patch))).json();
     } };
-    const options: VaultOptions = { actor, contentIdentity, trust: { vault, author }, identity: this.session.identity, signingKey, contexts: [context], sessions: [session], paired, transport, now: this.options.privateNow };
+    const options: VaultOptions = { actor, contentIdentity, trust: { vault, author }, identity: this.session.identity, signingKey, contexts: [context], sessions: [session], paired, transport, now: this.options.privateNow, randomOrder: this.options.privateRandomOrder };
     if (this.options.cacheRoot) options.cache = new NodePrivateStore(this.options.cacheRoot, vault, options);
     const controller = new PrivateVault(options); rememberNodePrivateVault(controller);
     try {

@@ -52,12 +52,17 @@ describe('real CLI/MCP signed forks', () => {
       malformed.records.at(-1)!.prev = await privateHash('unrelated predecessor');
       const { sig: _sig, ...unsigned } = malformed.records.at(-1)!;
       malformed.records[malformed.records.length - 1] = await (await import('@ai-wayfinding/core')).signPrivateRecord(unsigned, await importSigningKey(f.owner.signing.privateKey));
+      const wrongSignature = structuredClone(bundle); wrongSignature.records.at(-1)!.sig = Buffer.alloc(64).toString('base64');
+      const wrongPayload = structuredClone(bundle); wrongPayload.payloads.at(-1)!.payload.body.title = 'TAMPERED PAYLOAD CANARY';
       const cases = [
         { name: 'unsigned', value: await forkCache(f, base, bundle, async raw => { raw.header.sig = ''; }) },
         { name: 'signature', value: await forkCache(f, base, bundle, async raw => { raw.header.sig = Buffer.alloc(64).toString('base64'); }) },
         { name: 'digest', value: { ...good, slots: good.slots.map((s, i) => i === 63 ? Buffer.alloc(1_048_576).toString('base64') : s) } },
         { name: 'complete-digest', value: await forkCache(f, base, bundle, async raw => { const { sig, ...h } = raw.header; raw.header = await signPrivateHeader({ ...h, contentsHash: await privateHash('wrong digest') }, await importSigningKey(f.owner.signing.privateKey)); }) },
         { name: 'predecessor', value: await forkCache(f, base, malformed) },
+        { name: 'record-signature', value: await forkCache(f, base, wrongSignature) },
+        { name: 'payload-digest', value: await forkCache(f, base, wrongPayload) },
+        { name: 'header-predecessor', value: await forkCache(f, base, bundle, async raw => { const { sig, ...h } = raw.header; raw.header = await signPrivateHeader({ ...h, prev: null }, await importSigningKey(f.owner.signing.privateKey)); }) },
         { name: 'stale', value: await forkCache(f, base, bundle, async raw => { const { sig, ...h } = raw.header; raw.header = await signPrivateHeader({ ...h, version: h.version - 1 }, await importSigningKey(f.owner.signing.privateKey)); }) },
         { name: 'unknown-version', value: await forkCache(f, base, bundle, async raw => { (raw.header as any).v = 2; }) },
         { name: 'extra-field', value: { ...good, plaintext: 'INVALID FORK CANARY' } },
