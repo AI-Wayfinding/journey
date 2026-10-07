@@ -91,7 +91,7 @@ export async function approve(owner: Owner, trip: Fixture, url: string, code: st
 }
 export async function connected(owner: Owner, trip: Fixture, scope: 'read' | 'readwrite' = 'readwrite', name?: string): Promise<JourneyClient> {
   let approval: Promise<void> | undefined;
-  const connection = await connectJourney(trip.id, { server, scope, name, pollMs: 30, onApproval: (url, code) => { approval = approve(owner, trip, url, code, scope, name); } });
+  const connection = await connectJourney(trip.id, { server, name, pollMs: 30, onApproval: (url, code) => { approval = approve(owner, trip, url, code, scope, name); } });
   await approval;
   return connection.client;
 }

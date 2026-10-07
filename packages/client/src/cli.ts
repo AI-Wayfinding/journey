@@ -14,7 +14,7 @@ import type { ArtifactInput } from './artifacts.js';
 
 const help = `wayfinding — read and write an approved journey
 
-wayfinding connect <journey-id> [--name "Agent name"] [--scope read|readwrite] [--remember] [--server https://app.wayfinding.support] [--key-folder PATH]
+wayfinding connect <journey-id> [--name "Agent name"] [--remember] [--server https://app.wayfinding.support] [--key-folder PATH]
 wayfinding connect <journey-id> --state FILE --no-wait [--json]
 wayfinding connect --state FILE --wait [--timeout SECONDS] [--json]
 wayfinding disconnect [--key-folder PATH]
@@ -42,9 +42,9 @@ wayfinding mcp [--connect <journey-id>] [--name "Agent name"]
 Use --state FILE with commands or mcp to use an approved file-backed session.
 Use --journey <journey-id> with any one-shot command to ask for approval each time without remembering keys.
 Use --cache to store only encrypted journey records and a verified log head; --no-cache turns it off.
-Keys never go into the local cache. An agent cannot change journey membership or access.`;
+Keys never go into the local cache. Agent capabilities follow the adding person’s current access.`;
 
-const valueFlags = new Set(['--scope', '--name', '--server', '--key-folder', '--journey', '--connect', '--type', '--title', '--body', '--tags', '--state', '--timeout', '--tag', '--file', '--format', '--url', '--summary', '--notes', '--predecessor', '--blob', '--output', '--version', '--project', '--purpose', '--project-state']);
+const valueFlags = new Set(['--name', '--server', '--key-folder', '--journey', '--connect', '--type', '--title', '--body', '--tags', '--state', '--timeout', '--tag', '--file', '--format', '--url', '--summary', '--notes', '--predecessor', '--blob', '--output', '--version', '--project', '--purpose', '--project-state']);
 const boolFlags = new Set(['--remember', '--cache', '--no-cache', '--help', '--no-wait', '--wait', '--json']);
 function parse(args: string[]): { command: string; positional: string[]; flags: Record<string, string | boolean> } {
   const command = args[0] ?? '--help', flags: Record<string, string | boolean> = {}, positional: string[] = [];
@@ -105,19 +105,18 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     console.log('Remembered journey keys and the local cache have been removed.'); return;
   }
   const secret = await passphrase(keyFolder);
-  const server = flag(flags, '--server'), scope = flag(flags, '--scope');
-  if (scope && scope !== 'read' && scope !== 'readwrite') throw new Error('Use --scope read or --scope readwrite.');
+  const server = flag(flags, '--server');
   const statePath = flag(flags, '--state');
-  const connect = async (journeyId: string, mcp = false) => connectJourney(journeyId, { server, scope: scope as 'read' | 'readwrite' | undefined, name: flag(flags, '--name'), remember: !!flags['--remember'], keyFolder, passphrase: secret, onApproval: (url, code) => { (mcp ? console.error : console.log)('Open this link, check the code matches, and approve access to this journey: ' + url + '\nSix-digit code: ' + code); } });
+  const connect = async (journeyId: string, mcp = false) => connectJourney(journeyId, { server, name: flag(flags, '--name'), remember: !!flags['--remember'], keyFolder, passphrase: secret, onApproval: (url, code) => { (mcp ? console.error : console.log)('Open this link, check the code matches, and approve access to this journey: ' + url + '\nSix-digit code: ' + code); } });
   if (command === 'connect') {
     const journeyId = positional[0], json = !!flags['--json'];
     if (flags['--no-wait']) {
       if (!journeyId || !statePath || flags['--wait'] || flags['--remember']) throw new Error('Use connect <journey-id> --state FILE --no-wait without --remember.');
-      reportConnect(await requestConnection(journeyId, { server, scope: scope as 'read' | 'readwrite' | undefined, name: flag(flags, '--name'), state: statePath }), 'pending', json);
+      reportConnect(await requestConnection(journeyId, { server, name: flag(flags, '--name'), state: statePath }), 'pending', json);
       return;
     }
     if (flags['--wait']) {
-      if (journeyId || !statePath || flags['--remember'] || server || scope || flags['--name']) throw new Error('Use connect --state FILE --wait [--timeout SECONDS].');
+      if (journeyId || !statePath || flags['--remember'] || server || flags['--name']) throw new Error('Use connect --state FILE --wait [--timeout SECONDS].');
       const timeout = flag(flags, '--timeout') ?? '600';
       if (!/^[0-9]+$/.test(timeout) || !Number.isSafeInteger(Number(timeout)) || Number(timeout) < 1) throw new Error('--timeout must be a positive number of seconds.');
       let state;
@@ -184,7 +183,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
           case 'list': result = await client.projectList(); break;
           case 'create': if (!flag(flags, '--purpose')) throw new Error('Supply --purpose TEXT.'); result = await client.projectCreate(flag(flags, '--purpose')!); break;
           case 'show': if (!id) throw new Error('Give the project ID.'); result = await client.projectShow(id); break;
-          case 'join': case 'leave': if (!id) throw new Error('Give the project ID.'); result = await client.projectParticipation(id); break;
+          case 'join': case 'leave': if (!id) throw new Error('Give the project ID.'); result = await client.projectParticipation(id, action); break;
           case 'purpose': if (!id || !flag(flags, '--purpose')) throw new Error('Give the project ID and --purpose TEXT.'); result = await client.projectPurpose(id, flag(flags, '--purpose')!, predecessor()); break;
           case 'state': if (!id || !flag(flags, '--project-state')) throw new Error('Give the project ID and --project-state.'); result = await client.projectState(id, flag(flags, '--project-state')!, predecessor()); break;
           default: throw new Error('Use project list, show, create, join, leave, purpose or state.');

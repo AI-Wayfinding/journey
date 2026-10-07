@@ -18,6 +18,24 @@ async function fixture() {
 }
 
 describe('scheduled fixed member vault controller', () => {
+  it('persists an agent author and a distinct sibling signer in the person vault', async () => {
+    const f = await fixture(), author = privateIdentity(f.f.writer.member), actor = privateIdentity(f.f.reader.member);
+    const writer = await privateAgentSession(f.f.context, author, f.f.writer.key, f.f.writer.identity, 'authenticated');
+    const sibling = await privateAgentSession(f.f.context, actor, f.f.reader.key, f.f.reader.identity, 'authenticated');
+    const first = await record(f.f.context, f.f.writer, f.f.vault, f.f.copy, f.f.artifact, author);
+    const edit = await record(f.f.context, f.f.reader, f.f.vault, f.f.copy, f.f.artifact, author, 'private.version', [first.record], content('Sibling version'));
+    const bundle = { ...f.bundle, records: [first.record, edit.record], payloads: [first.payload, edit.payload] };
+    f.options.sessions = [f.f.session, writer, sibling];
+    await f.controller.open(); await f.controller.stage(bundle); f.time(300000); await f.controller.tick();
+    f.controller.close();
+    const reopened = new PrivateVault({ ...f.options, cache: undefined });
+    await reopened.open();
+    expect(reopened.branches[0]!.bundle.author).toEqual(f.f.identity);
+    expect(reopened.branches[0]!.bundle.records[0]!.body.author).toEqual(author);
+    expect(reopened.branches[0]!.bundle.records[1]!.actor).toEqual(actor);
+    expect(reopened.branches[0]!.bundle.records[1]!.sig).toBe(edit.record.sig);
+    reopened.close();
+  }, 60000);
   it.each(['expiry', 'removal'] as const)('person reopens agent-signed head on a fresh device after signer %s', async reason => {
     const f = await fixture(), writer = await agent(f.f.author.member.id);
     writer.member.expiresAt = new Date(Date.now() + 60000).toISOString();

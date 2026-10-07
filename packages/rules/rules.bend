@@ -9,12 +9,9 @@ type MemberKind is Data:
   Person{}
   Agent{}
 
+# Historical agent settings remain parseable but grant no independent cap.
 def agent_access(member: Role, setting: Role) -> Role:
-  match member:
-    case ReadOnly{}:
-      ReadOnly{}
-    case ReadWrite{}:
-      setting
+  member
 
 def can_write(role: Role) -> Bool:
   match role:
@@ -76,6 +73,22 @@ def agent_live_access(m: Maybe<&2, Member>, setting: Role, live: Bool) -> Maybe<
           Bool.pick(Maybe<&2, Role>, live && parent_live, Some{agent_access(role, setting)}, None{})
         case Agent{}:
           None{}
+
+# Resolve authority to a live person without replacing the signing identity.
+def live_person(m: Maybe<&2, Member>, live: Bool) -> Maybe<&2, Member>:
+  match m:
+    case None{}: None{}
+    case Some{+person}:
+      Bool.pick(Maybe<&2, Member>, live && is_person(Some{person}), Some{person}, None{})
+
+def authority_person(m: Maybe<&2, Member>, +xs: +List<Member>) -> Maybe<&2, Member>:
+  match m:
+    case None{}: None{}
+    case Some{+member}:
+      Member{_, kind, _, _, owner, _, live} = member
+      match kind:
+        case Person{}: live_person(Some{member}, live)
+        case Agent{}: live_person(find(xs, owner), live)
 
 def member_access(m: Maybe<&2, Member>, +xs: +List<Member>) -> Maybe<&2, Role>:
   match m:
@@ -492,7 +505,7 @@ def server_read(access: Maybe<&2, Role>, identity: Bool, version: Bool) -> Bool:
 def server_content(access: Maybe<&2, Role>, identity: Bool, version: Bool, pending: Bool) -> Bool:
   content_write(access, pending) && identity && version
 
-# Match the signed admission limit and adding person, not caller access rows.
+# Match the adding person; historical agent scopes are ignored.
 def admission_scope(member: Maybe<&2, Role>, admitted: Maybe<&2, Role>) -> Bool:
   match member admitted:
     case None{} None{}:
@@ -509,7 +522,7 @@ def server_admission(kind: MemberKind, scope: Maybe<&2, Role>, admitted: Maybe<&
     case Person{}:
       Bool.not(support) || admission_scope(scope, Some{ReadOnly{}})
     case Agent{}:
-      Nat.is_eq(owner, actor) && admission_scope(scope, admitted)
+      Nat.is_eq(owner, actor)
 
 # Stage 1 authority. Hosts normalize signed IDs and type commitments, never roles.
 def artifact_ready(v: Version) -> Bool:
@@ -782,18 +795,18 @@ def pair_active(p: Participation) -> Bool:
 def project_person(target: Maybe<&2, Member>, pairs: +List<Participation>, project: Nat) -> Bool:
   match target:
     case None{}: False{}
-    case Some{Member{id, kind, _, _, _, _, live}}:
+    case Some{Member{id, kind, _, _, owner, _, live}}:
       match kind:
-        case Agent{}: False{}
+        case Agent{}: live && pair_active(pair_find(pairs, project, owner))
         case Person{}: live && pair_active(pair_find(pairs, project, id))
 
 def project_follower(target: Maybe<&2, Member>, +members: +List<Member>, pairs: +List<Participation>, +project: Nat) -> Bool:
   match target:
     case None{}: False{}
-    case Some{Member{+id, kind, _, _, owner, _, live}}:
+    case Some{Member{+id, kind, _, _, owner, _, +live}}:
       match kind:
         case Person{}: live && pair_active(pair_find(pairs, project, id))
-        case Agent{}: live && project_person(find(members, owner), pairs, project)
+        case Agent{}: live && project_person(live_person(find(members, owner), live), pairs, project)
 
 def project_participant(+members: +List<Member>, pairs: +List<Participation>, +project: Nat, actor: Nat) -> Bool:
   project_follower(find(members, actor), members, pairs, project)
@@ -837,8 +850,13 @@ def project_placement_value(value: Placement, target: Maybe<&2, Artifact>, +item
 def project_placement(target: Maybe<&2, Artifact>, items: +List<ProjectInfo>, pairs: +List<Participation>, +placements: +List<Placement>, +id: Nat, project: Nat, author: Nat, writer: Nat, actor: Nat, predecessor: Nat, revision: Nat) -> ProjectTransition:
   project_placement_value(placement_find(placements, id), target, items, pairs, placements, id, project, author, writer, actor, predecessor, revision)
 
-def project_self(+members: +List<Member>, +actor: Nat, member: Nat) -> Bool:
-  Nat.is_eq(actor, member) && is_person(find(members, actor)) && access_read(member_access(find(members, actor), members))
+def project_self_person(person: Maybe<&2, Member>, member: Nat) -> Bool:
+  match person:
+    case None{}: False{}
+    case Some{Member{id, _, _, _, _, _, _}}: Nat.is_eq(id, member)
+
+def project_self(+members: +List<Member>, actor: Nat, member: Nat) -> Bool:
+  project_self_person(authority_person(find(members, actor), members), member)
 
 def project_authority(+members: +List<Member>, +actor: Nat, +pairs: +List<Participation>, pending: Bool, action: ProjectAction) -> Bool:
   match action:
@@ -942,7 +960,7 @@ def private_audience_value(+members: +List<Member>, +author: Maybe<&2, Member>, 
   match actor:
     case None{}: False{}
     case Some{Member{_, kind, _, _, _, _, _}}:
-      private_credential(kind, value) && private_relation(author, actor) && access_read(member_access(actor, members))
+      private_credential(kind, value) && private_relation(authority_person(author, members), authority_person(actor, members))
 
 def private_audience(+members: +List<Member>, author: Nat, actor: Nat, value: PrivateCredential) -> Bool:
   private_audience_value(members, find(members, author), find(members, actor), value)
@@ -954,13 +972,9 @@ def private_link_read(+members: +List<Member>, +actor: Nat) -> Bool:
 def private_write(+members: +List<Member>, author: Nat, +actor: Nat, value: PrivateCredential, minimum: Version, pending: Bool, current: Bool) -> Bool:
   current && private_ready(minimum) && private_audience(members, author, actor, value) && content_write(member_access(find(members, actor), members), pending)
 
-# Persons deliver only to their own eligible agents; agents fetch only themselves.
-def private_wrap_access(+members: +List<Member>, +author: Nat, +actor: Nat, +target: Nat, +value: PrivateCredential, write: Bool) -> Bool:
-  match write:
-    case True{}:
-      private_credential(Person{}, value) && private_audience(members, author, actor, value) && private_audience(members, author, target, PrivateAuthenticatedAgent{})
-    case False{}:
-      Nat.is_eq(actor, target) && private_credential(Agent{}, value) && private_audience(members, author, actor, value)
+# Both fetch and delivery require a live same-person actor and recipient.
+def private_wrap_access(+members: +List<Member>, +author: Nat, actor: Nat, +target: Nat, value: PrivateCredential, write: Bool) -> Bool:
+  private_audience(members, author, actor, value) && (private_audience(members, author, target, PrivatePersonCredential{}) || private_audience(members, author, target, PrivateAuthenticatedAgent{}))
 
 # Destination visibility deliberately grants no authority.
 def private_copy_access(source: Bool, destination: Bool, different: Bool, visibility: Visibility) -> Bool:
@@ -1003,7 +1017,7 @@ def private_action(value: PrivateCopy, +actor: Nat, +record: Nat, next: PrivateA
 def private_first(id: Nat, +actor: Nat, record: Nat, next: PrivateAction) -> PrivateTransition:
   match next:
     case PrivateCreate{artifact, +author, writer, journey, +version, typeHash, blobs}:
-      private_guard(Nat.is_eq(author, actor) && Nat.is_eq(writer, actor), PrivateCopy{id, artifact, author, journey, version, record, 0n, False{}, ArtifactVersion{version, actor, blobs} <> Nil{}, version <> Nil{}, 0n, 0n, typeHash})
+      private_guard(Nat.is_eq(writer, actor), PrivateCopy{id, artifact, author, journey, version, record, 0n, False{}, ArtifactVersion{version, actor, blobs} <> Nil{}, version <> Nil{}, 0n, 0n, typeHash})
     case _: PrivateConflict{}
 
 def private_position(value: Maybe<&2, PrivateCopy>, seq: Nat, previous: Nat) -> Bool:
@@ -1037,10 +1051,7 @@ def private_bundle_recipient(scope: PrivateBundleScope, kind: MemberKind, same: 
   match scope:
     case PrivateBackup{}: same
     case PrivateReturn{}: same
-    case PrivateHandoff{}:
-      match kind:
-        case Person{}: False{}
-        case Agent{}: True{}
+    case PrivateHandoff{}: True{}
 
 def private_origin_version(current: Nat, observed: Nat) -> Bool:
   Nat.is_eq(current, observed)

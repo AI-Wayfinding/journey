@@ -42,6 +42,7 @@ export class EnclaveObject {
   private access(state: LogState, subject: Subject, write = false, checkVersion = true): boolean {
     const model = normalizedMembers(state, [subject.principal], Date.now());
     const access = rules.member_access(rules.find(model.members, model.id(subject.principal)), model.members);
+    if (write && subject.privateCredential === 'link') return false;
     return write ? rules.server_content(access, this.identity(state, subject), this.version(state, subject), state.pendingRotation === true)
       : rules.server_read(access, this.identity(state, subject), !checkVersion || this.version(state, subject));
   }
@@ -63,11 +64,16 @@ export class EnclaveObject {
       return await this.serialized(() => this.handle(input));
     } catch { return failure('invalid-request', 400); }
   }
+  private person(state: LogState, principal: string, now: number): Member | undefined {
+    const model = normalizedMembers(state, [principal], now);
+    return state.members[model.ids[Number(model.authorityId(principal)) - 1]!]?.member;
+  }
   private current(): LogState { return JSON.parse(String(this.one('SELECT state FROM authority LIMIT 1')!.state)); }
   private artifactVersion(state: LogState, subject: Subject): boolean {
     try { return rules.artifact_client(ruleVersion(subject.clientVersion ?? ''), ruleVersion(state.minClientVersion), subject.controlFormat === 'control-proof-v1', subject.artifactFormat === 'artifact-v1'); } catch { return false; }
   }
   private stageAccess(state: LogState, subject: Subject, epoch: number): boolean {
+    if (subject.privateCredential === 'link') return false;
     const model = normalizedMembers(state, [subject.principal], Date.now());
     return rules.blob_stage(rules.member_access(rules.find(model.members, model.id(subject.principal)), model.members), this.identity(state, subject), this.artifactVersion(state, subject) && this.version(state, subject), state.pendingRotation === true, BigInt(epoch), BigInt(state.currentEpoch));
   }
@@ -179,23 +185,22 @@ export class EnclaveObject {
       }
       case 'blobRead': return this.download(state, subject, input.id);
       case 'privateAccess': {
-        const member = state.members[subject.principal]!.member;
-        const principal = member.kind === 'agent' ? member.addedBy : member.id;
+        const principal = this.person(state, subject.principal, now)?.id;
         if (!principal || state.members[principal]?.member.kind !== 'person') return failure('forbidden', 403);
         const model = normalizedMembers(state, [subject.principal, principal], now);
         const credential = { $: subject.agent ? subject.privateCredential === 'authenticated' ? 'PrivateAuthenticatedAgent' as const : 'PrivateUnknownCredential' as const : 'PrivatePersonCredential' as const };
-        const allowed = input.write && subject.agent ? rules.private_write(model.members, model.id(principal), model.id(subject.principal), credential, ruleVersion(state.minClientVersion), state.pendingRotation === true, true) : rules.private_audience(model.members, model.id(principal), model.id(subject.principal), credential);
+        const allowed = rules.private_audience(model.members, model.id(principal), model.id(subject.principal), credential) && (!input.write || this.access(state, subject, true));
         if (!allowed) return failure('forbidden', 403);
         if (vaultRequest) {
           const stub = this.env.PRIVATE_VAULTS.get(this.env.PRIVATE_VAULTS.idFromName(JSON.stringify([state.journey, principal])));
-          return stub.fetch('https://internal/' + new URL(vaultRequest.url).search, { method: vaultRequest.method, headers: { 'X-Private-Agent': subject.agent ? '1' : '0' }, ...(input.write ? { body: vaultRequest.body } : {}) });
+          return stub.fetch('https://internal/' + new URL(vaultRequest.url).search, { method: vaultRequest.method, ...(input.write ? { body: vaultRequest.body } : {}) });
         }
         return Response.json({ allowed: true, principal });
       }
       case 'privateWrapEligible':
       case 'privateWrapAccess': {
-        const member = state.members[subject.principal]!.member, agent = state.members[input.agent]?.member;
-        const person = member.kind === 'agent' ? member.addedBy : member.id;
+        const agent = state.members[input.agent]?.member;
+        const person = this.person(state, subject.principal, now)?.id;
         if (!person || !agent || agent.kind !== 'agent') return failure('forbidden', 403);
         const model = normalizedMembers(state, [person, subject.principal, input.agent], now);
         const credential = { $: subject.agent ? subject.privateCredential === 'authenticated' ? 'PrivateAuthenticatedAgent' as const : 'PrivateUnknownCredential' as const : 'PrivatePersonCredential' as const };
@@ -205,7 +210,7 @@ export class EnclaveObject {
         return stub.fetch('https://internal/agent-wrap?agent=' + encodeURIComponent(input.agent), input.ciphertext ? { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ciphertext: input.ciphertext, expires: Date.parse(agent.expiresAt!) }) } : {});
       }
       case 'access': return Response.json({ allowed: true, epoch: state.currentEpoch });
-      case 'inviteAccess': return isPersonGuide(state, subject.principal) && !subject.agent ? Response.json({ allowed: true }) : failure('forbidden', 403);
+      case 'inviteAccess': return isPersonGuide(state, subject.principal) && subject.privateCredential !== 'link' ? Response.json({ allowed: true, accountHash: this.one('SELECT accountHash FROM principals WHERE id=?', this.person(state, subject.principal, now)!.id)?.accountHash }) : failure('forbidden', 403);
       case 'linkAccess': return replayControl(state, subject.principal, 'Renew', input.member, undefined, false, undefined, now).transition.$ === 'Accepted' && !subject.agent ? Response.json({ allowed: true }) : failure('forbidden', 403);
       case 'reserve': {
         if (!this.access(state, subject, true)) return failure(state.pendingRotation ? 'old-epoch' : 'forbidden', state.pendingRotation ? 409 : 403);
@@ -228,7 +233,7 @@ export class EnclaveObject {
         });
         return Response.json({ seq: envelope.outside.seq }, { status: 201 });
       }
-      case 'controlWrite': return isProjectAction(input.control.proof.type) ? this.project(state, JSON.parse(String(authority.creator)) as Member, subject, input) : isArtifactAction(input.control.proof.type) ? this.artifact(state, JSON.parse(String(authority.creator)) as Member, subject, input) : this.control(state, JSON.parse(String(authority.creator)) as Member, subject, input, now);
+      case 'controlWrite': if (subject.privateCredential === 'link') return failure('forbidden', 403); return isProjectAction(input.control.proof.type) ? this.project(state, JSON.parse(String(authority.creator)) as Member, subject, input) : isArtifactAction(input.control.proof.type) ? this.artifact(state, JSON.parse(String(authority.creator)) as Member, subject, input) : this.control(state, JSON.parse(String(authority.creator)) as Member, subject, input, now);
       case 'records': return Response.json({ records: this.sql.exec('SELECT envelope FROM records WHERE seq>? ORDER BY seq LIMIT ?', input.after, input.limit).toArray().map(row => JSON.parse(String(row.envelope))) });
       case 'log': return Response.json({ log: this.sql.exec('SELECT seq,entry FROM log WHERE seq>? ORDER BY seq LIMIT 1000', input.after).toArray().map(row => ({ seq: row.seq, ...JSON.parse(String(row.entry)) as ControlInput })) });
       case 'wraps': return Response.json({ wraps: this.sql.exec('SELECT epoch,wrap FROM wraps WHERE principal=? ORDER BY epoch', subject.principal).toArray() });
@@ -346,7 +351,7 @@ export class EnclaveObject {
       this.sql.exec('UPDATE authority SET state=?', JSON.stringify(next));
       this.sql.exec('UPDATE meta SET currentEpoch=?,nextLog=?,pendingRotation=?', next.currentEpoch, proof.seq + 1, next.pendingRotation ? 1 : 0);
       for (const id of removed) { this.sql.exec('DELETE FROM principals WHERE id=?', id); this.sql.exec('DELETE FROM reservations WHERE principal=?', id); }
-      if (admission) this.sql.exec('INSERT INTO principals(id,kind,scope,accountHash,addedBy) VALUES(?,?,?,?,?)', admission.id, admission.kind, admission.scope ?? 'readwrite', admission.accountHash ?? null, admission.kind === 'agent' ? subject.principal : null);
+      if (admission) this.sql.exec('INSERT INTO principals(id,kind,scope,accountHash,addedBy) VALUES(?,?,?,?,?)', admission.id, admission.kind, admission.scope ?? 'readwrite', admission.accountHash ?? null, admission.kind === 'agent' ? this.person(state, subject.principal, now)!.id : null);
       for (const w of supplied) this.sql.exec('INSERT INTO wraps VALUES(?,?,?)', w.principal, w.epoch, w.wrap);
     });
     // Serialized with wrap delivery: no late PUT can resurrect a removed wrap.
@@ -363,7 +368,7 @@ export class EnclaveObject {
     if (!admission || member.id !== admission.id || member.kind !== admission.kind || member.recipient !== admission.recipient || member.signingKey !== admission.signingKey) return false;
     if (admission.scope !== undefined && !['read', 'readwrite'].includes(admission.scope)) return false;
     const scope = (value: Member['scope']): Maybe<Role> => value === undefined ? { $: 'None' } : { $: 'Some', value: contentRole(value) };
-    if (!rules.server_admission({ $: member.kind === 'person' ? 'Person' : 'Agent' }, scope(member.scope), scope(admission.scope), model.id(member.addedBy), model.id(subject.principal), Boolean(admission.support))) return false;
+    if (!rules.server_admission({ $: member.kind === 'person' ? 'Person' : 'Agent' }, scope(member.scope), scope(admission.scope), model.id(member.addedBy), model.authorityId(subject.principal), Boolean(admission.support))) return false;
     if (member.kind === 'person') return !!admission.accountHash && (admission.support ? member.support === true && Date.parse(member.expiresAt ?? '') === admission.expiresAt && admission.expiresAt! > now : member.support === undefined && member.expiresAt === undefined);
     return Date.parse(member.expiresAt ?? '') === admission.expiresAt && admission.expiresAt! > now;
   }

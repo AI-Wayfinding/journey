@@ -45,9 +45,13 @@ const pagination = 'continues large Unicode purposes, text and effective rosters
 const mutation = (name, path, old, replacement, pkg, file, test, proof = false) => ({ name, path, old, replacement, pkg, file, test, proof });
 const bend = (name, old, replacement, test, proof = false) => mutation(name, rulesPath, old, replacement, 'core', contract, test, proof);
 const cases = [
-  bend('participation: self-only', 'Nat.is_eq(actor, member) && is_person(find(members, actor))', 'True{} && is_person(find(members, actor))', self, true),
-  bend('participation: agents cannot join', 'Nat.is_eq(actor, member) && is_person(find(members, actor))', 'Nat.is_eq(actor, member) && True{}', self, true),
-  bend('inheritance: live adding person', 'case Agent{}: live && project_person(find(members, owner), pairs, project)', 'case Agent{}: live && True{}', removal, true),
+  bend('participation: self-only person authority', 'project_self_person(authority_person(find(members, actor), members), member)', 'True{}', self, true),
+  mutation('parity: agent joins and leaves for its person', rulesPath, 'project_self_person(authority_person(find(members, actor), members), member)', 'project_self_person(find(members, actor), member)', 'core', 'test/membership.test.ts', 'joins and leaves only the person participation and requires a live parent', true),
+  bend('inheritance: live adding person', 'case Agent{}: live && project_person(live_person(find(members, owner), live), pairs, project)', 'case Agent{}: live && True{}', removal, true),
+  bend('inheritance: parent participation cannot be bypassed', 'case Agent{}: live && project_person(live_person(find(members, owner), live), pairs, project)', 'case Agent{}: live && is_person(live_person(find(members, owner), live))', self, true),
+  bend('inheritance: parent expiry is live', 'case Agent{}: live && project_person(live_person(find(members, owner), live), pairs, project)', 'case Agent{}: live && pair_active(pair_find(pairs, project, owner))', removal, true),
+  bend('inheritance: agent expiry is live', 'case Agent{}: live && project_person(live_person(find(members, owner), live), pairs, project)', 'case Agent{}: project_person(live_person(find(members, owner), True{}), pairs, project)', removal, true),
+  mutation('parity: signed join target resolves to person', 'packages/core/src/rules.ts', 'member: model.authorityId(body.member as string)', 'member: model.id(body.member as string)', 'core', 'test/membership.test.ts', 'joins and leaves only the person participation and requires a live parent'),
   bend('invalidation: removal cannot resurrect pairs', 'active && Bool.not(Nat.is_eq(member, person))} <> project_remove', 'active && True{}} <> project_remove', removal, true),
   bend('D17: metadata requires participation', 'case ProjectStateChange{id, _, _}: project_participant(members, pairs, id, actor)', 'case ProjectStateChange{id, _, _}: True{}', self),
   bend('D17: purpose requires participation', 'case ProjectPurpose{id, _}: project_participant(members, pairs, id, actor)', 'case ProjectPurpose{id, _}: True{}', self),
@@ -111,8 +115,9 @@ function proofFailure(name) {
   }
 }
 try {
-  // Copy tracked bytes, never mutate the working tree or share generated outputs.
-  const paths = execFileSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8' }).split('\0').filter(Boolean);
+  // Copy current tracked and new package bytes; never mutate the working tree
+  // or share generated outputs. New parity modules must be present in the baseline.
+  const paths = [...new Set([...execFileSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8' }).split('\0'), ...execFileSync('git', ['ls-files', '--others', '--exclude-standard', '-z', '--', 'packages'], { cwd: root, encoding: 'utf8' }).split('\0')])].filter(Boolean);
   for (const path of paths) { mkdirSync(dirname(join(tree, path)), { recursive: true }); writeFileSync(join(tree, path), readFileSync(join(root, path))); }
   mkdirSync(join(tree, 'node_modules/@ai-wayfinding'), { recursive: true });
   for (const entry of readdirSync(join(root, 'node_modules'))) {
@@ -150,6 +155,8 @@ try {
     if (c.path === rulesPath) buildRules();
     if (c.path.startsWith('packages/core/')) buildCore();
   }
+  // A clean boundary baseline prevents unrelated failures masking a survivor.
+  setup(process.execPath, ['scripts/check-bend-boundary.mjs', '--rules']);
   // Exercise the real gate against a duplicate host decision, not a comment or
   // fixture marker. Replacing a required adapter with a stub must fail too.
   for (const [name, path, old, replacement] of [

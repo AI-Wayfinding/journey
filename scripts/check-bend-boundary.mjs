@@ -88,7 +88,8 @@ function violations(source, path) {
       const artifactDecision = /(?:\.(?:predecessor|head|typeHash)|\[['"](?:predecessor|head|typeHash)['"]\])\s*(?:===|!==|==|!=)/.test(expression) && !/\s(?:undefined|null)$/.test(expression);
       // Type/hash projection checks validate content, not permission or transitions.
       const artifactFormat = path === 'packages/core/src/artifacts.ts' && expression === 'await artifactTypeHash(payload.content.kind) !== body.typeHash';
-      const ownerField = ['packages/core/src/rules.ts', 'packages/core/src/log.ts'].includes(path) && ['value.addedBy !== undefined', 'value.addedBy === undefined'].includes(expression);
+      const ownerField = ['packages/core/src/rules.ts', 'packages/core/src/log.ts'].includes(path) && ['value.addedBy !== undefined', 'value.addedBy === undefined'].includes(expression)
+        || path === 'packages/core/src/membership.ts' && expression === 'member.addedBy === undefined';
       const ownedTest = /(?:\.addedBy|\[['"]addedBy['"]\])\s*(?:===|!==|==|!=)/.test(expression) && !ownerField;
       const artifactOwnership = /(?:\.(?:author|writer|owner)|\[['"](?:author|writer|owner)['"]\])\s*(?:===|!==|==|!=)/.test(expression);
       // Stored transport inputs are intentionally not verified replay; server
@@ -104,7 +105,8 @@ function violations(source, path) {
         && ts.isBinaryExpression(node.parent) && node.parent.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken
         && /^(approved|row|session)\.scope !== 'read' && \1\.scope !== 'readwrite'$/.test(text(node.parent));
       const memberFormat = path === 'packages/core/src/log.ts' && ["value.scope === 'read'", "value.scope === 'readwrite'"].includes(expression);
-      const parser = scopeSchema || memberFormat || path === 'packages/server/src/index.ts' && ["change.scope !== 'read'", "b.scope !== 'read'", "row.scope !== 'read'"].includes(expression);
+      const linkFormat = path === 'packages/server/src/agentLink.ts' && expression === "mine.scope !== 'read'";
+      const parser = linkFormat || scopeSchema || memberFormat || path === 'packages/server/src/index.ts' && ["change.scope !== 'read'", "b.scope !== 'read'", "row.scope !== 'read'", "signed.proof.body.member.scope !== 'read'"].includes(expression);
       const roleInput = ts.isConditionalExpression(node.parent) && [
         ['packages/core/src/log.ts', "body.role === 'read-only'"],
         ['packages/server/src/enclave.ts', "proof.body.role === 'read-only'"],
@@ -121,6 +123,7 @@ function violations(source, path) {
       const adapter = [
         ['packages/web/src/projects.ts', 'ctx.state.projects?.participation.find(p => p.project === project && p.member === ctx.principal)'],
         ['packages/client/src/journey.ts', '(verified.state.projects?.participation ?? []).filter(pair => pair.project === id)'],
+        ['packages/client/src/journey.ts', 'project.participation.find(row => row.member === member)'],
         ['packages/core/src/rules.ts', 'Object.keys(state.members).filter(actor => rules.project_participant(model.members, index.pairs, projectId(project), model.id(actor)))'],
         ['packages/core/src/rules.ts', 'Object.keys(state.artifacts?.items ?? {}).filter(id => rules.project_selected(rules.artifact_find(artifacts.items, model.id(id)), index.placements, chosen, model.id(id)))'],
       ].some(([owner, input]) => owner === path && input === expression);
@@ -227,6 +230,20 @@ async function rules() {
   ]) for (const path of ['packages/core/src/rules.ts', 'packages/core/src/log.ts']) {
     assert(violations(fixture, path).length > 0, `Adapter names must not exempt decisions: ${path}: ${fixture}`);
   }
+  // Format and observed-revision adapters are exact and file-scoped, never a
+  // general exemption for authorization or filtering current participants.
+  for (const [path, expression] of [
+    ['packages/core/src/membership.ts', 'member.addedBy === undefined'],
+    ['packages/server/src/agentLink.ts', "mine.scope !== 'read'"],
+    ['packages/server/src/index.ts', "signed.proof.body.member.scope !== 'read'"],
+    ['packages/client/src/journey.ts', 'project.participation.find(row => row.member === member)'],
+  ]) {
+    assert.deepEqual(violations(expression, path), [], `Named adapter: ${path}`);
+    assert(violations(expression, 'packages/core/src/removal.ts').length > 0, `Adapter exemption must be file-scoped: ${expression}`);
+  }
+  for (const fixture of ["if (member.addedBy === actor) return true;", "if (member.scope === 'readwrite') return true;", 'const participants = state.projects.participation.filter(pair => pair.active);']) {
+    assert(violations(fixture, 'packages/core/src/membership.ts').length > 0, `Membership adapter must not authorize: ${fixture}`);
+  }
   const grantInput = "(proof.body.grants as string[]).includes('members.manage')";
   assert.deepEqual(violations(grantInput, 'packages/server/src/enclave.ts'), []);
   assert(violations(grantInput, 'packages/server/src/index.ts').length > 0, 'Grant adapter exemption must be file-scoped');
@@ -239,7 +256,7 @@ async function rules() {
     assert.equal(bend.server_admission({ $: 'Person' }, scope, absent, 0n, 1n, true), scope === readonly, 'Support admission must remain explicitly read-only');
     assert.equal(bend.server_admission({ $: 'Person' }, scope, absent, 0n, 1n, false), true, 'Normal admission role comes from signed replay settings');
     for (const admitted of [absent, readonly, writable]) {
-      assert.equal(bend.server_admission({ $: 'Agent' }, scope, admitted, 1n, 1n, false), scope === admitted, 'Agent scope must match the signed admission limit');
+      assert.equal(bend.server_admission({ $: 'Agent' }, scope, admitted, 1n, 1n, false), true, 'Historical agent scope must not limit adding-person admission');
       assert.equal(bend.server_admission({ $: 'Agent' }, scope, admitted, 2n, 1n, false), false, 'Agent admission cannot use another adding person');
     }
   }

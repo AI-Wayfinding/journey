@@ -36,7 +36,12 @@ const core = 'core', server = 'server', web = 'web';
 const contract = 'test/stage1-artifacts.test.ts', storage = 'test/stage1-storage.test.ts', blobs = 'test/stage1-blobs.test.ts', viewer = 'src/stage1-viewer.test.ts';
 const forged = 'rejects forged author or actor, stale predecessors, reused IDs, changed type and cross-artifact references';
 const mutation = (name, path, old, replacement, pkg, file, test, proof = false) => ({ name, path, old, replacement, pkg, file, test, proof });
+const access = 'requires current inherited write access, never guide grants or an agent control privilege';
 const cases = [
+  mutation('parity: historical agent cap cannot reduce person access', rulesPath, 'def agent_access(member: Role, setting: Role) -> Role:\n  member', 'def agent_access(member: Role, setting: Role) -> Role:\n  setting', core, contract, access, true),
+  mutation('parity: agent cannot exceed a read-only person', rulesPath, 'def agent_access(member: Role, setting: Role) -> Role:\n  member', 'def agent_access(member: Role, setting: Role) -> Role:\n  ReadWrite{}', core, contract, access, true),
+  mutation('parity: live agent required', rulesPath, 'live && parent_live, Some{agent_access(role, setting)}', 'parent_live, Some{agent_access(role, setting)}', core, contract, access, true),
+  mutation('parity: live parent required', rulesPath, 'live && parent_live, Some{agent_access(role, setting)}', 'live, Some{agent_access(role, setting)}', core, 'test/bend-rules.test.ts', 'rechecks the live adding person and ignores historical agent limits', true),
   mutation('authority: public proof signature', 'packages/core/src/controlProof.ts', "if (!await crypto.subtle.verify('Ed25519', key, asBuffer(decode(proof.sig)), asBuffer(utf8(canonical(unsigned(proof))))))", 'if (false)', core, contract, 'rejects tampered signatures, chain, journey, ciphertext and unexpected signed fields'),
   mutation('authority: exact ciphertext binding', 'packages/core/src/controlProof.ts', 'proof.envelopeHash !== await digest(envelope)', 'false', core, contract, 'rejects tampered signatures, chain, journey, ciphertext and unexpected signed fields'),
   mutation('authority: ciphertext is not a second action', 'packages/core/src/artifacts.ts', "!shape(value, ['title', 'tags', 'content', 'attachments'])", 'false', core, contract, 'never treats ciphertext as another action or grants and rejects cross-journey descriptors'),
@@ -91,8 +96,9 @@ function proofFailure() {
   }
 }
 try {
-  // Copy tracked bytes, never mutate the working tree or share generated outputs.
-  const paths = execFileSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8' }).split('\0').filter(Boolean);
+  // Copy current tracked and new package bytes; never mutate the working tree
+  // or share generated outputs. New parity modules must be present in the baseline.
+  const paths = [...new Set([...execFileSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8' }).split('\0'), ...execFileSync('git', ['ls-files', '--others', '--exclude-standard', '-z', '--', 'packages'], { cwd: root, encoding: 'utf8' }).split('\0')])].filter(Boolean);
   for (const path of paths) { mkdirSync(dirname(join(tree, path)), { recursive: true }); writeFileSync(join(tree, path), readFileSync(join(root, path))); }
   mkdirSync(join(tree, 'node_modules/@ai-wayfinding'), { recursive: true });
   for (const entry of readdirSync(join(root, 'node_modules'))) {
@@ -130,6 +136,8 @@ try {
     if (c.path === rulesPath) buildRules();
     if (c.path.startsWith('packages/core/')) buildCore();
   }
+  // A clean boundary baseline prevents unrelated failures masking a survivor.
+  setup(process.execPath, ['scripts/check-bend-boundary.mjs', '--rules']);
   // Exercise the real gate against a duplicate host decision, not a comment or
   // fixture marker. Replacing a required adapter with a stub must fail too.
   for (const [name, path, old, replacement] of [

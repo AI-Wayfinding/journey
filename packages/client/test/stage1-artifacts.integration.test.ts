@@ -157,13 +157,13 @@ describe('Stage 1 real CLI and stdio MCP artifacts', () => {
     } finally { interrupted.close(); agent.close(); }
   }, 60_000);
 
-  it('CLI and live MCP obey current inherited access, read-only approval and removal', async () => {
+  it('CLI and live MCP obey current inherited access regardless of legacy scope and stop after removal', async () => {
     const guide = await person(), trip = await journey(guide), adding = await addPerson(trip, guide);
     const writer = await connected(adding, trip), reader = await connected(adding, trip, 'read');
     const file = await state(writer), readerFile = await state(reader), sdk = await mcp(file);
     try {
       const item = await command(file, 'add', '--type', 'document', '--title', 'Access check', '--body', 'Original');
-      await failedCommand(readerFile, 'read-only', 'add', '--type', 'document', '--title', 'No', '--body', 'No');
+      expect((await command(readerFile, 'add', '--type', 'document', '--title', 'Legacy scope is not a limit', '--body', 'Allowed')).authoredBy).toBe('agent');
       await change(trip, guide, 'member.role', { member: adding.principal, role: 'read-only' });
       expect((await command(file, 'status')).scope).toBe('read'); expect((await tool(sdk, 'status')).scope).toBe('read');
       await failedCommand(file, 'read-only', 'edit', item.id, '--predecessor', item.version, '--type', 'document', '--title', 'No', '--body', 'No');
@@ -171,7 +171,7 @@ describe('Stage 1 real CLI and stdio MCP artifacts', () => {
       expect((await tool(sdk, 'show', { id: item.id })).item.title).toBe('Access check');
       await change(trip, guide, 'member.role', { member: adding.principal, role: 'read-write' });
       const edited = await tool(sdk, 'edit', { id: item.id, predecessor: item.version, type: 'document', title: 'Restored', body: 'Allowed' }); expect(edited.title).toBe('Restored');
-      expect((await command(readerFile, 'status')).scope).toBe('read');
+      expect((await command(readerFile, 'status')).scope).toBe('readwrite');
       await change(trip, guide, 'member.remove', { member: adding.principal });
       for (const commandName of ['status','list','show']) await failedCommand(file, 'Access to this journey has ended', commandName, item.id);
       for (const name of ['list','show','delete']) await failedTool(sdk, name, 'Access to this journey has ended', { id: item.id });

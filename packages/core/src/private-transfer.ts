@@ -7,7 +7,7 @@ import type { PrivateBundleScope } from './rules/rules.mjs';
 import {
   PRIVATE_FORMAT, privateObject, privateShape, validPrivateId, validatePrivateIdentity, copyPrivateIdentity,
   copyPrivateRecord, validatePrivateBlob, copyPrivateBlob, privateBytesHash, verifyPrivateContext,
-  verifyPrivateRecords, privateCopies, privateAccess, privateAuthorityHistory, privateBinding, memberVaultId,
+  verifyPrivateRecords, privateCopies, privateAccess, privateAuthorityHistory, privateVaultOwner, memberVaultId,
 } from './private.js';
 import type { PrivateIdentity, PrivateRecord, PrivatePayload, PrivateBlob, PrivateContext, PrivateSession, PrivateView, PrivateAuthorityHistory } from './private.js';
 
@@ -74,7 +74,7 @@ export async function verifyPrivateBundle(value: unknown, options: PrivateBundle
     const copies = privateCopies(view);
     for (const copy of copies) {
       const context = contexts.find(c => c.journey === copy.journey);
-      if (!context || history.vault !== await memberVaultId(copy.journey, privateBinding(context, copy.author).principal, copy.author.signingKey, copy.author.recipient)) throw new Error('Private source vault mismatch');
+      if (!context || history.vault !== await memberVaultId(copy.journey, privateVaultOwner(context, copy.author).id, options.trust.author.signingKey, options.trust.author.recipient)) throw new Error('Private source vault mismatch');
     }
     provenance.push(view); sourceHistories.push({ vault: history.vault, records: copies.flatMap(c => c.records), payloads: copies.flatMap(c => c.payloads) });
   }

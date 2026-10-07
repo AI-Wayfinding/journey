@@ -37,11 +37,10 @@ export class PrivateVaultObject {
     const slots = wanted.map(index => ({ index, ciphertext: encode(new Uint8Array(this.state.storage.sql.exec<{ ciphertext: ArrayBuffer }>('SELECT ciphertext FROM slots WHERE id=?', index).one().ciphertext)) }));
     return { token: head.token, frame: head.frame ? encode(new Uint8Array(head.frame)) : null, slots };
   }
-  async commit(patch: VaultPatch, agent = false): Promise<{ token: string } | null> {
+  async commit(patch: VaultPatch): Promise<{ token: string } | null> {
     const token = randomToken(), frame = privateDecode(patch.frame, PRIVATE_HEADER_BYTES), slots = patch.slots.map(s => ({ index: s.index, bytes: privateDecode(s.ciphertext, PRIVATE_SLOT_BYTES) }));
     return this.state.storage.transactionSync(() => {
       const head = this.state.storage.sql.exec<{ token: string; frame: ArrayBuffer | null }>('SELECT token,frame FROM head WHERE id=1').one();
-      if (agent && !head.frame) throw new Error('Agent initialisation denied');
       if (head.token !== patch.token) return null;
       for (const row of slots) this.state.storage.sql.exec('UPDATE slots SET ciphertext=? WHERE id=?', row.bytes, row.index);
       this.state.storage.sql.exec('UPDATE head SET token=?,frame=? WHERE id=1', token, frame); return { token };
@@ -93,10 +92,10 @@ export class PrivateVaultObject {
         try {
           if (reader) for (;;) { const part = await reader.read(); if (part.done) break; if (count + part.value.length > expected) return failure('invalid-request', 400); bytes.set(part.value, count); count += part.value.length; }
           if (count !== expected) return failure('invalid-request', 400);
-          const result = await this.commit(decodeVaultPatch(bytes), request.headers.get('X-Private-Agent') === '1'); return result ? Response.json(result) : failure('conflict', 409);
+          const result = await this.commit(decodeVaultPatch(bytes)); return result ? Response.json(result) : failure('conflict', 409);
         } finally { await reader?.cancel().catch(() => {}); }
       }
       return failure('invalid-request', 400);
-    } catch (error) { return error instanceof Error && error.message === 'Agent initialisation denied' ? failure('forbidden', 403) : failure('invalid-request', 400); }
+    } catch { return failure('invalid-request', 400); }
   }
 }

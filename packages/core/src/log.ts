@@ -40,7 +40,7 @@ async function renameMember(state: LogState, body: JsonObject, actor: string, at
 async function setProfile(state: LogState, body: JsonObject, actor: string, at?: string): Promise<EffectError | null> {
   const denied = control(state, body, actor, 'Profile', body.id as string, undefined, false, undefined, at);
   if (denied) return denied;
-  state.members[actor]!.profile = { name: body.name as string, ...(body.email === undefined ? {} : { email: body.email as string }) };
+  state.members[body.id as string]!.profile = { name: body.name as string, ...(body.email === undefined ? {} : { email: body.email as string }) };
   return null;
 }
 async function removeMember(state: LogState, body: JsonObject, actor: string, at?: string): Promise<EffectError | null> {

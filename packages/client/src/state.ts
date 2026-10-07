@@ -5,7 +5,7 @@ import type { RememberedAgent } from './storage.js';
 
 export interface PendingState {
   status: 'pending'; server: string; journeyId: string; sessionId: string; identity: string; recipient: string;
-  signingPrivateKey: string; signingKey: string; requestedScope: 'read' | 'readwrite'; link: string; code: string; expiresAt: number; createdAt: number;
+  signingPrivateKey: string; signingKey: string; link: string; code: string; expiresAt: number; createdAt: number;
 }
 export interface ApprovedState { status: 'approved'; session: RememberedAgent; link: string; code: string; createdAt: number; expiresAt: number }
 export type AgentState = PendingState | ApprovedState;
@@ -34,7 +34,7 @@ export async function loadState(path: string): Promise<AgentState> {
   const state = value as AgentState;
   if ((state.status !== 'pending' && state.status !== 'approved') || !Number.isFinite(state.createdAt) || !Number.isFinite(state.expiresAt) || state.expiresAt <= state.createdAt || state.expiresAt > state.createdAt + 8 * 3_600_000 || typeof state.link !== 'string' || typeof state.code !== 'string') throw invalid();
   if (state.status === 'pending') {
-    if (!['server', 'journeyId', 'sessionId', 'identity', 'recipient', 'signingPrivateKey', 'signingKey'].every(key => typeof state[key as keyof PendingState] === 'string' && state[key as keyof PendingState]) || state.requestedScope !== 'read' && state.requestedScope !== 'readwrite') throw invalid();
+    if (!['server', 'journeyId', 'sessionId', 'identity', 'recipient', 'signingPrivateKey', 'signingKey'].every(key => typeof state[key as keyof PendingState] === 'string' && state[key as keyof PendingState])) throw invalid();
   } else {
     const session = state.session;
     if (!session || !['server', 'journeyId', 'sessionId', 'principal', 'identity', 'recipient', 'signingPrivateKey', 'signingKey'].every(key => typeof session[key as keyof RememberedAgent] === 'string' && session[key as keyof RememberedAgent]) || session.scope !== 'read' && session.scope !== 'readwrite' || session.expiresAt !== state.expiresAt) throw invalid();

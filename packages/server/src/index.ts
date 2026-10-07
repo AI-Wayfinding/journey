@@ -397,9 +397,8 @@ app.get('/v1/journeys/:id/private-vault', privateVaultRoute);
 app.put('/v1/journeys/:id/private-vault', privateVaultRoute);
 async function privateAgentWrapRoute(c: AppContext): Promise<Response> {
   const id = c.req.param('id')!, agent = c.req.param('agent')!, s = journeySubject(c);
-  // No path selects a foreign person's store. Persons may deliver, never fetch;
-  // authenticated agents may fetch only their own wrap. Links are never eligible.
-  if (!isId(agent) || new URL(c.req.url).search || c.req.method === 'GET' && (!s.agent || s.privateCredential !== 'authenticated' || agent !== s.principal) || c.req.method === 'PUT' && s.agent) return failure('forbidden', 403);
+  // The Enclave resolves the adding person's private audience. Links are never eligible.
+  if (!isId(agent) || new URL(c.req.url).search || s.agent && s.privateCredential !== 'authenticated') return failure('forbidden', 403);
   const row = await registry(c.env, { op: 'agentPrincipal', journeyId: id, principal: agent });
   if (!row || row.keyStorage !== 'memory' && row.keyStorage !== 'file') return failure('forbidden', 403);
   if (c.req.method === 'GET') return enclave(c.env, id, { op: 'privateWrapAccess', journeyId: id, subject: s, agent });
@@ -410,7 +409,6 @@ async function privateAgentWrapRoute(c: AppContext): Promise<Response> {
 }
 app.get('/v1/journeys/:id/private-agents', async c => {
   const id = c.req.param('id')!, s = journeySubject(c);
-  if (s.agent) return failure('forbidden', 403);
   const access = await enclave(c.env, id, { op: 'privateAccess', journeyId: id, subject: s });
   if (!access.ok) return access;
   const candidates = await registry(c.env, { op: 'privateAgents', journeyId: id }) as { principal: string }[];
@@ -480,7 +478,7 @@ app.post('/v1/journeys/:id/log', async c => {
   if (signed.proof.type === 'member.renew') {
     const auth = await session(c);
     const expiresAt = Date.parse(String(signed.proof.body.expiresAt));
-    if (s.agent || !auth || auth.verifiedAt === null || Date.now() - auth.verifiedAt > 300_000) return failure('unauthorized', 401);
+    if (s.agent ? s.privateCredential !== 'authenticated' : !auth || auth.verifiedAt === null || Date.now() - auth.verifiedAt > 300_000) return failure('unauthorized', 401);
     if (!validExpiry(expiresAt) || expiresAt > Date.now() + LINK_MAX_MS) return failure('invalid-request', 400);
   }
   const supplied = b.wraps === undefined ? undefined : wraps(b.wraps, signed.envelope.outside.epoch, admission?.kind === 'person');
@@ -508,10 +506,11 @@ app.get('/v1/journeys/:id/export', async c => enclave(c.env, c.req.param('id'), 
 app.post('/v1/journeys/:id/invites', async c => {
   const b = await payload(c).catch(() => null), id = c.req.param('id');
   if (!b || !validString(b.inviteIdHash, 43) || !/^[A-Za-z0-9_-]{43}$/.test(b.inviteIdHash) || !validExpiry(b.expiresAt) || b.expiresAt > Date.now() + 604_800_000 || b.support !== undefined && typeof b.support !== 'boolean' || b.email !== undefined && (!validString(b.email, 254) || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(b.email))) return failure('invalid-request', 400);
-  if (b.email !== undefined && (journeySubject(c).agent || !journeySubject(c).accountHash || !validString(b.inviteId, 43) || !/^[A-Za-z0-9_-]{43}$/.test(b.inviteId) || await digest(b.inviteId) !== b.inviteIdHash)) return failure('invalid-request', 400);
+  if (b.email !== undefined && (!validString(b.inviteId, 43) || !/^[A-Za-z0-9_-]{43}$/.test(b.inviteId) || await digest(b.inviteId) !== b.inviteIdHash)) return failure('invalid-request', 400);
   const access = await enclave(c.env, id, { op: 'inviteAccess', journeyId: id, subject: journeySubject(c) });
   if (!access.ok) return access;
-  if (b.email !== undefined && !(await registry(c.env, { op: 'inviteRate', journeyId: id, accountHash: journeySubject(c).accountHash! })).allowed) return failure('rate-limited', 429);
+  const invitationAuthority = await access.json() as { accountHash: string };
+  if (b.email !== undefined && !(await registry(c.env, { op: 'inviteRate', journeyId: id, accountHash: invitationAuthority.accountHash })).allowed) return failure('rate-limited', 429);
   await registry(c.env, { op: 'inviteCreate', journeyId: id, hash: b.inviteIdHash, expires: b.expiresAt, support: b.support === true });
   if (typeof b.email === 'string') {
     const email = b.email.trim().toLowerCase();
@@ -534,22 +533,24 @@ app.get('/v1/journeys/:id/invites/pending', async c => {
 });
 app.post('/v1/agent-sessions', async c => {
   const b = await payload(c).catch(() => null);
-  if (!b || !isId(b.journeyId) || !object(b.agentPublicKey) || !validString(b.agentPublicKey.recipient, 1024) || !validString(b.agentPublicKey.signingKey, 1024) || !validScope(b.requestedScope) || b.name !== undefined && !validAgentName(b.name) || b.keyStorage !== undefined && b.keyStorage !== 'file' && b.keyStorage !== 'memory' && b.keyStorage !== 'link' || b.keyStorage === 'file' && b.remembered === true || b.keyStorage === 'link' && (b.remembered !== true || b.requestedScope !== 'read')) return failure('invalid-request', 400);
+  if (!b || !isId(b.journeyId) || !object(b.agentPublicKey) || !validString(b.agentPublicKey.recipient, 1024) || !validString(b.agentPublicKey.signingKey, 1024) || b.name !== undefined && !validAgentName(b.name) || b.keyStorage !== undefined && b.keyStorage !== 'file' && b.keyStorage !== 'memory' && b.keyStorage !== 'link' || b.keyStorage === 'file' && b.remembered === true || b.keyStorage === 'link' && (b.remembered !== true || b.requestedScope !== 'read')) return failure('invalid-request', 400);
   if (!c.env.AGENT_SESSION_RATE) return failure('internal', 500);
   const ipHash = await digest(c.req.header('cf-connecting-ip') ?? 'unknown');
   if (!(await c.env.AGENT_SESSION_RATE.limit({ key: ipHash })).success) return failure('rate-limited', 429);
   const id = randomToken(), principal = newId(), code = String(crypto.getRandomValues(new Uint32Array(1))[0]! % 1_000_000).padStart(6, '0');
-  await registry(c.env, { op: 'agentCreate', id, journeyId: b.journeyId, principal, recipient: b.agentPublicKey.recipient, signingKey: b.agentPublicKey.signingKey, requestedScope: b.requestedScope, code, remembered: b.remembered === true, keyStorage: b.keyStorage === 'file' ? 'file' : b.keyStorage === 'link' ? 'link' : 'memory', name: typeof b.name === 'string' ? b.name : null });
+  await registry(c.env, { op: 'agentCreate', id, journeyId: b.journeyId, principal, recipient: b.agentPublicKey.recipient, signingKey: b.agentPublicKey.signingKey, requestedScope: b.keyStorage === 'link' ? 'read' : 'readwrite', code, remembered: b.remembered === true, keyStorage: b.keyStorage === 'file' ? 'file' : b.keyStorage === 'link' ? 'link' : 'memory', name: typeof b.name === 'string' ? b.name : null });
   return json({ id, code, approvalUrl: c.env.ORIGIN + '/agent-sessions/' + id }, 201);
 });
 app.get('/v1/agent-sessions/:id', async c => {
   const row = await registry(c.env, { op: 'agentGet', id: c.req.param('id') });
   if (!row) return failure('not-found', 404);
   const expired = row.status === 'pending' ? Number(row.createdAt) + 600_000 <= Date.now() : row.status === 'approved' && Number(row.expires) <= Date.now();
-  return json({ status: expired ? 'expired' : row.status, journeyId: row.journeyId, principal: row.principal, recipient: row.recipient, signingKey: row.signingKey, requestedScope: row.requestedScope, remembered: row.remembered === 1, keyStorage: row.keyStorage, name: row.name, scope: row.scope, expiresAt: row.expires });
+  return json({ status: expired ? 'expired' : row.status, journeyId: row.journeyId, principal: row.principal, recipient: row.recipient, signingKey: row.signingKey, remembered: row.remembered === 1, keyStorage: row.keyStorage, name: row.name, ...(row.keyStorage === 'link' ? { scope: row.scope } : {}), expiresAt: row.expires });
 });
 app.post('/v1/agent-sessions/:id/approve', async c => {
-  const auth = await session(c); if (!auth || auth.verifiedAt === null || Date.now() - auth.verifiedAt > 300_000) return failure('unauthorized', 401);
+  const auth = await session(c), authenticatedAgent = c.req.header('x-agent-session') ? await agent(c) : null;
+  if (c.req.header('x-agent-session') && !authenticatedAgent) return failure('unauthorized', 401);
+  if (authenticatedAgent ? authenticatedAgent.privateCredential !== 'authenticated' : !auth || auth.verifiedAt === null || Date.now() - auth.verifiedAt > 300_000) return failure('unauthorized', 401);
   const b = await payload(c).catch(() => null), id = c.req.param('id');
   const row = await registry(c.env, { op: 'agentGet', id });
   if (!row || row.status !== 'pending' || Number(row.createdAt) + 600_000 <= Date.now()) return failure('not-found', 404);
@@ -559,16 +560,17 @@ app.post('/v1/agent-sessions/:id/approve', async c => {
   if (!attempt.available) return failure('not-found', 404);
   if (!attempt.matched) return failure('invalid-request', 400);
   if (row.keyStorage === 'link' && b.scope !== 'read') return failure('invalid-request', 400);
-  if (!validString(b.principal, 128) || !validScope(b.scope) || row.requestedScope === 'read' && b.scope !== 'read' || !validExpiry(b.expiresAt) || b.expiresAt > Date.now() + maxDuration || !encrypted(b.wrap, 100_000)) return failure('invalid-request', 400);
+  if (!validString(b.principal, 128) || !validExpiry(b.expiresAt) || b.expiresAt > Date.now() + maxDuration || !encrypted(b.wrap, 100_000)) return failure('invalid-request', 400);
   const signed = control(b.control, row.journeyId);
-  if (!signed || signed.proof.type !== 'member.add') return failure('invalid-request', 400);
-  const s: Subject = { principal: b.principal, accountHash: auth.accountHash, ...capability(c) };
+  if (!signed || signed.proof.type !== 'member.add' || row.keyStorage === 'link' && (!object(signed.proof.body.member) || signed.proof.body.member.scope !== 'read')) return failure('invalid-request', 400);
+  const s: Subject = authenticatedAgent ?? { principal: b.principal, accountHash: auth!.accountHash, ...capability(c) };
+  if (s.principal !== b.principal) return failure('forbidden', 403);
   const check = await enclave(c.env, row.journeyId, { op: 'access', journeyId: row.journeyId, subject: s });
   if (!check.ok) return check;
   const { epoch } = await check.json() as { epoch: number };
-  const result = await enclave(c.env, row.journeyId, { op: 'controlWrite', journeyId: row.journeyId, subject: s, control: signed, admission: { id: row.principal, kind: 'agent', recipient: row.recipient, signingKey: row.signingKey, scope: b.scope, expiresAt: b.expiresAt }, wraps: [{ principal: row.principal, epoch, wrap: b.wrap }] });
+  const result = await enclave(c.env, row.journeyId, { op: 'controlWrite', journeyId: row.journeyId, subject: s, control: signed, admission: { id: row.principal, kind: 'agent', recipient: row.recipient, signingKey: row.signingKey, scope: row.keyStorage === 'link' ? 'read' : undefined, expiresAt: b.expiresAt }, wraps: [{ principal: row.principal, epoch, wrap: b.wrap }] });
   if (!result.ok) return result;
-  await registry(c.env, { op: 'agentApprove', id, scope: b.scope, expires: b.expiresAt });
+  await registry(c.env, { op: 'agentApprove', id, scope: row.keyStorage === 'link' ? 'read' : 'readwrite', expires: b.expiresAt });
   await registry(c.env, { op: 'activity', id: row.journeyId, memberDelta: 1, bytes: JSON.stringify(signed).length });
   return json({ status: 'approved' });
 });

@@ -72,7 +72,8 @@ it('signs agent names and lets only a manager or the person who added the agent 
   expect(added.ok && added.state.members[bot.member.id]?.member.name).toBe('Helper');
   expect(entries.at(-1)?.body.member).toMatchObject({ name: 'Helper' });
   expect(await error(await append(entries, outsider, 'member.rename', { id: bot.member.id, name: 'Hijacked' }))).toBe('unauthorized');
-  expect(await error(await append(entries, bot, 'member.rename', { id: bot.member.id, name: 'Hijacked' }))).toBe('unauthorized');
+  const selfRenamed = await verifyLog(await append(entries, bot, 'member.rename', { id: bot.member.id, name: 'Own helper' }));
+  expect(selfRenamed.ok && selfRenamed.state.members[bot.member.id]?.member.name).toBe('Own helper');
   entries = await append(entries, owner, 'member.rename', { id: bot.member.id, name: 'Guide' });
   entries = await append(entries, creator, 'member.rename', { id: bot.member.id, name: 'Trusted guide' });
   const renamed = await verifyLog(entries);
@@ -80,6 +81,19 @@ it('signs agent names and lets only a manager or the person who added the agent 
   expect(await error(await append(entries, creator, 'member.rename', { id: owner.member.id, name: 'Person' }))).toBe('invalid-entry');
   for (const name of [' ', ' padded', 'A'.repeat(61), 'Bad\nname']) await expect(append(entries, owner, 'member.rename', { id: bot.member.id, name })).rejects.toThrow('Invalid member.rename');
   await expect(append(entries, owner, 'member.add', { member: { ...(await agent(owner.member.id)).member, name: 'Bad\u007fname' }, grants: [], kind: 'agent' })).rejects.toThrow('Invalid member.add');
+});
+
+it('projects an agent-signed profile onto its person without changing the signer', async () => {
+  const creator = await person(), owner = await person(), bot = await agent(owner.member.id);
+  let entries = await append(await genesis(creator), creator, 'member.add', { member: owner.member, grants: [], kind: 'person' });
+  entries = await append(entries, owner, 'member.add', { member: bot.member, grants: [], kind: 'agent' });
+  entries = await append(entries, bot, 'member.profile', { id: owner.member.id, name: 'Owner', email: 'owner@example.org' });
+  const result = await verifyLog(entries);
+  expect(result.ok).toBe(true);
+  expect(result.ok && result.state.members[owner.member.id]?.profile).toEqual({ name: 'Owner', email: 'owner@example.org' });
+  expect(result.ok && result.state.members[bot.member.id]?.profile).toBeUndefined();
+  expect(entries.at(-1)!.actor).toBe(bot.member.id);
+  expect(await error(await append(entries, bot, 'member.profile', { id: creator.member.id, name: 'Foreign' }))).toBe('unauthorized');
 });
 
 it('lets a person set a name and reveal then hide email without allowing another member to change their profile', async () => {

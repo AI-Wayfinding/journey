@@ -2,15 +2,27 @@ import Base
 import ./rules.bend as R
 import ./LAWS.bend as Laws
 
+def Laws.agent_missing_parent_denied(setting, live): {==}
+
+def Laws.agent_expired_denied(id, role, guide, owner, support, parentLive, setting): {==}
+
+def Laws.agent_expired_parent_denied(id, role, guide, owner, support, setting, live):
+  match live:
+    case False{}: {==}
+    case True{}: {==}
+
+def Laws.agent_parent_must_be_person(id, role, guide, owner, support, parentLive, setting, live): {==}
+
+def Laws.agent_guide_inherits_person(guide):
+  match guide:
+    case False{}: {==}
+    case True{}: {==}
+
 def Laws.agent_never_exceeds_member(setting):
   {==}
 
-def Laws.agent_limit_survives_promotion(member):
-  match member:
-    case R.ReadOnly{}:
-      {==}
-    case R.ReadWrite{}:
-      {==}
+def Laws.agent_matches_live_person_role(member, setting):
+  {==}
 
 def Laws.agents_never_guides(guide):
   {==}
@@ -148,10 +160,10 @@ def Laws.server_support_scope_matches(scope, admitted, owner, actor):
   {==}
 
 def Laws.server_agent_admission_requires_owner(scope, admitted, owner, actor, support, e):
-  Equal.cong(Bool, Bool, b => b && R.admission_scope(scope, admitted), Nat.is_eq(owner, actor), False{}, e)
+  e
 
-def Laws.server_agent_admission_requires_scope(scope, admitted, owner, actor, support, e):
-  Equal.trans(Bool, Nat.is_eq(owner, actor) && R.admission_scope(scope, admitted), Nat.is_eq(owner, actor) && False{}, False{}, Equal.cong(Bool, Bool, b => Nat.is_eq(owner, actor) && b, R.admission_scope(scope, admitted), False{}, e), and_false(Nat.is_eq(owner, actor)))
+def Laws.server_agent_admission_ignores_scope(scope, admitted, owner, actor, support):
+  {==}
 
 def Laws.artifacts_require_current_write(members, actor, minimum, pending, index, action, e):
   Equal.cong(Bool, R.ArtifactTransition, b => R.artifact_authorized(b && R.artifact_ready(minimum), index, actor, action), R.content_write(R.member_access(R.find(members, actor), members), pending), False{}, e)
@@ -233,7 +245,7 @@ def Laws.project_self_only(members, actor, member):
   {==}
 def Laws.project_agents_follow_live_people(members, pairs, project, id, role, guide, owner, support, live):
   {==}
-def Laws.project_agent_cannot_be_person_participant(id, role, guide, owner, support, live, pairs, project):
+def Laws.project_agent_uses_person_pair(id, role, guide, owner, support, live, pairs, project):
   {==}
 def Laws.project_removed_pair_does_not_resurrect():
   {==}
@@ -284,11 +296,7 @@ def Laws.project_replay_uses_authority_version_and_revision(members, actor, mini
 
 def Laws.private_link_read_requires_live_access(members, actor):
   {==}
-def Laws.private_wrap_fetch_requires_agent(members, author, actor, target):
-  Equal.trans(Bool, R.private_wrap_access(members, author, actor, target, R.PrivatePersonCredential{}, False{}), False{} && R.private_audience(members, author, actor, R.PrivatePersonCredential{}), False{}, Equal.cong(Bool, Bool, b => b && R.private_audience(members, author, actor, R.PrivatePersonCredential{}), Nat.is_eq(actor, target) && False{}, False{}, and_false(Nat.is_eq(actor, target))), {==})
-def Laws.private_wrap_delivery_requires_person(members, author, actor, target):
-  {==}
-def Laws.private_wrap_fetch_requires_self(members, author, actor, target, credential):
+def Laws.private_wrap_same_person_audience(members, author, actor, target, credential, write):
   {==}
 def Laws.private_link_excluded(kind):
   match kind:
@@ -298,7 +306,7 @@ def Laws.private_unknown_excluded(kind):
   match kind:
     case R.Person{}: {==}
     case R.Agent{}: {==}
-def Laws.private_agent_author_not_parent(id, parent):
+def Laws.private_agent_author_resolves_to_person(members, owner, id, role, guide, support, live):
   {==}
 def Laws.private_person_agent_inheritance(id, key, owner):
   {==}
@@ -317,7 +325,7 @@ def Laws.private_destination_visibility_grants_nothing(source, destination, diff
   {==}
 def Laws.private_destination_denial(source, different, visibility):
   Equal.cong(Bool, Bool, b => b && different, source && False{}, False{}, and_false(source))
-def Laws.private_first_pins_author_and_actor(id, actor, record, artifact, author, writer, journey, version, kind, blobs):
+def Laws.private_first_pins_writer(id, actor, record, artifact, author, writer, journey, version, kind, blobs):
   {==}
 def Laws.private_deleted_edit_denied(id, artifact, author, journey, head, old, seq, versions, used, project, placement, kind, actor, record, target, creator, writer, version, typeHash, predecessor, blobs, projects):
   {==}
@@ -344,7 +352,7 @@ def Laws.private_fork_bad_predecessor_denied():
   {==}
 def Laws.private_signed_skipped_versions():
   {==}
-def Laws.private_bundle_handoff_not_person(same):
+def Laws.private_bundle_handoff_all_kinds(kind, same):
   {==}
 def Laws.private_bundle_backup_only_author(kind, same):
   {==}

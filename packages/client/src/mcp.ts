@@ -14,8 +14,8 @@ const tools = [
   { name: 'project_list', description: 'List all projects, including empty and archived projects, after approval.', inputSchema: schema({}) },
   { name: 'project_show', description: 'Read purpose, state, observed revision, signed history and effective participants. Projects do not restrict artifact reads.', inputSchema: schema({ id: text }, ['id']) },
   { name: 'project_create', description: 'Create an empty getting-started project under current content-write authority. Creation does not join anyone.', inputSchema: schema({ purpose: text }, ['purpose']) },
-  { name: 'project_join', description: 'Explain inherited participation without posting a control. Ask the adding person to join in the browser.', inputSchema: schema({ id: text }, ['id']) },
-  { name: 'project_leave', description: 'Explain inherited participation without posting a control. Ask the adding person to leave in the browser.', inputSchema: schema({ id: text }, ['id']) },
+  { name: 'project_join', description: 'Join the project for the adding person under their current participation authority.', inputSchema: schema({ id: text }, ['id']) },
+  { name: 'project_leave', description: 'Leave the project for the adding person under their current participation authority.', inputSchema: schema({ id: text }, ['id']) },
   { name: 'project_purpose', description: 'Change purpose using an observed predecessor. Participating agents can edit metadata even when read-only; stale changes require rereading.', inputSchema: schema({ id: text, purpose: text, predecessor }, ['id', 'purpose', 'predecessor']) },
   { name: 'project_state', description: 'Set an explicit state, archive or reopen using an observed predecessor and inherited participation. Archives remain readable.', inputSchema: schema({ id: text, state: { type: 'string', enum: ['getting-started','active','looking-for-others','archived'] }, predecessor }, ['id', 'state', 'predecessor']) },
   { name: 'artifact_project', description: 'Assign, move or clear a saved artifact using current content-write authority, not project metadata access. Supply null project to clear and the observed placement predecessor (initially null).', inputSchema: schema({ id: text, project: { type: ['string','null'] }, predecessor }, ['id','project','predecessor']) },
@@ -72,7 +72,7 @@ export function createWayfindingServer(getClient: () => Promise<JourneyClient>):
           case 'project_list': result = await client.projectList(); break;
           case 'project_show': result = await client.projectShow(field(args, 'id')); break;
           case 'project_create': result = await client.projectCreate(field(args, 'purpose')); break;
-          case 'project_join': case 'project_leave': result = await client.projectParticipation(field(args, 'id')); break;
+          case 'project_join': case 'project_leave': result = await client.projectParticipation(field(args, 'id'), request.params.name === 'project_join' ? 'join' : 'leave'); break;
           case 'project_purpose': result = await client.projectPurpose(field(args, 'id'), field(args, 'purpose'), observedRevision(args.predecessor)); break;
           case 'project_state': result = await client.projectState(field(args, 'id'), field(args, 'state'), observedRevision(args.predecessor)); break;
           case 'artifact_project': result = await client.artifactProject(field(args, 'id'), args.project === null ? null : field(args, 'project'), observedRevision(args.predecessor)); break;

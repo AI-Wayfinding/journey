@@ -160,11 +160,7 @@ function io_eff(k, run, need) {
 // =======
 
 function $agent_access$(_member_0, _setting_0) {
-  if (_member_0.$ === "ReadOnly") {
-    return {$: "ReadOnly"};
-  } else {
-    return _setting_0;
-  }
+  return _member_0;
 }
 
 function $can_write$(_role_0) {
@@ -251,6 +247,37 @@ function $agent_live_access$(_m_0, _setting_0, _live_0) {
       return $Bool$pick$(($Bool$and$(_live_0, _parent_live_0)), {$: "Some", "value": ($agent_access$(_role_0, _setting_0))}, {$: "None"});
     } else {
       return {$: "None"};
+    }
+  }
+}
+
+function $live_person$(_m_0, _live_0) {
+  if (_m_0.$ === "None") {
+    return {$: "None"};
+  } else {
+    const _person_0 = _m_0["value"];
+    return $Bool$pick$(($Bool$and$(_live_0, ($is_person$({$: "Some", "value": _person_0})))), {$: "Some", "value": _person_0}, {$: "None"});
+  }
+}
+
+function $authority_person$(_m_0, _xs_0) {
+  if (_m_0.$ === "None") {
+    return {$: "None"};
+  } else {
+    const _t_0 = _m_0["value"];
+    const __0 = _t_0["id"];
+    const _t_1 = _t_0["kind"];
+    if (_t_1.$ === "Person") {
+      const __1 = _t_0["role"];
+      const __2 = _t_0["guide"];
+      const _owner_0 = _t_0["owner"];
+      const __3 = _t_0["support"];
+      const _live_0 = _t_0["live"];
+      return $live_person$({$: "Some", "value": {$: "Member", "id": __0, "kind": {$: "Person"}, "role": __1, "guide": __2, "owner": _owner_0, "support": __3, "live": _live_0}}, _live_0);
+    } else {
+      const _owner_1 = _t_0["owner"];
+      const _live_1 = _t_0["live"];
+      return $live_person$(($find$(_xs_0, _owner_1)), _live_1);
     }
   }
 }
@@ -835,7 +862,7 @@ function $server_admission$(_kind_0, _scope_0, _admitted_0, _owner_0, _actor_0, 
     const _x_1 = ($admission_scope$(_scope_0, {$: "Some", "value": {$: "ReadOnly"}}));
     return (_x_0 || _x_1);
   } else {
-    return $Bool$and$(($Nat$is_eq$(_owner_0, _actor_0)), ($admission_scope$(_scope_0, _admitted_0)));
+    return $Nat$is_eq$(_owner_0, _actor_0);
   }
 }
 
@@ -1246,7 +1273,9 @@ function $project_person$(_target_0, _pairs_0, _project_0) {
     const _id_0 = _t_0["id"];
     const _t_1 = _t_0["kind"];
     if (_t_1.$ === "Agent") {
-      return false;
+      const _owner_0 = _t_0["owner"];
+      const _live_0 = _t_0["live"];
+      return $Bool$and$(_live_0, ($pair_active$(($pair_find$(_pairs_0, _project_0, _owner_0)))));
     } else {
       const _live_1 = _t_0["live"];
       return $Bool$and$(_live_1, ($pair_active$(($pair_find$(_pairs_0, _project_0, _id_0)))));
@@ -1267,7 +1296,7 @@ function $project_follower$(_target_0, _members_0, _pairs_0, _project_0) {
     } else {
       const _owner_1 = _t_0["owner"];
       const _live_1 = _t_0["live"];
-      return $Bool$and$(_live_1, ($project_person$(($find$(_members_0, _owner_1)), _pairs_0, _project_0)));
+      return $Bool$and$(_live_1, ($project_person$(($live_person$(($find$(_members_0, _owner_1)), _live_1)), _pairs_0, _project_0)));
     }
   }
 }
@@ -1344,8 +1373,18 @@ function $project_placement$(_target_0, _items_0, _pairs_0, _placements_0, _id_0
   return $project_placement_value$(($placement_find$(_placements_0, _id_0)), _target_0, _items_0, _pairs_0, _placements_0, _id_0, _project_0, _author_0, _writer_0, _actor_0, _predecessor_0, _revision_0);
 }
 
+function $project_self_person$(_person_0, _member_0) {
+  if (_person_0.$ === "None") {
+    return false;
+  } else {
+    const _t_0 = _person_0["value"];
+    const _id_0 = _t_0["id"];
+    return $Nat$is_eq$(_id_0, _member_0);
+  }
+}
+
 function $project_self$(_members_0, _actor_0, _member_0) {
-  return $Bool$and$(($Bool$and$(($Nat$is_eq$(_actor_0, _member_0)), ($is_person$(($find$(_members_0, _actor_0)))))), ($access_read$(($member_access$(($find$(_members_0, _actor_0)), _members_0)))));
+  return $project_self_person$(($authority_person$(($find$(_members_0, _actor_0)), _members_0)), _member_0);
 }
 
 function $project_authority$(_members_0, _actor_0, _pairs_0, _pending_0, _action_0) {
@@ -1540,7 +1579,7 @@ function $private_audience_value$(_members_0, _author_0, _actor_0, _value_0) {
     const __3 = _t_0["owner"];
     const __4 = _t_0["support"];
     const __5 = _t_0["live"];
-    return $Bool$and$(($Bool$and$(($private_credential$(_kind_0, _value_0)), ($private_relation$(_author_0, {$: "Some", "value": {$: "Member", "id": __0, "kind": _kind_0, "role": __1, "guide": __2, "owner": __3, "support": __4, "live": __5}})))), ($access_read$(($member_access$({$: "Some", "value": {$: "Member", "id": __0, "kind": _kind_0, "role": __1, "guide": __2, "owner": __3, "support": __4, "live": __5}}, _members_0)))));
+    return $Bool$and$(($private_credential$(_kind_0, _value_0)), ($private_relation$(($authority_person$(_author_0, _members_0)), ($authority_person$({$: "Some", "value": {$: "Member", "id": __0, "kind": _kind_0, "role": __1, "guide": __2, "owner": __3, "support": __4, "live": __5}}, _members_0)))));
   }
 }
 
@@ -1557,11 +1596,9 @@ function $private_write$(_members_0, _author_0, _actor_0, _value_0, _minimum_0, 
 }
 
 function $private_wrap_access$(_members_0, _author_0, _actor_0, _target_0, _value_0, _write_0) {
-  if (_write_0) {
-    return $Bool$and$(($Bool$and$(($private_credential$({$: "Person"}, _value_0)), ($private_audience$(_members_0, _author_0, _actor_0, _value_0)))), ($private_audience$(_members_0, _author_0, _target_0, {$: "PrivateAuthenticatedAgent"})));
-  } else {
-    return $Bool$and$(($Bool$and$(($Nat$is_eq$(_actor_0, _target_0)), ($private_credential$({$: "Agent"}, _value_0)))), ($private_audience$(_members_0, _author_0, _actor_0, _value_0)));
-  }
+  const _x_0 = ($private_audience$(_members_0, _author_0, _target_0, {$: "PrivatePersonCredential"}));
+  const _x_1 = ($private_audience$(_members_0, _author_0, _target_0, {$: "PrivateAuthenticatedAgent"}));
+  return $Bool$and$(($private_audience$(_members_0, _author_0, _actor_0, _value_0)), (_x_0 || _x_1));
 }
 
 function $private_copy_access$(_source_0, _destination_0, _different_0, _visibility_0) {
@@ -1642,7 +1679,7 @@ function $private_first$(_id_0, _actor_0, _record_0, _next_0) {
     const _version_0 = _next_0["version"];
     const _typeHash_0 = _next_0["typeHash"];
     const _blobs_0 = _next_0["blobs"];
-    return $private_guard$(($Bool$and$(($Nat$is_eq$(_author_0, _actor_0)), ($Nat$is_eq$(_writer_0, _actor_0)))), {$: "PrivateCopy", "id": _id_0, "artifact": _artifact_0, "author": _author_0, "journey": _journey_0, "head": _version_0, "record": _record_0, "seq": 0, "deleted": false, "versions": {$: "Con", "head": {$: "ArtifactVersion", "id": _version_0, "writer": _actor_0, "blobs": _blobs_0}, "tail": {$: "Nil"}}, "used": {$: "Con", "head": _version_0, "tail": {$: "Nil"}}, "project": 0, "placement": 0, "typeHash": _typeHash_0});
+    return $private_guard$(($Nat$is_eq$(_writer_0, _actor_0)), {$: "PrivateCopy", "id": _id_0, "artifact": _artifact_0, "author": _author_0, "journey": _journey_0, "head": _version_0, "record": _record_0, "seq": 0, "deleted": false, "versions": {$: "Con", "head": {$: "ArtifactVersion", "id": _version_0, "writer": _actor_0, "blobs": _blobs_0}, "tail": {$: "Nil"}}, "used": {$: "Con", "head": _version_0, "tail": {$: "Nil"}}, "project": 0, "placement": 0, "typeHash": _typeHash_0});
   } else {
     return {$: "PrivateConflict"};
   }
@@ -1690,11 +1727,7 @@ function $private_bundle_recipient$(_scope_0, _kind_0, _same_0) {
   } else if (_scope_0.$ === "PrivateReturn") {
     return _same_0;
   } else {
-    if (_kind_0.$ === "Person") {
-      return false;
-    } else {
-      return true;
-    }
+    return true;
   }
 }
 
@@ -2770,6 +2803,8 @@ export default {
   "is_guide": run_lib((a0) => { const r = (run_loop($is_guide$($0m5(a0)))); $0m4(a0); return r; }, 1),
   "has_guide": run_lib((a0) => { const r = (run_loop($has_guide$($0m0(a0)))); $0m2(a0); return r; }, 1),
   "agent_live_access": run_lib((a0, a1, a2) => { const r = (run_loop($agent_live_access$($0m5(a0), (a1), (a2)))); $0m4(a0); (a1); (a2); return r; }, 3),
+  "live_person": run_lib((a0, a1) => { const r = $0m4(run_loop($live_person$($0m5(a0), (a1)))); $0m4(a0); (a1); return r; }, 2),
+  "authority_person": run_lib((a0, a1) => { const r = $0m4(run_loop($authority_person$($0m5(a0), $0m0(a1)))); $0m4(a0); $0m2(a1); return r; }, 2),
   "member_access": run_lib((a0, a1) => { const r = (run_loop($member_access$($0m5(a0), $0m0(a1)))); $0m4(a0); $0m2(a1); return r; }, 2),
   "access_write": run_lib((a0) => { const r = (run_loop($access_write$((a0)))); (a0); return r; }, 1),
   "access_read": run_lib((a0) => { const r = (run_loop($access_read$((a0)))); (a0); return r; }, 1),
@@ -2869,6 +2904,7 @@ export default {
   "project_membership": run_lib((a0, a1, a2, a3, a4, a5, a6, a7) => { const r = $0m58(run_loop($project_membership$($0m42(a0), $0m47(a1), $0m51(a2), nat_host(a3), nat_host(a4), nat_host(a5), nat_host(a6), (a7)))); $0m44(a0); $0m49(a1); $0m53(a2); BigInt(a3); BigInt(a4); BigInt(a5); BigInt(a6); (a7); return r; }, 8),
   "project_placement_value": run_lib((a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11) => { const r = $0m58(run_loop($project_placement_value$($0m52(a0), $0m39(a1), $0m42(a2), $0m47(a3), $0m51(a4), nat_host(a5), nat_host(a6), nat_host(a7), nat_host(a8), nat_host(a9), nat_host(a10), nat_host(a11)))); $0m54(a0); $0m35(a1); $0m44(a2); $0m49(a3); $0m53(a4); BigInt(a5); BigInt(a6); BigInt(a7); BigInt(a8); BigInt(a9); BigInt(a10); BigInt(a11); return r; }, 12),
   "project_placement": run_lib((a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10) => { const r = $0m58(run_loop($project_placement$($0m39(a0), $0m42(a1), $0m47(a2), $0m51(a3), nat_host(a4), nat_host(a5), nat_host(a6), nat_host(a7), nat_host(a8), nat_host(a9), nat_host(a10)))); $0m35(a0); $0m44(a1); $0m49(a2); $0m53(a3); BigInt(a4); BigInt(a5); BigInt(a6); BigInt(a7); BigInt(a8); BigInt(a9); BigInt(a10); return r; }, 11),
+  "project_self_person": run_lib((a0, a1) => { const r = (run_loop($project_self_person$($0m5(a0), nat_host(a1)))); $0m4(a0); BigInt(a1); return r; }, 2),
   "project_self": run_lib((a0, a1, a2) => { const r = (run_loop($project_self$($0m0(a0), nat_host(a1), nat_host(a2)))); $0m2(a0); BigInt(a1); BigInt(a2); return r; }, 3),
   "project_authority": run_lib((a0, a1, a2, a3, a4) => { const r = (run_loop($project_authority$($0m0(a0), nat_host(a1), $0m47(a2), (a3), $0m59(a4)))); $0m2(a0); BigInt(a1); $0m49(a2); (a3); $0m60(a4); return r; }, 5),
   "project_action": run_lib((a0, a1, a2, a3, a4) => { const r = $0m58(run_loop($project_action$($0m56(a0), $0m36(a1), nat_host(a2), nat_host(a3), $0m59(a4)))); $0m57(a0); $0m37(a1); BigInt(a2); BigInt(a3); $0m60(a4); return r; }, 5),

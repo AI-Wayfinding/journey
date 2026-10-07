@@ -12,7 +12,7 @@ async function path() { const parent = resolve('../..', '.scratch'); await mkdir
 const requestId = 'request-id';
 const response = (data: object, status = 200) => Response.json(data, { status });
 const started = { id: requestId, approvalUrl: 'https://app.wayfinding.support/agent-sessions/' + requestId, code: '123456' };
-const pendingResponse = (state: PendingState, status: string) => ({ status, journeyId: state.journeyId, recipient: state.recipient, signingKey: state.signingKey, requestedScope: state.requestedScope });
+const pendingResponse = (state: PendingState, status: string) => ({ status, journeyId: state.journeyId, recipient: state.recipient, signingKey: state.signingKey });
 
 const journeyId = '01M3MGFPRB80Y0G5QTVVX19YN7';
 describe('file-backed journey connection', () => {
@@ -20,12 +20,13 @@ describe('file-backed journey connection', () => {
     const file = await path();
     const fetcher = vi.fn<typeof fetch>(async (_url, init) => {
       const body = JSON.parse(String(init?.body));
-      expect(body).toEqual({ journeyId, agentPublicKey: { recipient: expect.any(String), signingKey: expect.any(String) }, requestedScope: 'read', remembered: false, keyStorage: 'file', name: 'Research assistant' });
+      expect(body).toEqual({ journeyId, agentPublicKey: { recipient: expect.any(String), signingKey: expect.any(String) }, remembered: false, keyStorage: 'file', name: 'Research assistant' });
       return response(started, 201);
     });
     const state = await requestConnection(journeyId, { state: file, name: 'Research assistant', fetch: fetcher });
     expect((await lstat(file)).mode & 0o777).toBe(0o600);
-    expect(JSON.parse(await readFile(file, 'utf8'))).toMatchObject({ status: 'pending', server: 'https://app.wayfinding.support', sessionId: requestId, requestedScope: 'read', identity: expect.any(String), signingPrivateKey: expect.any(String), expiresAt: state.expiresAt });
+    expect(JSON.parse(await readFile(file, 'utf8'))).not.toHaveProperty('requestedScope');
+    expect(JSON.parse(await readFile(file, 'utf8'))).toMatchObject({ status: 'pending', server: 'https://app.wayfinding.support', sessionId: requestId, identity: expect.any(String), signingPrivateKey: expect.any(String), expiresAt: state.expiresAt });
     await expect(requestConnection(journeyId, { state: file, fetch: fetcher })).rejects.toThrow('already exists');
     await chmod(file, 0o644);
     await expect(requestConnection(journeyId, { state: file, fetch: fetcher })).rejects.toThrow('0600');
@@ -33,7 +34,7 @@ describe('file-backed journey connection', () => {
   });
   it('resumes approval, verifies the signed log through the client and caps state lifetime at eight hours', async () => {
     const file = await path();
-    const state = await requestConnection(journeyId, { state: file, scope: 'readwrite', fetch: async () => response(started, 201) });
+    const state = await requestConnection(journeyId, { state: file, fetch: async () => response(started, 201) });
     const approved = { ...pendingResponse(state, 'approved'), principal: 'agent-principal', scope: 'readwrite', expiresAt: Date.now() + 3_600_000, remembered: false };
     const fetcher = vi.fn<typeof fetch>(async url => String(url).includes('agent-sessions') ? response(approved) : response({ error: { code: 'forbidden' } }, 403));
     // A failed full-log check does not turn pending keys into an approved session.

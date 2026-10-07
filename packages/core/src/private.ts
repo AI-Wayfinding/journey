@@ -13,6 +13,7 @@ import { artifactTypeHash, ARTIFACT_TYPES, validDigest, validateArtifactPayload,
 import type { ArtifactPayload } from './artifacts.js';
 import type { JsonObject, ProtocolRecord } from './types.js';
 import { normalizedMembers, ruleList } from './rules.js';
+import { addingPerson } from './membership.js';
 import { ruleVersion, CLIENT_VERSION, CLIENT_CAPABILITIES, supportsPrivate } from './versions.js';
 
 export const PRIVATE_FORMAT = 'private-v1' as const;
@@ -92,6 +93,12 @@ export function privateBinding(context: PrivateContext, identity: PrivateIdentit
   if (!principal) throw new Error('Private identity has no verified admission');
   return { journey: context.journey, principal, admissionHash: data.admissions.get(principal)! };
 }
+/** Resolve storage ownership from verified membership, never a caller grant. */
+export function privateVaultOwner(context: PrivateContext, author: PrivateIdentity, now = contextData(context).now): Member {
+  const owner = addingPerson(contextData(context).state, privateBinding(context, author).principal, now);
+  if (!owner) throw new Error('Private author has no live person');
+  return { id: owner.id, kind: 'person', signingKey: owner.signingKey, recipient: owner.recipient };
+}
 export function privateAuthority(context: PrivateContext, actor: PrivateIdentity): PrivateAuthority {
   return { ...privateBinding(context, actor), head: context.head, epoch: contextData(context).state.currentEpoch };
 }
@@ -154,7 +161,7 @@ export function privateAccess(context: PrivateContext, author: PrivateIdentity, 
     : rules.private_audience(model.members, model.id(binding.principal), model.id(actor.binding.principal), auth.credential);
 }
 export function privateAgentAudience(context: PrivateContext, author: PrivateIdentity, agent: PrivateIdentity): boolean {
-  if (agent.kind !== 'agent' || author.kind !== 'person') return false;
+  if (agent.kind !== 'agent') return false;
   try {
     const data = contextData(context), person = privateBinding(context, author), actor = privateBinding(context, agent);
     const model = normalizedMembers(data.state, [person.principal, actor.principal], data.now);
@@ -294,7 +301,8 @@ export async function verifyPrivateRecords(records: readonly PrivateRecord[], pa
   }
   for (const input of records) {
     const r = copyPrivateRecord(input), hash = await privateHash(r);
-    if (r.vault !== trust.vault || !validatePrivateIdentity(r.body.author) || !sameIdentity(r.body.author, trust.author)) throw new Error('Private author/vault mismatch');
+    if (r.vault !== trust.vault || !validatePrivateIdentity(r.body.author)) throw new Error('Private author/vault mismatch');
+    const author = r.body.author;
     const priorOperation = operations.get(r.id);
     if (priorOperation) { if (priorOperation !== hash) throw new Error('Private operation conflict'); continue; }
     operations.set(r.id, hash);
@@ -303,7 +311,11 @@ export async function verifyPrivateRecords(records: readonly PrivateRecord[], pa
     if (!context) throw new Error('Missing private authority snapshot');
     const data = contextData(context), binding = privateBinding(context, r.actor);
     if (canonical(binding) !== canonical({ journey: r.authority.journey, principal: r.authority.principal, admissionHash: r.authority.admissionHash }) || r.authority.epoch !== data.state.currentEpoch) throw new Error('Private admission/epoch mismatch');
-    privateBinding(context, trust.author);
+    let owner: Member;
+    try { owner = privateVaultOwner(context, author, options.historical ? Date.parse(r.at) : data.now); }
+    catch { throw new Error('Private author/vault mismatch'); }
+    if (!sameIdentity(privateIdentity(owner), trust.author)) throw new Error('Private author/vault mismatch');
+    if (trust.vault !== await memberVaultId(context.journey, owner.id, owner.signingKey, owner.recipient)) throw new Error('Private source vault mismatch');
     await verifySignature(r.actor, unsignedRecord(r), r.sig);
     const payload = payloadMap.get(r.id); if (!payload) throw new Error('Missing private payload');
     const cleanPayload = await validatePrivatePayload(r, payload);
@@ -316,7 +328,7 @@ export async function verifyPrivateRecords(records: readonly PrivateRecord[], pa
     const historicalCredential: PrivateCredential = { $: r.actor.kind === 'person' ? 'PrivatePersonCredential' : 'PrivateAuthenticatedAgent' };
     const allowed = options.historical ? rules.private_write(model.members, model.id(privateBinding(context, trust.author).principal), model.id(binding.principal), historicalCredential, ruleVersion(data.state.minClientVersion), data.state.pendingRotation === true, true)
       : !!actorSession && privateAccess(context, trust.author, actorSession, true);
-    const strings = [r.copy, r.body.artifact as string, canonical(trust.author), canonical(r.actor), r.authority.journey, r.sig, r.prev ?? '', ...Object.keys(data.state.projects?.items ?? {})];
+    const strings = [r.copy, r.body.artifact as string, canonical(author), canonical(r.actor), r.authority.journey, r.sig, r.prev ?? '', ...Object.keys(data.state.projects?.items ?? {})];
     for (const c of [...copies.values(), ...(sourceCopies?.values() ?? []), ...provenanceCurrent.values()]) strings.push(...ruleCopyStrings(c));
     for (const key of ['version', 'typeHash', 'predecessor', 'comment', 'onVersion', 'project']) if (typeof r.body[key] === 'string') strings.push(r.body[key]);
     if (r.type === 'private.copy') {
@@ -333,7 +345,7 @@ export async function verifyPrivateRecords(records: readonly PrivateRecord[], pa
     if (r.prev !== (previous ? await privateHash(previous) : null)) throw new Error('Private predecessor hash mismatch');
     const current = old ? ruleCopy(old, id) : undefined;
     const projects = ruleList<ProjectInfo>(Object.values(data.state.projects?.items ?? {}).map(p => ({ $: 'ProjectInfo', id: id(p.id), revision: BigInt(p.revision + 1), phase: { $: projectPhase[p.state] } })));
-    const common = { artifact: id(r.body.artifact as string), author: id(canonical(trust.author)), writer: id(canonical(r.actor)) };
+    const common = { artifact: id(r.body.artifact as string), author: id(canonical(author)), writer: id(canonical(r.actor)) };
     let transition: ReturnType<typeof rules.private_apply>;
     if (r.type === 'private.copy') {
       // SAFETY: copyPrivateRecord validated the exact private.copy origin fields.
@@ -344,9 +356,9 @@ export async function verifyPrivateRecords(records: readonly PrivateRecord[], pa
       // snapshot already copied into another journey. Live proposals still need
       // the explicitly supplied current source and current write sessions.
       if (options.historical && !source) source = historicalSources.get(o.copy)?.get(o.version);
-      if (!source || source.journey !== o.journey || source.artifact !== o.artifact || !rules.private_origin_version(id(source.head), id(o.version)) || !sameIdentity(source.author, trust.author)) throw new Error('Private copy origin mismatch');
+      if (!source || source.journey !== o.journey || source.artifact !== o.artifact || !rules.private_origin_version(id(source.head), id(o.version)) || !sameIdentity(source.author, author)) throw new Error('Private copy origin mismatch');
       const sourceRecord = source.records[0]!, sourceContext = authorities.find(c => rules.private_authority_snapshot(authorityIds.id(c.journey), authorityIds.id(c.head), authorityIds.id(source.journey), authorityIds.id(sourceRecord.authority.head)));
-      if (!sourceContext || sourceRecord.vault === trust.vault || sourceRecord.vault !== await memberVaultId(source.journey, privateBinding(sourceContext, source.author).principal, source.author.signingKey, source.author.recipient)) throw new Error('Private source vault mismatch');
+      if (!sourceContext || sourceRecord.vault === trust.vault || sourceRecord.vault !== await memberVaultId(source.journey, privateVaultOwner(sourceContext, source.author).id, trust.author.signingKey, trust.author.recipient)) throw new Error('Private source vault mismatch');
       const versionRecord = source.records.find(v => v.body.version === o.version)!;
       const sourcePayload = source.payloads.find(v => v.record === versionRecord.id)!.payload;
       if (await privateHash(versionRecord) !== o.recordHash || await privateSnapshotHash(sourcePayload) !== r.body.snapshotHash || await privateSnapshotHash(cleanPayload) !== r.body.snapshotHash) throw new Error('Private copy snapshot mismatch');
@@ -369,7 +381,7 @@ export async function verifyPrivateRecords(records: readonly PrivateRecord[], pa
     if (r.body.typeHash !== undefined && !knownTypes.includes(r.body.typeHash as string)) throw new Error('Unsupported private type');
     const next = transition.value;
     const names = (n: bigint) => namespace(strings).ids[Number(n) - 2]!;
-    const value: PrivateCopyState = { copy: r.copy, artifact: r.body.artifact as string, author: copyPrivateIdentity(trust.author), journey: context.journey, typeHash: names(next.typeHash), head: names(next.head), deleted: next.deleted, project: names(next.project) ?? null, placement: names(next.placement) ?? null, records: [...(old?.records ?? []), r], payloads: [...(old?.payloads ?? []), { record: r.id, payload: cleanPayload }] };
+    const value: PrivateCopyState = { copy: r.copy, artifact: r.body.artifact as string, author: copyPrivateIdentity(author), journey: context.journey, typeHash: names(next.typeHash), head: names(next.head), deleted: next.deleted, project: names(next.project) ?? null, placement: names(next.placement) ?? null, records: [...(old?.records ?? []), r], payloads: [...(old?.payloads ?? []), { record: r.id, payload: cleanPayload }] };
     copies.set(r.copy, value);
     if (typeof r.body.version === 'string') {
       const versions = historicalSources.get(r.copy) ?? new Map<string, PrivateCopyState>();

@@ -6,7 +6,7 @@ import { localServer, person, journey, connected, state, mcp, command, failedCom
 localServer();
 
 it('real CLI and stdio MCP expose empty projects, inherited participation and read-only D17 without content elevation', async () => {
-  const owner = await person(), trip = await journey(owner), writer = await connected(owner, trip), reader = await connected(owner, trip, 'read');
+  const owner = await person(), trip = await journey(owner), adding = await addPerson(trip, owner), writer = await connected(adding, trip), reader = await connected(adding, trip, 'read');
   const wf = await state(writer), rf = await state(reader), sdk = await mcp(rf), transport = await faultProxy(), tracked = await state(reader, transport.origin), monitored = await mcp(tracked);
   try {
     const p = await command(wf, 'project', 'create', '--purpose', '  Work together 🧭  ');
@@ -15,15 +15,17 @@ it('real CLI and stdio MCP expose empty projects, inherited participation and re
     await failedTool(sdk, 'project_purpose', 'denied', { id: p.id, purpose: 'Nonparticipant', predecessor: p.revision });
     await failedCommand(rf, 'denied', 'project', 'state', p.id, '--project-state', 'active', '--predecessor', String(p.revision));
     const before = await readFile(rf);
-    for (const action of ['join','leave']) {
-      expect(await command(tracked, 'project', action, p.id)).toMatchObject({ project: p.id, inherited: true, message: expect.stringContaining('No action was posted') });
-      expect(await tool(monitored, 'project_' + action, { id: p.id })).toMatchObject({ inherited: true, message: expect.stringContaining('adding person') });
-    }
-    expect(transport.requests.every(r => r.method === 'GET')).toBe(true);
-    await projectChange(trip, owner, 'project.join', { project: p.id, member: owner.principal, predecessor: null });
+    const cliJoined = await command(tracked, 'project', 'join', p.id);
+    expect(cliJoined.participants.sort()).toEqual([adding.principal, writer.session.principal, reader.session.principal].sort());
+    expect((await tool(monitored, 'project_leave', { id: p.id })).participants).toEqual([]);
+    expect((await tool(monitored, 'project_join', { id: p.id })).participation[0]).toMatchObject({ member: adding.principal, active: true });
+    const left = await command(tracked, 'project', 'leave', p.id);
+    expect(left.participants).toEqual([]);
+    expect(transport.requests.filter(r => r.method === 'POST')).toHaveLength(4);
+    await projectChange(trip, adding, 'project.join', { project: p.id, member: adding.principal, predecessor: left.participation[0].revision });
     const joined = await tool(sdk, 'project_show', { id: p.id });
-    expect(joined.participants.sort()).toEqual([owner.principal, writer.session.principal, reader.session.principal].sort());
-    const newcomer = await connected(owner, trip, 'read'), nf = await state(newcomer), nsdk = await mcp(nf);
+    expect(joined.participants.sort()).toEqual([adding.principal, writer.session.principal, reader.session.principal].sort());
+    const newcomer = await connected(adding, trip, 'read'), nf = await state(newcomer), nsdk = await mcp(nf);
     try {
       expect((await command(nf, 'project', 'show', p.id)).participants).toContain(newcomer.session.principal);
       await change(trip, owner, 'member.renew', { id: newcomer.session.principal, expiresAt: new Date(Date.now() + 1000).toISOString() });
@@ -43,19 +45,21 @@ it('real CLI and stdio MCP expose empty projects, inherited participation and re
     expect(archived.state).toBe('archived'); expect(await tool(sdk, 'project_show', { id: p.id })).toEqual(archived);
     const reopened = await tool(sdk, 'project_state', { id: p.id, state: 'looking-for-others', predecessor: archived.revision });
     expect(reopened.state).toBe('looking-for-others'); expect(reopened.history.at(-1)).toMatchObject({ from: 'archived', to: 'looking-for-others' });
+    const item = await command(wf, 'add', '--type', 'document', '--title', 'Not D17', '--body', 'Content');
+    await change(trip, owner, 'member.role', { member: adding.principal, role: 'read-only' });
+    const readsStart = transport.requests.length;
     await failedCommand(rf, 'denied', 'project', 'create', '--purpose', 'No creation');
     await failedTool(sdk, 'project_create', 'denied', { purpose: 'No creation' });
-    const item = await command(wf, 'add', '--type', 'document', '--title', 'Not D17', '--body', 'Content');
     const bytes = join(scratch, 'readonly.bin'); await writeFile(bytes, 'Must not stage');
     for (const args of [ ['add','--type','document','--title','No','--body','No'], ['add','--type','file','--title','No','--file',bytes], ['comment',item.id,'No'], ['edit',item.id,'--predecessor',item.version,'--type','document','--title','No','--body','No'], ['delete',item.id] ]) await failedCommand(tracked, 'read-only', ...args);
     for (const [name,args] of [ ['add',{ type:'file',title:'No',files:[{path:bytes}] }], ['comment',{id:item.id,text:'No'}], ['edit',{id:item.id,predecessor:item.version,type:'document',title:'No',body:'No'}], ['delete',{id:item.id}] ] as const) await failedTool(monitored, name, 'read-only', args);
     await failedTool(monitored, 'artifact_project', 'denied', { id:item.id,project:p.id,predecessor:null });
     await failedCommand(tracked, 'denied', 'artifact', 'project', item.id, p.id, '--predecessor', 'null');
-    expect(transport.requests.every(r => r.method === 'GET')).toBe(true);
+    expect(transport.requests.slice(readsStart).every(r => r.method === 'GET')).toBe(true);
     expect(await readFile(rf)).toEqual(before);
     await refresh(trip, owner); expect(JSON.stringify(trip.entries.map(row => row.proof))).not.toContain('Read-only participant metadata');
-    expect(trip.entries.filter(row => ['project.join','project.leave'].includes(row.proof.type))).toHaveLength(1);
-    await projectChange(trip, owner, 'project.leave', { project:p.id,member:owner.principal,predecessor:reopened.participation[0].revision });
+    expect(trip.entries.filter(row => ['project.join','project.leave'].includes(row.proof.type))).toHaveLength(5);
+    await projectChange(trip, adding, 'project.leave', { project:p.id,member:adding.principal,predecessor:reopened.participation[0].revision });
     expect((await tool(sdk,'project_show',{id:p.id})).participants).toEqual([]);
     await failedCommand(rf,'denied','project','purpose',p.id,'--purpose','After leave','--predecessor',String(reopened.revision));
     await failedTool(sdk,'project_state','denied',{id:p.id,state:'active',predecessor:reopened.revision});
@@ -121,7 +125,7 @@ it('CLI/MCP placement is single-project content authority with observed history 
   } finally { await sdk.close(); agent.close(); }
 }, 90_000);
 
-it('current adding-person downgrade preserves participant metadata but removal and original read-only limits never grant writes', async () => {
+it('current adding-person downgrade preserves participant metadata and legacy scope never limits restored writes', async () => {
   const owner=await person(),trip=await journey(owner),adding=await addPerson(trip,owner),writer=await connected(adding,trip),reader=await connected(adding,trip,'read');
   const wf=await state(writer),rf=await state(reader),sdk=await mcp(wf),p=await createProject(trip,owner);
   try {
@@ -132,7 +136,8 @@ it('current adding-person downgrade preserves participant metadata but removal a
       const updated=await tool(sdk,'project_purpose',{id:p.id,purpose:'Metadata '+role,predecessor:view.revision});
       expect(updated.participants.sort()).toEqual([adding.principal,writer.session.principal,reader.session.principal].sort());
       expect((await command(wf,'status')).scope).toBe(role==='read-only'?'read':'readwrite');
-      await failedCommand(rf,'denied','project','create','--purpose','Original limit');
+      if (role === 'read-only') await failedCommand(rf,'denied','project','create','--purpose','Downgraded');
+      else expect((await command(rf,'project','create','--purpose','Restored legacy reader')).purpose).toBe('Restored legacy reader');
       if(role==='read-only') { await failedTool(sdk,'project_create','denied',{purpose:'Downgraded'}); await failedCommand(wf,'read-only','add','--type','document','--title','No','--body','No'); }
     }
     await change(trip,owner,'member.remove',{member:adding.principal});

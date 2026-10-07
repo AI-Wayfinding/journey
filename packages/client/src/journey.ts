@@ -3,7 +3,7 @@ import { PrivateVault, decodeVaultWire, encodeVaultPatch, memberVaultId, private
 import { PROJECT_FORMAT, projectPurposeHash, replayProject, sealProjectPayload, effectiveProjectParticipants, selectProjectArtifacts, projectSelector } from '@ai-wayfinding/core';
 import type { ProjectActionType } from '@ai-wayfinding/core';
 import { projectId, observedRevision, purposeText, stateValue } from './projects.js';
-import type { ProjectView, ParticipationExplanation } from './projects.js';
+import type { ProjectView } from './projects.js';
 import { CLIENT_VERSION, meetsMinClientVersion, newId, unwrapJourneyKey, verifyControlProofs, controlDefinitions, ARTIFACT_FORMAT, artifactTypeHash, canonical, readArtifactPayload, sealArtifactPayload, sealBlob, openBlob, signControlProof, importSigningKey, replayArtifact } from '@ai-wayfinding/core';
 import type { VaultOptions, VaultTransport, PrivateCheckpoint, ControlProof, Member, Envelope, JourneyKey, LogState, ArtifactActionType, ArtifactAttachment, ArtifactPayload, JsonObject } from '@ai-wayfinding/core';
 import { artifactPayload, artifactText, attachmentName, localBytes, saveDownload, skillPackage, validateLocalAttachment } from './artifacts.js';
@@ -104,7 +104,7 @@ export class JourneyClient {
   }
   private async writable(): Promise<Verified> {
     const verified = await this.verified();
-    if (!canWriteContent(verified.state, this.session.principal)) throw new Error('This journey is read-only for this agent, or a key update is pending. Its access follows the adding person’s current role and its original approval limit.');
+    if (!canWriteContent(verified.state, this.session.principal)) throw new Error('This journey is read-only for this agent, or a key update is pending. Its access follows the adding person’s current role.');
     return verified;
   }
   private async views(verified: Verified): Promise<ArtifactView[]> {
@@ -242,9 +242,12 @@ export class JourneyClient {
     await this.commitProject('project.state', { format: PROJECT_FORMAT, project, state: stateValue(state), predecessor: observedRevision(predecessor) }, {});
     return this.projectShow(project);
   }
-  async projectParticipation(id: string): Promise<ParticipationExplanation> {
-    const project = await this.projectShow(id);
-    return { project: project.id, inherited: true, message: 'Agents inherit their adding person’s project participation. Ask that person to join or leave this project in the browser. No action was posted.' };
+  async projectParticipation(id: string, action: 'join' | 'leave'): Promise<ProjectView> {
+    const verified = await this.verified(), project = this.projectView(projectId(id), verified);
+    const member = verified.state.members[this.session.principal]!.member.addedBy!;
+    const pair = project.participation.find(row => row.member === member);
+    await this.commitProject(action === 'join' ? 'project.join' : 'project.leave', { format: PROJECT_FORMAT, project: project.id, member, predecessor: pair?.revision ?? null }, {});
+    return this.projectShow(project.id);
   }
   async artifactProject(id: string, project: string | null, predecessor: number | null): Promise<ArtifactItem> {
     const target = project === null ? null : projectId(project), revision = observedRevision(predecessor);

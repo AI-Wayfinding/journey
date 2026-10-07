@@ -45,7 +45,7 @@ describe('personal controls remain separate from content and guide authority', (
     expect((await change(j, guest, 'member.remove', { member: guest.principal })).status).toBe(201);
   });
 
-  it('lets an either-role person guide manage admissions, settings and guides, never content or agent controls', async () => {
+  it('lets an either-role guide and their agent manage admissions and profiles without content writes', async () => {
     const { owner, j } = await fixture();
     const guest = await addPerson(j, owner);
     expect((await change(j, owner, 'member.role', { member: owner.principal, role: 'read-only' })).status).toBe(201);
@@ -58,10 +58,11 @@ describe('personal controls remain separate from content and guide authority', (
     const a = await addAgent(j, guest);
     expect((await change(j, guest, 'grant.add', { member: a.principal, grant: 'members.manage' })).status).toBe(403);
     const path = `/v1/journeys/${j.id}/log`;
-    const control = await proof(j, { principal: a.principal, signing: a.signing }, 'member.profile', { id: guest.principal, name: 'Not the person' });
-    expect((await request(path, 'POST', { control }, await agentHeaders(a, 'POST', path, { control }))).status).toBe(403);
+    const control = await proof(j, { principal: a.principal, signing: a.signing }, 'member.profile', { id: guest.principal, name: 'Updated by the person’s agent' });
+    expect((await request(path, 'POST', { control }, await agentHeaders(a, 'POST', path, { control }))).status).toBe(201);
+    j.controls.push(control);
     const invites = `/v1/journeys/${j.id}/invites/pending`;
-    expect((await request(invites, 'GET', undefined, await agentHeaders(a, 'GET', invites))).status).toBe(403);
+    expect((await request(invites, 'GET', undefined, await agentHeaders(a, 'GET', invites))).status).toBe(200);
     expect((await request(`/v1/journeys/${j.id}/seq`, 'POST', {}, as(guest))).status).toBe(403);
   });
 

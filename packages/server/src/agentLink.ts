@@ -58,7 +58,7 @@ async function readJourney(identity: string, memberId: string, journeyId: string
   if (!checked.ok || checked.state.journey !== journeyId) throw new Error(historyError);
   const state = checked.state;
   const mine = state.members[memberId]?.member;
-  if (!mine || mine.kind !== 'agent' || mine.recipient !== await deriveRecipient(identity) || !canReadContent(state, memberId)) throw new LinkEnded();
+  if (!mine || mine.kind !== 'agent' || mine.scope !== 'read' || mine.recipient !== await deriveRecipient(identity) || !canReadContent(state, memberId)) throw new LinkEnded();
   if (!meetsMinClientVersion(CLIENT_VERSION, state.minClientVersion)) throw new Error('This journey needs a newer version of Wayfinding. Update the server, then try this same link; do not request approval again.');
   if (!epochs.has(state.currentEpoch)) throw new Error(historyError);
   const envelopes: Envelope[] = [];

@@ -2,7 +2,6 @@ import { isId, PROJECT_STATES, validProjectPurpose } from '@ai-wayfinding/core';
 import type { Project, ProjectState, ProjectParticipation } from '@ai-wayfinding/core';
 
 export interface ProjectView extends Project { participants: string[]; participation: ProjectParticipation[] }
-export interface ParticipationExplanation { project: string; inherited: true; message: string }
 /** Format checks only; production Bend decides authority and predecessor freshness. */
 export function projectId(value: unknown): string {
   if (!isId(value)) throw new Error('Give a project ULID.');
