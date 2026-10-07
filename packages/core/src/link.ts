@@ -65,7 +65,7 @@ export async function renewAgentEntries(state: LogState, target: string, actor: 
   return [first, second];
 }
 
-/** Stage 0 renewal changes only expiry, retaining the original agent limit. */
+/** Stage 0 renewal changes only expiry. Legacy scope stays stored but has no member-agent authority; URL links keep their read limit. */
 export async function renewAgentEntry(state: LogState, target: string, actor: string, signingKey: CryptoKey, expiresAt: string): Promise<LogEntry> {
   if (!ownsAgent(state, actor, target)) throw new Error('Only the person who added an agent can extend it');
   if (!stage0Rules.stage_ready(ruleVersion(state.minClientVersion))) throw new Error('Upgrade barrier required');

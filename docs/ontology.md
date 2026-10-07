@@ -310,7 +310,7 @@ Sources: `packages/core/src/log.ts`; browser encryption and server storage: `pac
 
 **Role and guide authority:** content role and guide grants are independent. Authenticated agents inherit the live person's exact role and guide authority; old scopes are ignored. Temporary support people and their agents remain read-only and cannot hold guide authority. Profile and own-agent controls are independent of content role (D45; `packages/core/src/membership.ts`, `packages/server/src/enclave.ts`).
 
-**Admission gaps:** one-use invite acceptance creates a pending request, not immediate access. A guide browser hands over keys. The browser limits issuing invites to guides, but the server accepts any read-write principal; agent email delivery is forbidden. Refusal and cancellation are not built (`packages/server/src/registry.ts`, `packages/server/src/index.ts`, `packages/web/src/journey.ts`). D41 replaces this as the complete joining model.
+**Admission gaps:** one-use invite acceptance creates a pending request, not immediate access. A guide browser hands over keys. Server invite authority requires a live guide, including an authenticated agent of that guide, and binds delivery to the person's account. Refusal and cancellation are not built (`packages/server/src/registry.ts`, `packages/server/src/index.ts`, `packages/web/src/journey.ts`). D41 replaces this as the complete joining model.
 
 ### 10.4 Content and interfaces
 
