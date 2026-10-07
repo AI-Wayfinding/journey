@@ -54,7 +54,9 @@ describe('real workerd admission and private denials', () => {
     if (field === 'expires') await registryChange(f.agentSession.sessionId, field, Date.now() - 1);
     if (field === 'signingKey') await registryChange(f.agentSession.sessionId, field, (await createSigningIdentity()).publicKey);
     if (field === 'keyStorage') await registryChange(f.agentSession.sessionId, field, 'link');
-    if (field === 'future-minimum') await change(f.trip, f.owner, 'client.minVersion', { version: '0.1.8' });
+    // The person raising the signed minimum must satisfy the resulting version.
+    // The CLI/MCP subprocesses still advertise their actual 0.1.7 version.
+    if (field === 'future-minimum') await change(f.trip, f.owner, 'client.minVersion', { version: '0.1.8' }, {}, { 'X-Client-Version': '0.1.8' });
     await expect(execute(process.execPath, [cli, 'private', 'show', f.copy, '--state', state, '--private-cache', f.cache], { timeout: 90_000 })).rejects.toMatchObject({ code: 1, stdout: '', stderr: expect.not.stringContaining('PERSON PRIVATE') });
     const m = await privateMcp(state, f.cache, true);
     try {
