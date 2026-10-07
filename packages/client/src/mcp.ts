@@ -4,13 +4,34 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import { importMarkdown } from './import.js';
 import type { ArtifactInput } from './artifacts.js';
 import { observedRevision } from './projects.js';
-import type { JourneyClient } from './journey.js';
+import { JourneyClient } from './journey.js';
+import { PrivateArtifacts } from './private.js';
+import { loadState } from './state.js';
+import type { PrivateCheckpoint } from '@ai-wayfinding/core';
 
 const text = { type: 'string' as const };
 const schema = (properties: Record<string, object>, required: string[] = []) => ({ type: 'object' as const, properties, required, additionalProperties: false });
 const artifactFields = { type: text, title: text, body: text, tags: { type: 'array', items: text }, files: { type: 'array', maxItems: 8, items: schema({ path: text, packagePath: text, mime: text }, ['path']) }, format: { type: 'string', enum: ['json','csv','toml','yaml','sqlite'] }, url: text, summary: text, notes: text };
 const predecessor = { type: ['integer', 'null'], minimum: 0 };
+const privateTools = [
+  ['private_init', schema({})],
+  ['private_list', schema({ project: text })],
+  ['private_show', schema({ id: text }, ['id'])],
+  ['private_create', schema(artifactFields, ['type','title'])],
+  ['private_edit', schema({ ...artifactFields, id: text, predecessor: text }, ['id','predecessor','type','title'])],
+  ['private_comment', schema({ id: text, text, onVersion: text }, ['id','text'])],
+  ['private_delete', schema({ id: text, predecessor: text }, ['id','predecessor'])],
+  ['private_project', schema({ id: text, project: { type: ['string','null'] }, predecessor: { type: ['string','null'] } }, ['id','project','predecessor'])],
+  ['private_copy', schema({ id: text, predecessor: text, destinationState: text }, ['id','predecessor','destinationState'])],
+  ['private_backup', schema({ path: text }, ['path'])],
+  ['private_import', schema({ path: text }, ['path'])],
+  ['private_handoff', schema({ path: text, destinationState: text }, ['path','destinationState'])],
+  ['private_return', schema({ path: text }, ['path'])],
+  ['private_download', schema({ id: text, blob: text, path: text }, ['id','blob','path'])],
+  ['private_checkpoint', schema({ path: text }, ['path'])]
+].map(([name, inputSchema]) => ({ name: name as string, inputSchema: inputSchema as ReturnType<typeof schema>, description: 'Authorized private vault workflow. Explicit local paths only. Saves are staged for five-minute sync, not committed immediately. Unpaired server heads have unverified freshness; downloaded copies cannot be recalled.' }));
 const tools = [
+  ...privateTools,
   { name: 'project_list', description: 'List all projects, including empty and archived projects, after approval.', inputSchema: schema({}) },
   { name: 'project_show', description: 'Read purpose, state, observed revision, signed history and effective participants. Projects do not restrict artifact reads.', inputSchema: schema({ id: text }, ['id']) },
   { name: 'project_create', description: 'Create an empty getting-started project under current content-write authority. Creation does not join anyone.', inputSchema: schema({ purpose: text }, ['purpose']) },
@@ -56,7 +77,32 @@ function field(args: Record<string, unknown>, name: string): string {
   return args[name];
 }
 function optionalField(args: Record<string, unknown>, name: string): string | undefined { return args[name] === undefined ? undefined : field(args, name); }
-export function createWayfindingServer(getClient: () => Promise<JourneyClient>): Server {
+export function createWayfindingServer(getClient: () => Promise<JourneyClient>, paired?: PrivateCheckpoint): Server {
+  let workflow: PrivateArtifacts | undefined;
+  let queue: Promise<unknown> = Promise.resolve();
+  const privateCall = async (client: JourneyClient, name: string, args: Record<string, unknown>) => {
+    const definition = privateTools.find(t => t.name === name);
+    if (!definition || Object.keys(args).some(k => !Object.hasOwn(definition.inputSchema.properties, k))) throw new Error('Unknown private input field');
+    if (!client.privateCacheRoot) throw new Error('Private tools need --private-cache with an explicit encrypted staging folder.');
+    workflow ??= await PrivateArtifacts.open(client, paired);
+    const target = async () => { const state = await loadState(field(args, 'destinationState')); if (state.status !== 'approved') throw new Error('Destination requires separate approved state'); return new JourneyClient(state.session, { cacheRoot: client.privateCacheRoot }); };
+    switch (name) {
+      case 'private_init': return workflow.status();
+      case 'private_list': return workflow.list(optionalField(args, 'project'));
+      case 'private_show': return workflow.show(field(args, 'id'));
+      case 'private_create': return workflow.save(input(args));
+      case 'private_edit': return workflow.save(input(args), field(args, 'id'), field(args, 'predecessor'));
+      case 'private_comment': return workflow.comment(field(args, 'id'), field(args, 'text'), optionalField(args, 'onVersion'));
+      case 'private_delete': return workflow.delete(field(args, 'id'), field(args, 'predecessor'));
+      case 'private_project': return workflow.project(field(args, 'id'), args.project === null ? null : field(args, 'project'), args.predecessor === null ? null : field(args, 'predecessor'));
+      case 'private_download': return workflow.download(field(args, 'id'), field(args, 'blob'), field(args, 'path'));
+      case 'private_import': return workflow.import(field(args, 'path'));
+      case 'private_backup': case 'private_return': return workflow.backup(field(args, 'path'), name === 'private_return' ? 'agent-return' : 'author-backup');
+      case 'private_checkpoint': return workflow.checkpoint(field(args, 'path'));
+      case 'private_copy': case 'private_handoff': { const destination = await target(); try { return name === 'private_copy' ? await workflow.copyTo(field(args, 'id'), field(args, 'predecessor'), await PrivateArtifacts.open(destination)) : await workflow.backup(field(args, 'path'), 'agent-handoff', destination); } finally { destination.close(); } }
+      default: throw new Error('Unknown private tool');
+    }
+  };
   const server = new Server({ name: 'wayfinding', version: '0.1.0' }, { capabilities: { tools: {} } });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
   server.setRequestHandler(CallToolRequestSchema, async request => {
@@ -68,7 +114,9 @@ export function createWayfindingServer(getClient: () => Promise<JourneyClient>):
         catch (error) { result = { connected: false, message: error instanceof Error ? error.message : String(error) }; }
       } else {
         const client = await getClient();
-        switch (request.params.name) {
+        if (request.params.name.startsWith('private_')) {
+          const call = queue.then(() => privateCall(client, request.params.name, args)); queue = call.catch(() => {}); result = await call;
+        } else switch (request.params.name) {
           case 'project_list': result = await client.projectList(); break;
           case 'project_show': result = await client.projectShow(field(args, 'id')); break;
           case 'project_create': result = await client.projectCreate(field(args, 'purpose')); break;
@@ -99,6 +147,6 @@ export function createWayfindingServer(getClient: () => Promise<JourneyClient>):
   });
   return server;
 }
-export async function runMcp(getClient: () => Promise<JourneyClient>): Promise<void> {
-  await createWayfindingServer(getClient).connect(new StdioServerTransport());
+export async function runMcp(getClient: () => Promise<JourneyClient>, paired?: PrivateCheckpoint): Promise<void> {
+  await createWayfindingServer(getClient, paired).connect(new StdioServerTransport());
 }
