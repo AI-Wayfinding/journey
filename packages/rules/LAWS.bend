@@ -3,9 +3,8 @@ import ./rules.bend as R
 
 # Agent authority is exactly its live adding person, never more or longer-lived.
 law agent_missing_parent_denied:
-  for setting: R.Role
   for live: Bool
-  {R.agent_live_access(None{}, setting, live) == None{} : Maybe<&2, R.Role>}
+  {R.agent_live_access(None{}, live) == None{} : Maybe<&2, R.Role>}
 
 law agent_expired_denied:
   for id: Nat
@@ -14,8 +13,7 @@ law agent_expired_denied:
   for owner: Nat
   for support: Bool
   for parentLive: Bool
-  for setting: R.Role
-  {R.agent_live_access(Some{R.Member{id, R.Person{}, role, guide, owner, support, parentLive}}, setting, False{}) == None{} : Maybe<&2, R.Role>}
+  {R.agent_live_access(Some{R.Member{id, R.Person{}, role, guide, owner, support, parentLive}}, False{}) == None{} : Maybe<&2, R.Role>}
 
 law agent_expired_parent_denied:
   for id: Nat
@@ -23,9 +21,8 @@ law agent_expired_parent_denied:
   for guide: Bool
   for owner: Nat
   for support: Bool
-  for setting: R.Role
   for live: Bool
-  {R.agent_live_access(Some{R.Member{id, R.Person{}, role, guide, owner, support, False{}}}, setting, live) == None{} : Maybe<&2, R.Role>}
+  {R.agent_live_access(Some{R.Member{id, R.Person{}, role, guide, owner, support, False{}}}, live) == None{} : Maybe<&2, R.Role>}
 
 law agent_parent_must_be_person:
   for id: Nat
@@ -34,23 +31,17 @@ law agent_parent_must_be_person:
   for owner: Nat
   for support: Bool
   for parentLive: Bool
-  for setting: R.Role
   for live: Bool
-  {R.agent_live_access(Some{R.Member{id, R.Agent{}, role, guide, owner, support, parentLive}}, setting, live) == None{} : Maybe<&2, R.Role>}
+  {R.agent_live_access(Some{R.Member{id, R.Agent{}, role, guide, owner, support, parentLive}}, live) == None{} : Maybe<&2, R.Role>}
 
 law agent_guide_inherits_person:
   for guide: Bool
   {R.is_guide(R.authority_person(Some{R.Member{2n, R.Agent{}, R.ReadOnly{}, False{}, 1n, False{}, True{}}}, R.Member{1n, R.Person{}, R.ReadWrite{}, guide, 0n, False{}, True{}} <> Nil{})) == guide : Bool}
 
-# No role widening relative to the person. Historical caps are ignored.
-law agent_never_exceeds_member:
-  for setting: R.Role
-  {R.can_write(R.agent_access(R.ReadOnly{}, setting)) == False{} : Bool}
-
 law agent_matches_live_person_role:
-  for +member: R.Role
-  for setting: R.Role
-  {R.agent_access(member, setting) == member : R.Role}
+  for role: R.Role
+  for historical: R.Role
+  {R.member_access(Some{R.Member{2n, R.Agent{}, historical, False{}, 1n, False{}, True{}}}, R.Member{1n, R.Person{}, role, True{}, 0n, False{}, True{}} <> Nil{}) == Some{role} : Maybe<&2, R.Role>}
 
 # Stored agent guide flags do not grant authority; agent_guide_inherits_person does.
 law agent_stored_guide_not_authority:

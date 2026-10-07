@@ -159,10 +159,6 @@ function io_eff(k, run, need) {
 // Program
 // =======
 
-function $agent_access$(_member_0, _setting_0) {
-  return _member_0;
-}
-
 function $can_write$(_role_0) {
   if (_role_0.$ === "ReadOnly") {
     return false;
@@ -235,7 +231,7 @@ function $has_guide$(_xs_0) {
   }
 }
 
-function $agent_live_access$(_m_0, _setting_0, _live_0) {
+function $agent_live_access$(_m_0, _live_0) {
   if (_m_0.$ === "None") {
     return {$: "None"};
   } else {
@@ -244,7 +240,7 @@ function $agent_live_access$(_m_0, _setting_0, _live_0) {
     if (_t_1.$ === "Person") {
       const _role_0 = _t_0["role"];
       const _parent_live_0 = _t_0["live"];
-      return $Bool$pick$(($Bool$and$(_live_0, _parent_live_0)), {$: "Some", "value": ($agent_access$(_role_0, _setting_0))}, {$: "None"});
+      return $Bool$pick$(($Bool$and$(_live_0, _parent_live_0)), {$: "Some", "value": _role_0}, {$: "None"});
     } else {
       return {$: "None"};
     }
@@ -293,10 +289,9 @@ function $member_access$(_m_0, _xs_0) {
       const _live_0 = _t_0["live"];
       return $Bool$pick$(_live_0, {$: "Some", "value": _role_0}, {$: "None"});
     } else {
-      const _role_1 = _t_0["role"];
       const _owner_1 = _t_0["owner"];
       const _live_1 = _t_0["live"];
-      return $agent_live_access$(($find$(_xs_0, _owner_1)), _role_1, _live_1);
+      return $agent_live_access$(($find$(_xs_0, _owner_1)), _live_1);
     }
   }
 }
@@ -2795,14 +2790,13 @@ function $0m67(v) {
   }
 }
 export default {
-  "agent_access": run_lib((a0, a1) => { const r = (run_loop($agent_access$((a0), (a1)))); (a0); (a1); return r; }, 2),
   "can_write": run_lib((a0) => { const r = (run_loop($can_write$((a0)))); (a0); return r; }, 1),
   "person_guide": run_lib((a0, a1) => { const r = (run_loop($person_guide$((a0), (a1)))); (a0); (a1); return r; }, 2),
   "find": run_lib((a0, a1) => { const r = $0m4(run_loop($find$($0m0(a0), nat_host(a1)))); $0m2(a0); BigInt(a1); return r; }, 2),
   "is_person": run_lib((a0) => { const r = (run_loop($is_person$($0m5(a0)))); $0m4(a0); return r; }, 1),
   "is_guide": run_lib((a0) => { const r = (run_loop($is_guide$($0m5(a0)))); $0m4(a0); return r; }, 1),
   "has_guide": run_lib((a0) => { const r = (run_loop($has_guide$($0m0(a0)))); $0m2(a0); return r; }, 1),
-  "agent_live_access": run_lib((a0, a1, a2) => { const r = (run_loop($agent_live_access$($0m5(a0), (a1), (a2)))); $0m4(a0); (a1); (a2); return r; }, 3),
+  "agent_live_access": run_lib((a0, a1) => { const r = (run_loop($agent_live_access$($0m5(a0), (a1)))); $0m4(a0); (a1); return r; }, 2),
   "live_person": run_lib((a0, a1) => { const r = $0m4(run_loop($live_person$($0m5(a0), (a1)))); $0m4(a0); (a1); return r; }, 2),
   "authority_person": run_lib((a0, a1) => { const r = $0m4(run_loop($authority_person$($0m5(a0), $0m0(a1)))); $0m4(a0); $0m2(a1); return r; }, 2),
   "member_access": run_lib((a0, a1) => { const r = (run_loop($member_access$($0m5(a0), $0m0(a1)))); $0m4(a0); $0m2(a1); return r; }, 2),

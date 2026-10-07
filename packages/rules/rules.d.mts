@@ -85,7 +85,6 @@ declare const rules: {
   content_write(access: Maybe<Role>, pending: boolean): boolean;
   journey_apply(state: JourneyState, control: JourneyControl): JourneyTransition;
   journey_replay(controls: List<JourneyControl>, result: JourneyTransition): JourneyTransition;
-  agent_access(member: Role, setting: Role): Role;
   can_write(role: Role): boolean;
   person_guide(kind: Kind, guide: boolean): boolean;
   find(xs: List<Member>, id: bigint): Maybe<Member>;

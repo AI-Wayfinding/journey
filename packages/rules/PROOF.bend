@@ -2,26 +2,23 @@ import Base
 import ./rules.bend as R
 import ./LAWS.bend as Laws
 
-def Laws.agent_missing_parent_denied(setting, live): {==}
+def Laws.agent_missing_parent_denied(live): {==}
 
-def Laws.agent_expired_denied(id, role, guide, owner, support, parentLive, setting): {==}
+def Laws.agent_expired_denied(id, role, guide, owner, support, parentLive): {==}
 
-def Laws.agent_expired_parent_denied(id, role, guide, owner, support, setting, live):
+def Laws.agent_expired_parent_denied(id, role, guide, owner, support, live):
   match live:
     case False{}: {==}
     case True{}: {==}
 
-def Laws.agent_parent_must_be_person(id, role, guide, owner, support, parentLive, setting, live): {==}
+def Laws.agent_parent_must_be_person(id, role, guide, owner, support, parentLive, live): {==}
 
 def Laws.agent_guide_inherits_person(guide):
   match guide:
     case False{}: {==}
     case True{}: {==}
 
-def Laws.agent_never_exceeds_member(setting):
-  {==}
-
-def Laws.agent_matches_live_person_role(member, setting):
+def Laws.agent_matches_live_person_role(role, historical):
   {==}
 
 def Laws.agent_stored_guide_not_authority(guide):

@@ -9,10 +9,6 @@ type MemberKind is Data:
   Person{}
   Agent{}
 
-# Historical agent settings remain parseable but grant no independent cap.
-def agent_access(member: Role, setting: Role) -> Role:
-  member
-
 def can_write(role: Role) -> Bool:
   match role:
     case ReadOnly{}:
@@ -63,14 +59,14 @@ def has_guide(xs: +List<Member>) -> Bool:
     case Con{h, t}:
       is_guide(Some{h}) || has_guide(t)
 
-def agent_live_access(m: Maybe<&2, Member>, setting: Role, live: Bool) -> Maybe<&2, Role>:
+def agent_live_access(m: Maybe<&2, Member>, live: Bool) -> Maybe<&2, Role>:
   match m:
     case None{}:
       None{}
     case Some{Member{_, kind, role, _, _, _, parent_live}}:
       match kind:
         case Person{}:
-          Bool.pick(Maybe<&2, Role>, live && parent_live, Some{agent_access(role, setting)}, None{})
+          Bool.pick(Maybe<&2, Role>, live && parent_live, Some{role}, None{})
         case Agent{}:
           None{}
 
@@ -99,7 +95,7 @@ def member_access(m: Maybe<&2, Member>, +xs: +List<Member>) -> Maybe<&2, Role>:
         case Person{}:
           Bool.pick(Maybe<&2, Role>, live, Some{role}, None{})
         case Agent{}:
-          agent_live_access(find(xs, owner), role, live)
+          agent_live_access(find(xs, owner), live)
 
 
 def access_write(a: Maybe<&2, Role>) -> Bool:

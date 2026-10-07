@@ -38,10 +38,10 @@ const forged = 'rejects forged author or actor, stale predecessors, reused IDs, 
 const mutation = (name, path, old, replacement, pkg, file, test, proof = false) => ({ name, path, old, replacement, pkg, file, test, proof });
 const access = 'requires current inherited write access, never guide grants or an agent control privilege';
 const cases = [
-  mutation('parity: historical agent cap cannot reduce person access', rulesPath, 'def agent_access(member: Role, setting: Role) -> Role:\n  member', 'def agent_access(member: Role, setting: Role) -> Role:\n  setting', core, contract, access, true),
-  mutation('parity: agent cannot exceed a read-only person', rulesPath, 'def agent_access(member: Role, setting: Role) -> Role:\n  member', 'def agent_access(member: Role, setting: Role) -> Role:\n  ReadWrite{}', core, contract, access, true),
-  mutation('parity: live agent required', rulesPath, 'live && parent_live, Some{agent_access(role, setting)}', 'parent_live, Some{agent_access(role, setting)}', core, contract, access, true),
-  mutation('parity: live parent required', rulesPath, 'live && parent_live, Some{agent_access(role, setting)}', 'live, Some{agent_access(role, setting)}', core, 'test/bend-rules.test.ts', 'rechecks the live adding person and ignores historical agent limits', true),
+  mutation('parity: historical agent cap cannot reduce person access', rulesPath, 'agent_live_access(find(xs, owner), live)', 'Bool.pick(Maybe<&2, Role>, live, Some{role}, None{})', core, contract, access, true),
+  mutation('parity: agent cannot exceed a read-only person', rulesPath, 'live && parent_live, Some{role}', 'live && parent_live, Some{ReadWrite{}}', core, contract, access, true),
+  mutation('parity: live agent required', rulesPath, 'live && parent_live, Some{role}', 'parent_live, Some{role}', core, contract, access, true),
+  mutation('parity: live parent required', rulesPath, 'live && parent_live, Some{role}', 'live, Some{role}', core, 'test/bend-rules.test.ts', 'rechecks the live adding person and ignores historical agent limits', true),
   mutation('authority: public proof signature', 'packages/core/src/controlProof.ts', "if (!await crypto.subtle.verify('Ed25519', key, asBuffer(decode(proof.sig)), asBuffer(utf8(canonical(unsigned(proof))))))", 'if (false)', core, contract, 'rejects tampered signatures, chain, journey, ciphertext and unexpected signed fields'),
   mutation('authority: exact ciphertext binding', 'packages/core/src/controlProof.ts', 'proof.envelopeHash !== await digest(envelope)', 'false', core, contract, 'rejects tampered signatures, chain, journey, ciphertext and unexpected signed fields'),
   mutation('authority: ciphertext is not a second action', 'packages/core/src/artifacts.ts', "!shape(value, ['title', 'tags', 'content', 'attachments'])", 'false', core, contract, 'never treats ciphertext as another action or grants and rejects cross-journey descriptors'),
