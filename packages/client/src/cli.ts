@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { homedir } from 'node:os';
+import { validPrivateId } from '@ai-wayfinding/core';
 import { stdin, stderr } from 'node:process';
 import { join } from 'node:path';
 import { connectJourney, requestConnection, resumeConnection } from './connection.js';
@@ -58,10 +59,10 @@ function parse(args: string[]): { command: string; positional: string[]; flags: 
   for (let index = 1; index < args.length; index++) {
     const part = args[index]!;
     if (valueFlags.has(part)) {
-      if (args[index + 1] === undefined || args[index + 1]!.startsWith('--')) throw new Error(part + ' needs a value.');
+      if (args[index + 1] === undefined || (args[index + 1]!.startsWith('--') && !(command === 'private' && validPrivateId(args[index + 1])))) throw new Error(part + ' needs a value.');
       flags[part] = args[++index]!;
     } else if (boolFlags.has(part)) flags[part] = true;
-    else if (part.startsWith('-')) throw new Error('Unknown option: ' + part);
+    else if (part.startsWith('-') && !(command === 'private' && validPrivateId(part))) throw new Error('Unknown option: ' + part);
     else positional.push(part);
   }
   return { command, positional, flags };

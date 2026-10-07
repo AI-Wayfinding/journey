@@ -9,12 +9,14 @@ import { cli, execute, privateFixture, privateMcp, tool, denyTool, command, priv
 
 localServer();
 describe('Stage 3 real CLI/MCP private workflows', () => {
-  it('approved CLI agent reads person-authored history and backs it up without plaintext stdout', async () => {
-    const f = await privateFixture();
+  it.each(['-' + 'A'.repeat(42), '--' + 'A'.repeat(41)])('approved CLI agent reads person-authored history with leading-hyphen ID %s and backs it up without plaintext stdout', async copy => {
+    const f = await privateFixture(true, undefined, copy);
     const args = ['--state', f.state, '--private-cache', f.cache];
     const show = await execute(process.execPath, [cli, 'private', 'show', f.copy, ...args]);
     expect(JSON.parse(show.stdout).content.title).toBe('PERSON PRIVATE CANARY');
-    const path = join(scratch, 'person-backup.age');
+    await expect(execute(process.execPath, [cli, 'private', 'download', copy, '--blob', '--' + 'A'.repeat(41), '--output', join(scratch, 'missing-blob'), ...args])).rejects.toMatchObject({ code: 1, stderr: expect.stringContaining('Private attachment unavailable') });
+    await expect(execute(process.execPath, [cli, 'private', 'show', copy, '--unknown', ...args])).rejects.toMatchObject({ code: 1, stderr: expect.stringContaining('Unknown option: --unknown') });
+    const path = join(scratch, 'person-backup-' + copy + '.age');
     const backup = await execute(process.execPath, [cli, 'private', 'backup', '--output', path, ...args]);
     expect(backup.stdout).not.toContain('PERSON PRIVATE CANARY');
     expect(await readFile(path, 'utf8')).not.toContain('PERSON PRIVATE CANARY');

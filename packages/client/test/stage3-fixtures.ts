@@ -18,7 +18,7 @@ import { as, approve, change, connected, journey, person, refresh, request, root
 export const cli = join(root, 'packages/client/dist/cli.js');
 export const execute = promisify(execFile);
 /** Same person vault/agent delivery adapter used by the browser; real workerd transport. */
-export async function privateFixture(populated = true, destination?: { owner: import('./local-server.js').Owner; trip: import('./local-server.js').Fixture; agentSession: import('../src/storage.js').RememberedAgent }) {
+export async function privateFixture(populated = true, destination?: { owner: import('./local-server.js').Owner; trip: import('./local-server.js').Fixture; agentSession: import('../src/storage.js').RememberedAgent }, copyId?: string) {
   const owner = destination?.owner ?? await person(), trip = destination?.trip ?? await journey(owner);
   if (!destination) await change(trip, owner, 'client.minVersion', { version: '0.1.7' });
   const agent = destination ? new JourneyClient(destination.agentSession) : await connected(owner, trip);
@@ -36,7 +36,7 @@ export async function privateFixture(populated = true, destination?: { owner: im
       commit: async patch => { const response = await fetch('http://localhost:18787' + path, { method: 'PUT', headers: { ...as(owner), Origin: 'http://localhost:18787', 'X-Wayfinding': '1', 'Content-Type': 'application/octet-stream', 'X-Client-Version': '0.1.7', 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': 'artifact-v1', 'X-Project-Format': 'project-v1', 'X-Private-Format': 'private-v1' }, body: new Uint8Array(encodeVaultPatch(patch)) }); if (!response.ok) throw new Error('Person vault commit failed: ' + response.status); return response.json() as Promise<{ token: string }>; }
     }
   }, context, { agents: async () => [trip.entries.at(-1)!.proof.body.member as Member], put: async (id, ciphertext) => { const response = await request(`/v1/journeys/${trip.id}/private-agent-wrap/${id}`, 'PUT', { ciphertext }, as(owner)); if (!response.ok) throw new Error('Person wrap delivery failed: ' + response.status); } });
-  const copy = newPrivateId(), payload = { type: 'artifact.content', typeVersion: 1, body: { title: 'PERSON PRIVATE CANARY', tags: [], content: { kind: 'document', markdown: 'PERSON PRIVATE BODY' }, attachments: [] } };
+  const copy = copyId ?? newPrivateId(), payload = { type: 'artifact.content', typeVersion: 1, body: { title: 'PERSON PRIVATE CANARY', tags: [], content: { kind: 'document', markdown: 'PERSON PRIVATE BODY' }, attachments: [] } };
   const record = await signPrivateRecord({ format: 'private-v1', v: 1, id: newId(), vault: vaultId, copy, seq: 0, prev: null, at: new Date().toISOString(), actor: author, authority: privateAuthority(context, author), type: 'private.create', body: { artifact: newPrivateId(), author: { kind: author.kind, signingKey: author.signingKey, recipient: author.recipient }, actor: { kind: author.kind, signingKey: author.signingKey, recipient: author.recipient }, version: newId(), typeHash: await artifactTypeHash('document'), blobs: [], predecessor: null }, payloadHash: await privateHash(payload) }, signingKey);
   const bundle: PrivateBundle = { format: 'private-v1', version: 1, vault: vaultId, author, scope: 'author-backup', authorityHistories: [privateAuthorityHistory(context)], records: [record], payloads: [{ record: record.id, payload }], copyKeys: [{ copy, key: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64') }], blobs: [], unavailableDeletedBlobs: [] };
   if (populated) await controller.stage(bundle);
