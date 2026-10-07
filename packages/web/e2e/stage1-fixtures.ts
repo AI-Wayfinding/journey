@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { importSigningKey, newId, sealControlLabels, signControlProof, unwrapJourneyKey, verifyControlProofs } from '@ai-wayfinding/core';
 import type { ControlProof, Envelope, JsonObject, Member } from '@ai-wayfinding/core';
 
-export const headers = { 'X-Client-Version': '0.1.7', 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': 'artifact-v1', 'X-Project-Format': 'project-v1' };
+export const headers = { 'X-Client-Version': '0.1.7', 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': 'artifact-v1', 'X-Project-Format': 'project-v1', 'X-Private-Format': 'private-v1' };
 export async function createTrip(page: Page, name = 'Artifacts journey') {
   await page.getByRole('link', { name: 'Start a journey' }).first().click();
   await page.getByLabel('Journey name').fill(name); await page.getByRole('button', { name: 'Create journey' }).click();

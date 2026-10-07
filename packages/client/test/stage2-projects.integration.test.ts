@@ -28,7 +28,7 @@ it('real CLI and stdio MCP expose empty projects, inherited participation and re
     const newcomer = await connected(adding, trip, 'read'), nf = await state(newcomer), nsdk = await mcp(nf);
     try {
       expect((await command(nf, 'project', 'show', p.id)).participants).toContain(newcomer.session.principal);
-      await change(trip, owner, 'member.renew', { id: newcomer.session.principal, expiresAt: new Date(Date.now() + 1000).toISOString() });
+      await change(trip, adding, 'member.renew', { id: newcomer.session.principal, expiresAt: new Date(Date.now() + 1000).toISOString() });
       await new Promise(resolve => setTimeout(resolve, 1200));
       await failedCommand(nf, 'Access to this journey has ended', 'project', 'show', p.id);
       await failedTool(nsdk, 'project_show', 'Access to this journey has ended', { id: p.id });

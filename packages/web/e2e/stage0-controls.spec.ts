@@ -1,7 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
 import { browserPerson, signUp } from './person.js';
 async function principal(page: Page, id: string) {
-  const data = await (await page.request.get('/v1/journeys', { headers: { 'X-Client-Version': '0.1.7', 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': 'artifact-v1', 'X-Project-Format': 'project-v1' } })).json() as { journeys: { id: string; principal: string }[] };
+  const data = await (await page.request.get('/v1/journeys', { headers: { 'X-Client-Version': '0.1.7', 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': 'artifact-v1', 'X-Project-Format': 'project-v1', 'X-Private-Format': 'private-v1' } })).json() as { journeys: { id: string; principal: string }[] };
   return data.journeys.find(row => row.id === id)!.principal;
 }
 test('signed settings, separate role and guide authority, and read-only personal controls survive reload', async ({ browser, request }) => {
