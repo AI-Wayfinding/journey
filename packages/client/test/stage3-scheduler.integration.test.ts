@@ -153,7 +153,8 @@ describe('real scheduled chunk and fault boundaries', () => {
       expect(await fileDigest(join(f.cache, f.vaultId, 'pending.age'))).toBe(pendingA);
       expect(await fileDigest(join(cacheB, f.vaultId, 'pending.age'))).toBe(pendingB);
       const read = await command(f.state, join(scratch, 'race-observer'), 'private', 'list', '--project', 'all');
-      const shown = await Promise.all(read.map((c: any) => command(f.state, join(scratch, 'race-reader-' + c.copy), 'private', 'show', c.copy)));
+      const shown: any[] = [];
+      for (const copy of read) shown.push(await command(f.state, join(scratch, 'race-reader-' + copy.copy), 'private', 'show', copy.copy));
       // The stale device may win with its content-independent dummy patch.
       const expectedTitles = results[0]!.status === 'fulfilled' ? ['PERSON PRIVATE CANARY', 'RACE A CANARY'] : ['PERSON PRIVATE CANARY'];
       expect(shown.map(c => c.content.title).sort()).toEqual(expectedTitles);
