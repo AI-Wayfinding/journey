@@ -18,9 +18,10 @@ export class PrivateArtifacts {
   private store?: NodePrivatePending;
   private revision: string | null = null;
   private constructor(readonly client: JourneyClient, readonly vault: import('@ai-wayfinding/core').PrivateVault, readonly authority: Awaited<ReturnType<JourneyClient['privateAuthority']>>) {}
-  static async open(client: JourneyClient, paired?: PrivateCheckpoint): Promise<PrivateArtifacts> {
+  static async open(client: JourneyClient, paired?: PrivateCheckpoint, forkPath?: string): Promise<PrivateArtifacts> {
     const authority = await client.privateAuthority();
-    const value = new PrivateArtifacts(client, await client.openPrivateVault(paired), authority);
+    const fork = forkPath ? await PrivateArtifacts.readFork(forkPath) : undefined;
+    const value = new PrivateArtifacts(client, await client.openPrivateVault(paired, fork), authority);
     if (client.privateCacheRoot) {
       value.store = new NodePrivatePending(client.privateCacheRoot, authority.vault, client.session.identity, authority.session.identity.recipient);
       const saved = await value.store.read(); value.revision = saved?.token ?? null;
@@ -44,8 +45,9 @@ export class PrivateArtifacts {
     return this.vault.branches[0] ? structuredClone(this.vault.branches[0].bundle) : { format: 'private-v1', version: 1, vault: this.authority.vault, author: this.authority.author, scope: 'author-backup', authorityHistories: [], records: [], payloads: [], copyKeys: [], blobs: [], unavailableDeletedBlobs: [] };
   }
   async status() {
-    this.bundle(); if (!this.pending) await this.clearPending();
-    return { status: this.pending ? 'staged' : 'committed', freshness: this.vault.freshness, version: this.vault.retainedCheckpoint?.version ?? 0, warning: 'Server-backed encrypted vault. Saves wait for the next five-minute sync. Downloaded copies cannot be recalled. A server-only head has unverified freshness.' };
+    if (this.vault.branches.length <= 1) this.bundle();
+    if (!this.pending) await this.clearPending();
+    return { status: this.pending || this.vault.hasPending ? 'staged' : 'committed', freshness: this.vault.freshness, version: this.vault.retainedCheckpoint?.version ?? 0, branches: this.vault.branches.length, warning: 'Server-backed encrypted vault. Saves wait for the next five-minute sync. Downloaded copies cannot be recalled. A server-only head has unverified freshness.' };
   }
   private async clearPending() { if (this.store && this.revision) { await this.store.clear(this.revision); this.revision = null; } }
   private async writer() {
@@ -164,5 +166,23 @@ export class PrivateArtifacts {
     return { id: copy, ...(await destination.status()) };
   }
   async checkpoint(path: string) { const checkpoint = this.vault.retainedCheckpoint; if (!checkpoint) throw new Error('Private checkpoint unavailable'); await saveDownload(path, new TextEncoder().encode(canonical(checkpoint))); return { path }; }
-  async merge(value: VaultCacheRecord) { await this.writer(); const result = await this.vault.merge(value); return { conflicts: result.filter(c => c.branches.length > 1).map(c => c.copy), status: 'staged' }; }
+  /** Fixed ciphertext cache only; unknown fields remain untrusted until core
+   * validates the exact frame, checkpoint and every signed slot/history. */
+  private static async readFork(path: string): Promise<VaultCacheRecord> {
+    const bytes = await localBytes(path, 92_000_000);
+    try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as VaultCacheRecord; }
+    finally { bytes.fill(0); }
+  }
+  async merge(path: string) {
+    await this.writer();
+    const result = await this.vault.merge(await PrivateArtifacts.readFork(path));
+    return { conflicts: result.filter(c => c.branches.length > 1).map(c => c.copy), status: 'staged' };
+  }
+  async branches() {
+    const live = await this.client.privateAuthority();
+    return Promise.all(this.vault.branches.map(async branch => {
+      const checked = await this.verify(branch.bundle);
+      return selectPrivateCopies(checked.view, live.context, live.session, 'all').map(copy => ({ copy, content: this.content(copy) }));
+    }));
+  }
 }

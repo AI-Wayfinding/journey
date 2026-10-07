@@ -1,14 +1,14 @@
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createServer } from 'node:http';
-import { writeFile } from 'node:fs/promises';
+import { writeFile, readFile, readdir } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { expect } from 'vitest';
 import { join } from 'node:path';
 import { PrivateVault, artifactTypeHash, canonical, decodeVaultWire, encodeVaultPatch, importSigningKey, memberVaultId, newId, newPrivateId, privateAuthority, privateAuthorityHistory, privateHash, privateIdentity, privatePersonSession, signPrivateRecord, verifyPrivateContext } from '@ai-wayfinding/core';
-import type { Member, PrivateBundle } from '@ai-wayfinding/core';
+import type { Member, PrivateBundle, VaultCacheRecord } from '@ai-wayfinding/core';
 import { JourneyClient } from '../src/journey.js';
 import { openPersonPrivateVault } from '../src/private-store.js';
 import { loadState, saveState } from '../src/state.js';
@@ -75,6 +75,11 @@ export async function privateMcp(state: string, cache: string, clock = false, pa
   const sdk = new Client({ name: 'stage3-private', version: '1.0.0' }); await sdk.connect(transport);
   return { sdk, errors: () => errors, advance: async (at: number) => {
     if (!port) throw new Error('Virtual clock not ready');
+    for (let i = 0; i < 1000; i++) {
+      if (await fetch(`http://127.0.0.1:${port}/`).then(r => r.text()) === '1') break;
+      if (i === 999) throw new Error('Private scheduler not registered');
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
     const response = await fetch(`http://127.0.0.1:${port}/?at=${at}`);
     if (!response.ok) throw new Error(await response.text());
   }, close: () => sdk.close() };
@@ -119,7 +124,7 @@ export async function agentState(session: import('../src/storage.js').Remembered
   return path;
 }
 /** Opaque byte-forwarding proxy preserves signing paths and body bytes. */
-export async function privateProxy(transform?: (path: string, method: string, bytes: Buffer, status: number) => { bytes: Buffer; status?: number }) {
+export async function privateProxy(transform?: (path: string, method: string, bytes: Buffer, status: number) => { bytes: Buffer; status?: number } | Promise<{ bytes: Buffer; status?: number }>) {
   let at = 0;
   const trace: { at: number; path: string; method: string; request: number; response: number; status: number; headers: Record<string, string | string[] | undefined> }[] = [];
   const forwarding = createServer(async (req, res) => {
@@ -129,7 +134,7 @@ export async function privateProxy(transform?: (path: string, method: string, by
       for (const [name, value] of Object.entries(req.headers)) if (typeof value === 'string' && !['host','connection','content-length'].includes(name)) headers.set(name, value);
       if (headers.has('origin')) headers.set('origin', 'http://localhost:18787');
       const response = await fetch('http://localhost:18787' + path, { method, headers, ...(body.length ? { body } : {}) });
-      const raw = Buffer.from(await response.arrayBuffer()), changed = transform?.(path, method, raw, response.status);
+      const raw = Buffer.from(await response.arrayBuffer()), changed = await transform?.(path, method, raw, response.status);
       const bytes = changed?.bytes ?? raw, status = changed?.status ?? response.status;
       trace.push({ at, path, method, request: body.length, response: bytes.length, status, headers: req.headers });
       res.writeHead(status, { 'Content-Type': response.headers.get('content-type') ?? 'application/octet-stream' }); res.end(bytes);
@@ -138,6 +143,17 @@ export async function privateProxy(transform?: (path: string, method: string, by
   await new Promise<void>(resolve => forwarding.listen(0, '127.0.0.1', resolve));
   const address = forwarding.address(); if (!address || typeof address === 'string') throw new Error('No private proxy');
   return { origin: `http://127.0.0.1:${address.port}`, trace, time: (value: number) => { at = value; }, close: () => new Promise<void>(resolve => forwarding.close(() => resolve())) };
+}
+
+export async function retained(cache: string, vault: string, identity: string): Promise<VaultCacheRecord> {
+  const { openIdentity } = await import('@ai-wayfinding/core');
+  const pointer = JSON.parse(await openIdentity(await readFile(join(cache, vault, 'checkpoint.age'), 'utf8'), [identity]));
+  const value = JSON.parse(await readFile(join(cache, vault, pointer.file), 'utf8'));
+  return { token: value.token, frame: value.frame, slots: value.slots, checkpoint: JSON.parse(await openIdentity(value.checkpoint, [identity])) };
+}
+export async function cacheBytes(cache: string, vault: string) {
+  const entries = await readdir(join(cache, vault));
+  return Object.fromEntries(await Promise.all(entries.sort().map(async name => [name, (await readFile(join(cache, vault, name))).toString('base64')])));
 }
 
 export async function privateDestination(source: Awaited<ReturnType<typeof privateFixture>>) {

@@ -125,6 +125,7 @@ export class PrivateVault {
   private staging = false;
   private readyWaiters = new Set<{ resolve(): void; reject(error: Error): void }>();
   constructor(private readonly options: VaultOptions) {}
+  get hasPending(): boolean { return this.pendingBranches !== null; }
   get ready(): boolean { return this.active && this.slots.length > 0 && this.available && !this.busy && !this.staging; }
   /** Wait for scheduled reads to verify the current complete history. Never
    * fetches extra slots, discards a checkpoint or exposes an older branch. */
@@ -151,7 +152,7 @@ export class PrivateVault {
     this.alive(generation);
     this.available = result !== null; this.verifiedBranches = result ?? [];
   }
-  async open(): Promise<void> {
+  async open(fork?: VaultCacheRecord): Promise<void> {
     this.assertOpen(); if (this.slots.length) return;
     const generation = this.generation;
     const cached = await this.options.cache?.read(); this.alive(generation);
@@ -175,7 +176,11 @@ export class PrivateVault {
       } else if (this.options.paired) throw new Error('Private vault rollback');
     }
     const hashes = await Promise.all(this.slots.map(s => privateBytesHash(privateDecode(s)))); this.alive(generation); this.hashes = hashes;
-    await this.refreshBranches(); this.alive(generation); if (!this.options.historical) await this.sync(true);
+    await this.refreshBranches(); this.alive(generation);
+    // An explicit independently retained fork must verify against the local
+    // checkpoint before the scheduled open can upload anything.
+    if (fork) await this.merge(fork);
+    if (!this.options.historical) await this.sync(true);
   }
   start(): void { this.assertOpen(); if (!this.options.historical && !this.timer) this.timer = setInterval(() => { void this.tick().catch(() => { /* Retry only on the next fixed interval. */ }); }, 300000); }
   private writable(bundle: PrivateBundle): void {

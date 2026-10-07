@@ -15,6 +15,8 @@ const artifactFields = { type: text, title: text, body: text, tags: { type: 'arr
 const predecessor = { type: ['integer', 'null'], minimum: 0 };
 const privateTools = [
   ['private_init', schema({})],
+  ['private_merge', schema({ path: text }, ['path'])],
+  ['private_branches', schema({})],
   ['private_list', schema({ project: text })],
   ['private_show', schema({ id: text }, ['id'])],
   ['private_create', schema(artifactFields, ['type','title'])],
@@ -84,10 +86,16 @@ export function createWayfindingServer(getClient: () => Promise<JourneyClient>, 
     const definition = privateTools.find(t => t.name === name);
     if (!definition || Object.keys(args).some(k => !Object.hasOwn(definition.inputSchema.properties, k))) throw new Error('Unknown private input field');
     if (!client.privateCacheRoot) throw new Error('Private tools need --private-cache with an explicit encrypted staging folder.');
+    if (!workflow && name === 'private_merge') {
+      workflow = await PrivateArtifacts.open(client, paired, field(args, 'path'));
+      return workflow.status();
+    }
     workflow ??= await PrivateArtifacts.open(client, paired);
     const target = async () => { const state = await loadState(field(args, 'destinationState')); if (state.status !== 'approved') throw new Error('Destination requires separate approved state'); return new JourneyClient(state.session, { cacheRoot: client.privateCacheRoot }); };
     switch (name) {
       case 'private_init': return workflow.status();
+      case 'private_merge': return workflow.merge(field(args, 'path'));
+      case 'private_branches': return workflow.branches();
       case 'private_list': return workflow.list(optionalField(args, 'project'));
       case 'private_show': return workflow.show(field(args, 'id'));
       case 'private_create': return workflow.save(input(args));

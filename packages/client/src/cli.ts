@@ -41,7 +41,7 @@ wayfinding show <id>
 wayfinding comment <id> <text> [--version VERSION]
 wayfinding comments <id>
 wayfinding status
-wayfinding private init|list|show|create|edit|comment|delete|project|copy|backup|import|handoff|return|checkpoint|watch
+wayfinding private init|list|show|branches|merge|create|edit|comment|delete|project|copy|backup|import|handoff|return|checkpoint|watch
 Private commands require --private-cache PATH; use --paired FILE for a trusted exported checkpoint.
 Private saves are staged, not immediately uploaded. Keep mcp or private watch open for five-minute sync.
 wayfinding mcp [--connect <journey-id>] [--name "Agent name"]
@@ -188,8 +188,9 @@ export async function main(args = process.argv.slice(2), journeyOptions: Journey
     switch (command) {
       case 'private': {
         if (!flag(flags, '--private-cache')) throw new Error('Private commands need --private-cache with an explicit encrypted staging folder.');
-        const workflow = await PrivateArtifacts.open(client, paired), [action, id, text] = positional;
+        const [action, id, text] = positional;
         const required = (value: string | undefined, name: string) => { if (!value) throw new Error('Supply ' + name); return value; };
+        const workflow = await PrivateArtifacts.open(client, paired, action === 'merge' ? required(id, 'fork cache path') : undefined);
         const observed = () => required(flag(flags, '--predecessor'), '--predecessor');
         const target = async () => {
           const state = await loadState(required(flag(flags, '--destination-state'), '--destination-state FILE'));
@@ -197,7 +198,8 @@ export async function main(args = process.argv.slice(2), journeyOptions: Journey
           return new JourneyClient(state.session, { ...journeyOptions, cacheRoot: flag(flags, '--private-cache') });
         };
         switch (action) {
-          case 'init': result = await workflow.status(); break;
+          case 'init': case 'merge': result = await workflow.status(); break;
+          case 'branches': result = await workflow.branches(); break;
           case 'list': result = await workflow.list(flag(flags, '--project')); break;
           case 'show': result = await workflow.show(required(id, 'copy ID')); break;
           case 'create': result = await workflow.save(input()); break;

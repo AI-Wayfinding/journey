@@ -4,7 +4,7 @@ import { PROJECT_FORMAT, projectPurposeHash, replayProject, sealProjectPayload, 
 import type { ProjectActionType } from '@ai-wayfinding/core';
 import { projectId, observedRevision, purposeText, stateValue } from './projects.js';
 import type { ProjectView } from './projects.js';
-import { CLIENT_VERSION, meetsMinClientVersion, newId, unwrapJourneyKey, verifyControlProofs, controlDefinitions, ARTIFACT_FORMAT, artifactTypeHash, canonical, readArtifactPayload, sealArtifactPayload, sealBlob, openBlob, signControlProof, importSigningKey, replayArtifact } from '@ai-wayfinding/core';
+import { CLIENT_VERSION, meetsMinClientVersion, createAgeIdentity, newId, unwrapJourneyKey, verifyControlProofs, controlDefinitions, ARTIFACT_FORMAT, artifactTypeHash, canonical, readArtifactPayload, sealArtifactPayload, sealBlob, openBlob, signControlProof, importSigningKey, replayArtifact } from '@ai-wayfinding/core';
 import type { VaultOptions, VaultTransport, PrivateCheckpoint, PrivateContext, ControlProof, Member, Envelope, JourneyKey, LogState, ArtifactActionType, ArtifactAttachment, ArtifactPayload, JsonObject } from '@ai-wayfinding/core';
 import { artifactPayload, artifactText, attachmentName, localBytes, saveDownload, skillPackage, validateLocalAttachment } from './artifacts.js';
 import type { ArtifactInput, ArtifactItem, ArtifactView, ArtifactComment, LocalAttachment } from './artifacts.js';
@@ -101,9 +101,12 @@ export class JourneyClient {
   }
   get privateCacheRoot(): string | undefined { return this.options.cacheRoot; }
   /** Open the adding person's vault using only this agent's delivered content key. */
-  async openPrivateVault(paired?: PrivateCheckpoint): Promise<PrivateVault> {
+  async openPrivateVault(paired?: PrivateCheckpoint, fork?: import('@ai-wayfinding/core').VaultCacheRecord): Promise<PrivateVault> {
     const verified = await this.verified();
-    if (!paired && this.privateController && this.privateHead === verified.state.lastHash) return this.privateController;
+    if (!paired && this.privateController && this.privateHead === verified.state.lastHash) {
+      if (fork) await this.privateController.merge(fork);
+      return this.privateController;
+    }
     this.stopPrivateSchedule?.(); this.stopPrivateSchedule = undefined;
     this.privateController?.close(); this.privateController = undefined;
     const controls = verified.log.map(row => JSON.parse(Buffer.from(row.entry, 'base64url').toString()) as { proof: ControlProof; envelope: Envelope });
@@ -115,7 +118,10 @@ export class JourneyClient {
     if (!privateAccess(context, author, session)) throw new Error('Private vault access denied');
     const vault = await memberVaultId(this.session.journeyId, person, author.signingKey, author.recipient);
     const wrap = await this.response(`/journeys/${this.session.journeyId}/private-agent-wrap/${this.session.principal}`, 'GET', undefined, {}, true);
-    const contentIdentity = wrap.status === 404 ? undefined : await openVaultAgentWrap((await wrap.json() as { ciphertext: string }).ciphertext, { journey: this.session.journeyId, person, agent: this.session.principal, vault, author, recipient: actor }, this.session.identity, context);
+    // A fresh dedicated key can initialize only an empty server container.
+    // Existing ciphertext must decrypt with a delivered key; never fall back to
+    // the person's key or overwrite a header whose wrap is missing.
+    const contentIdentity = wrap.status === 404 ? (await createAgeIdentity()).identity : await openVaultAgentWrap((await wrap.json() as { ciphertext: string }).ciphertext, { journey: this.session.journeyId, person, agent: this.session.principal, vault, author, recipient: actor }, this.session.identity, context);
     const transport: VaultTransport = { read: async indices => decodeVaultWire(new Uint8Array(await (await this.response(`/journeys/${this.session.journeyId}/private-vault?slots=${indices === 'all' ? 'all' : indices.map(i => String(i).padStart(2, '0')).join(',')}`)).arrayBuffer()), indices), commit: async patch => {
       const live = await this.privateAuthority();
       if (!samePrivateContext(live.context, context) || !privateAccess(live.context, author, live.session, true)) throw new Error('Private authority changed; reopen before saving');
@@ -125,7 +131,7 @@ export class JourneyClient {
     if (this.options.cacheRoot) options.cache = new NodePrivateStore(this.options.cacheRoot, vault, options);
     const controller = new PrivateVault(options); rememberNodePrivateVault(controller);
     try {
-      await controller.open();
+      await controller.open(fork);
       if (controller.retainedCheckpoint && privateAccess(context, author, session, true)) {
         const audience = await this.request<{ agents: { principal: string }[] }>(`/journeys/${this.session.journeyId}/private-agents`);
         for (const candidate of audience.agents) {
