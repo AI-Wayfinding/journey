@@ -321,13 +321,17 @@ export async function verifyPrivateRecords(records: readonly PrivateRecord[], pa
     const cleanPayload = await validatePrivatePayload(r, payload);
     const old = copies.get(r.copy);
     if (old && old.journey !== r.authority.journey) throw new Error('Private copy changed journey');
-    const actorSession = options.sessions?.find(s => sessions.get(s)?.context === context && sameIdentity(s.identity, r.actor));
-    // Historical cryptographic replay checks entry-time authority. It never issues
-    // a session or authorizes a new mutation/key handoff.
-    const model = normalizedMembers(data.state, [], options.historical ? Date.parse(r.at) : data.now);
+    // Replay always checks the signed writer's entry-time authority. Live
+    // verification additionally requires a current write session in the person's
+    // audience, not possession of every historical writer's private keys. An
+    // approved agent can therefore act on its person's signed history under D45.
+    const model = normalizedMembers(data.state, [], Date.parse(r.at));
     const historicalCredential: PrivateCredential = { $: r.actor.kind === 'person' ? 'PrivatePersonCredential' : 'PrivateAuthenticatedAgent' };
-    const allowed = options.historical ? rules.private_write(model.members, model.id(privateBinding(context, trust.author).principal), model.id(binding.principal), historicalCredential, ruleVersion(data.state.minClientVersion), data.state.pendingRotation === true, true)
-      : !!actorSession && privateAccess(context, trust.author, actorSession, true);
+    const historicalAllowed = rules.private_write(model.members, model.id(privateBinding(context, trust.author).principal), model.id(binding.principal), historicalCredential, ruleVersion(data.state.minClientVersion), data.state.pendingRotation === true, true);
+    const allowed = historicalAllowed && (options.historical === true || (options.sessions ?? []).some(s => {
+      const live = sessions.get(s)?.context;
+      return !!live && live.journey === context.journey && privateAccess(live, trust.author, s, true);
+    }));
     const strings = [r.copy, r.body.artifact as string, canonical(author), canonical(r.actor), r.authority.journey, r.sig, r.prev ?? '', ...Object.keys(data.state.projects?.items ?? {})];
     for (const c of [...copies.values(), ...(sourceCopies?.values() ?? []), ...provenanceCurrent.values()]) strings.push(...ruleCopyStrings(c));
     for (const key of ['version', 'typeHash', 'predecessor', 'comment', 'onVersion', 'project']) if (typeof r.body[key] === 'string') strings.push(r.body[key]);

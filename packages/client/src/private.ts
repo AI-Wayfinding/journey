@@ -1,5 +1,6 @@
 import { canonical, artifactTypeHash, newId, newPrivateId, privateHash, privateAuthority, privateAuthorityHistory, privateCopies, privateAccess, privateAgentAudience, privateAgentSession, importSigningKey, selectPrivateCopies, signPrivateRecord, verifyPrivateBundle, exportPrivateBundle, importPrivateBundle, openPrivateBlob, privateSnapshotHash, privateDerivedKey, privateBlobAAD, privateBytesHash } from '@ai-wayfinding/core';
 import type { PrivateBundle, PrivateCheckpoint, PrivateCopyState, PrivateIdentity, PrivateBlob, PrivateRecord, ProtocolRecord, JsonObject, VaultCacheRecord } from '@ai-wayfinding/core';
+import { samePrivateContext } from './journey.js';
 import type { JourneyClient } from './journey.js';
 import { attachmentName, artifactPayload, localBytes, saveDownload, validateLocalAttachment } from './artifacts.js';
 import type { ArtifactInput, LocalAttachment } from './artifacts.js';
@@ -22,7 +23,7 @@ export class PrivateArtifacts {
     const value = new PrivateArtifacts(client, await client.openPrivateVault(paired), authority);
     if (client.privateCacheRoot) {
       value.store = new NodePrivatePending(client.privateCacheRoot, authority.vault, client.session.identity, authority.session.identity.recipient);
-      const saved = await value.store.read(); value.revision = saved?.revision ?? null;
+      const saved = await value.store.read(); value.revision = saved?.token ?? null;
       if (saved) {
         const checked = await value.verify(saved.bundle);
         const current = value.vault.branches;
@@ -48,7 +49,7 @@ export class PrivateArtifacts {
   private async clearPending() { if (this.store && this.revision) { await this.store.clear(this.revision); this.revision = null; } }
   private async writer() {
     const live = await this.client.privateAuthority();
-    if (live.context.head !== this.authority.context.head || !privateAccess(live.context, this.authority.author, live.session, true)) throw new Error('Private write authority changed or denied; reopen');
+    if (!samePrivateContext(live.context, this.authority.context) || !privateAccess(live.context, this.authority.author, live.session, true)) throw new Error('Private write authority changed or denied; reopen');
   }
   private async stage(bundle: PrivateBundle) {
     await this.writer(); const checked = await this.verify(bundle);
@@ -94,7 +95,6 @@ export class PrivateArtifacts {
   }
   async save(input: ArtifactInput, id?: string, predecessor?: string) {
     await this.writer(); const previous = id ? await this.copy(id) : undefined;
-    if (previous && predecessor !== previous.head) throw new Error('Private predecessor conflict');
     const bundle = this.bundle(), copy = previous?.copy ?? newPrivateId(), artifact = previous?.artifact ?? newPrivateId();
     if (!previous) bundle.copyKeys.push({ copy, key: encode(crypto.getRandomValues(new Uint8Array(32))) });
     const attachments = input.files === undefined && previous ? this.content(previous).attachments : [];
@@ -105,7 +105,7 @@ export class PrivateArtifacts {
     const ordinary = artifactPayload(input, sharedShape), content = ordinary.content;
     if ('primary' in content) content.primary = attachments[0]!.blob.id;
     const payload: ProtocolRecord = { type: 'artifact.content', typeVersion: 1, body: { title: ordinary.title, tags: ordinary.tags, content, attachments } };
-    await this.append(bundle, previous ? 'private.version' : 'private.create', copy, artifact, previous?.author ?? this.authority.session.identity, payload, { version: newId(), typeHash: await artifactTypeHash(content.kind), blobs: attachments.map(a => a.blob), predecessor: previous?.head ?? null });
+    await this.append(bundle, previous ? 'private.version' : 'private.create', copy, artifact, previous?.author ?? this.authority.session.identity, payload, { version: newId(), typeHash: await artifactTypeHash(content.kind), blobs: attachments.map(a => a.blob), predecessor: previous ? predecessor! : null });
     return { id: copy, ...(await this.status()) };
   }
   async comment(id: string, text: string, onVersion?: string) { const c = await this.copy(id); await this.append(this.bundle(), 'private.comment', id, c.artifact, c.author, { type: 'artifact.comment-content', typeVersion: 1, body: { text } }, { comment: newId(), ...(onVersion ? { onVersion } : {}) }); return this.status(); }
@@ -126,7 +126,7 @@ export class PrivateArtifacts {
     let recipient = this.authority.session;
     if (target) {
       const admitted = await target.privateAuthority();
-      if (admitted.context.journey !== this.authority.context.journey || admitted.context.head !== this.authority.context.head || !privateAgentAudience(this.authority.context, this.authority.author, admitted.session.identity)) throw new Error('Private recipient outside person audience');
+      if (!samePrivateContext(admitted.context, this.authority.context) || !privateAgentAudience(this.authority.context, this.authority.author, admitted.session.identity)) throw new Error('Private recipient outside person audience');
       recipient = await privateAgentSession(this.authority.context, admitted.session.identity, await importSigningKey(target.session.signingPrivateKey), target.session.identity, 'authenticated');
     }
     if (scope === 'agent-handoff' && !target) throw new Error('Handoff requires separately approved local state');
@@ -142,7 +142,7 @@ export class PrivateArtifacts {
   }
   async copyTo(id: string, predecessor: string, destination: PrivateArtifacts) {
     await this.writer(); await destination.writer(); const selected = await this.copy(id);
-    if (selected.head !== predecessor || canonical(this.authority.author) !== canonical(destination.authority.author) || canonical(this.authority.session.identity) !== canonical(destination.authority.session.identity)) throw new Error('Private copy binding or predecessor conflict');
+    if (canonical(selected.head) !== canonical(predecessor) || canonical(this.authority.author) !== canonical(destination.authority.author) || canonical(this.authority.session.identity) !== canonical(destination.authority.session.identity)) throw new Error('Private copy binding or predecessor conflict');
     const source = this.bundle(), bundle = destination.bundle(), copy = newPrivateId(), content = this.content(selected);
     bundle.copyKeys.push({ copy, key: encode(crypto.getRandomValues(new Uint8Array(32))) });
     bundle.sourceHistories = [...(bundle.sourceHistories ?? []), ...(source.sourceHistories ?? []), { vault: this.authority.vault, records: selected.records, payloads: selected.payloads }];
