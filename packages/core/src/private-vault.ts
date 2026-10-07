@@ -123,7 +123,21 @@ export class PrivateVault {
   private available = false;
   private merging = false;
   private staging = false;
+  private readyWaiters = new Set<{ resolve(): void; reject(error: Error): void }>();
   constructor(private readonly options: VaultOptions) {}
+  get ready(): boolean { return this.active && this.slots.length > 0 && this.available && !this.busy && !this.staging; }
+  /** Wait for scheduled reads to verify the current complete history. Never
+   * fetches extra slots, discards a checkpoint or exposes an older branch. */
+  async whenReady(): Promise<void> {
+    this.assertOpen();
+    if (this.ready) return;
+    await new Promise<void>((resolve, reject) => { this.readyWaiters.add({ resolve, reject }); });
+  }
+  private notifyReady(): void {
+    if (!this.ready) return;
+    for (const waiter of this.readyWaiters) waiter.resolve();
+    this.readyWaiters.clear();
+  }
   get freshness(): 'paired' | 'unverified' { return this.checkpoint?.freshness ?? 'unverified'; }
   get retainedCheckpoint(): PrivateCheckpoint | undefined { return this.checkpoint ? { vault: this.checkpoint.vault, author: copyPrivateIdentity(this.checkpoint.author), version: this.checkpoint.version, head: this.checkpoint.head, prev: this.checkpoint.prev, freshness: this.checkpoint.freshness } : undefined; }
   /** Dedicated vault key for delivery to the person's authenticated agents. */
@@ -196,7 +210,7 @@ export class PrivateVault {
       if (!next || canonical(next.records.slice(0, old.records.length)) !== canonical(old.records)) throw new Error('Stale private backup replacement');
     }
     await this.stageBranches([checked.bundle]);
-    } finally { this.staging = false; }
+    } finally { this.staging = false; this.notifyReady(); }
   }
   async tick(): Promise<boolean> { return this.sync(false); }
   private async sync(open: boolean): Promise<boolean> {
@@ -271,7 +285,7 @@ export class PrivateVault {
       if (this.options.cache) { await this.options.cache.commit(this.cachedHead, { token: this.token, frame, slots, checkpoint: checked.checkpoint }); this.alive(generation); this.cachedHead = checked.checkpoint.head; }
       if (stagingConflict) throw new Error('Private vault concurrent staging conflict; reload before saving');
       return true;
-    } finally { this.busy = false; }
+    } finally { this.busy = false; this.notifyReady(); }
   }
   /** Both complete signed histories are verified before selecting each copy.
    * Ties occupy separate encrypted branches. The next fixed tick signs version+1. */
@@ -288,8 +302,9 @@ export class PrivateVault {
     const branches = await readBranches(remote, other.slots, hashes, this.options);
     if (!branches || branches.length !== 1) throw new Error('Private fork merge requires complete verified branches');
     const selected = mergePrivateViews(this.verifiedBranches[0]!.view, branches[0]!.view), sources = [this.verifiedBranches[0]!.bundle, branches[0]!.bundle];
-    const groups: PrivateCopyState[][] = [[]];
-    for (const choice of selected) { groups[0]!.push(choice.branches[0]!); if (choice.branches.length > 1) { if (groups.length === 1) groups.push([]); groups[1]!.push(choice.branches[1]!); } }
+    const tied = selected.some(choice => choice.branches.length > 1);
+    const groups: PrivateCopyState[][] = tied ? [[], []] : [[]];
+    for (const choice of selected) for (let i = 0; i < groups.length; i++) groups[i]!.push(choice.branches[i] ?? choice.branches[0]!);
     // Stage against the remote live references before adopting it; a full or
     // invalid merge must leave the original retained state untouched.
     const previous = this.current;
@@ -298,10 +313,12 @@ export class PrivateVault {
     this.alive(generation); this.slots = checked.slots.slice(); this.hashes = hashes; this.token = checked.token;
     this.merging = true;
     return selected;
-    } finally { this.staging = false; }
+    } finally { this.staging = false; this.notifyReady(); }
   }
   close(): void {
-    this.active = false; this.generation++; if (this.timer) clearInterval(this.timer); this.timer = undefined;
+    this.active = false; this.generation++;
+    for (const waiter of this.readyWaiters) waiter.reject(new Error('Private vault is locked'));
+    this.readyWaiters.clear(); if (this.timer) clearInterval(this.timer); this.timer = undefined;
     for (const bytes of this.pending.values()) bytes.fill(0); this.pending.clear(); this.pendingBranches = null;
     this.verifiedBranches = []; this.slots = []; this.hashes = []; this.current = null; this.available = false; this.checkpoint = undefined; this.cachedHead = null; this.token = ''; this.merging = false;
   }

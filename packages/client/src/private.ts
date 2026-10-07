@@ -26,6 +26,7 @@ export class PrivateArtifacts {
       const saved = await value.store.read(); value.revision = saved?.token ?? null;
       if (saved) {
         const checked = await value.verify(saved.bundle);
+        await value.vault.whenReady();
         const current = value.vault.branches;
         if (!current.some(b => canonical(b.bundle.records) === canonical(checked.bundle.records))) {
           await value.writer(); await value.vault.stage(checked.bundle); value.pending = checked.bundle;
@@ -140,6 +141,7 @@ export class PrivateArtifacts {
       // Recipient and live authority were checked before converting the transfer
       // into the local vault's backup representation. Historical replay must not
       // turn a handoff/return into an offline recovery operation.
+      await this.vault.whenReady();
       await this.stage({ ...checked.bundle, scope: 'author-backup' }); return this.status();
     } finally { bytes.fill(0); }
   }

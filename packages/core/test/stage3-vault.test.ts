@@ -206,6 +206,27 @@ describe('scheduled fixed member vault controller', () => {
     const opening = controller.open(); await new Promise(resolve => setTimeout(resolve, 0)); controller.close(); release();
     await expect(opening).rejects.toThrow('locked'); expect(controller.retainedCheckpoint).toBeUndefined(); expect(() => controller.branches).toThrow('locked'); expect(f.trace.map(t => t.method)).toEqual(['GET']);
   }, 60000);
+  it('waits for scheduled verified hydration without extra reads, and rejects readiness waiters on lock', async () => {
+    const f = await fixture(); await f.controller.open(); await f.controller.stage(f.bundle); f.time(300000); await f.controller.tick();
+    const cached = f.snapshot(); f.controller.close();
+    const writer = new PrivateVault({ ...f.options, cache: undefined }); await writer.open();
+    const edit = await record(f.f.context, f.f.author, f.f.vault, f.f.copy, f.f.artifact, f.f.identity, 'private.version', f.bundle.records, content('Remote edit'));
+    await writer.stage({ ...f.bundle, records: [...f.bundle.records, edit.record], payloads: [...f.bundle.payloads, edit.payload] }); f.time(600000); await writer.tick(); writer.close();
+    const frame = await openPrivateFrame(f.head()!, f.f.author.identity, f.f.identity.recipient) as { directory: { branches: number[][] } };
+    const live = new Set(frame.directory.branches.flat());
+    const options = { ...f.options, randomOrder: () => [...Array(64).keys()].filter(i => !live.has(i)), cache: { read: async () => cached, commit: async () => {} } };
+    const reader = new PrivateVault(options); await reader.open();
+    expect(reader.ready).toBe(false); expect(() => reader.branches).toThrow('synchronizing');
+    const count = f.trace.length; let resolved = false;
+    const waiting = reader.whenReady().then(() => { resolved = true; });
+    await Promise.resolve(); expect(resolved).toBe(false); expect(f.trace).toHaveLength(count);
+    f.time(900000); await reader.tick(); await waiting;
+    expect(reader.ready).toBe(true); expect(reader.branches[0]!.bundle.records.at(-1)).toEqual(edit.record);
+    expect(f.trace.slice(count).map(t => t.method)).toEqual(['GET', 'PUT']); reader.close();
+    const locked = new PrivateVault(options); await locked.open();
+    expect(locked.ready).toBe(false);
+    const rejected = expect(locked.whenReady()).rejects.toThrow('locked'); locked.close(); await rejected;
+  }, 60000);
   it('verifies both complete equal-version fork histories and retains ties under a higher signed vault head', async () => {
     const f = await fixture();
     // An unrelated copy must survive in every conflicting view, not only the

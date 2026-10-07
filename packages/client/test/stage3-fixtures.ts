@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createServer } from 'node:http';
 import { writeFile } from 'node:fs/promises';
@@ -55,7 +55,7 @@ export async function clockedCli() {
 import { main } from ${JSON.stringify(pathToFileURL(cli).href)};
 let now = 0; const ticks = new Set();
 const control = createServer(async (req, res) => {
-  try { now = Number(new URL(req.url, 'http://localhost').searchParams.get('at')); for (const tick of ticks) await tick(); res.end('ok'); }
+  try { const at = new URL(req.url, 'http://localhost').searchParams.get('at'); if (at === null) { res.end(String(ticks.size)); return; } now = Number(at); for (const tick of ticks) await tick(); res.end('ok'); }
   catch (error) { res.writeHead(500); res.end(error.message); }
 });
 await new Promise(resolve => control.listen(0, '127.0.0.1', resolve));
@@ -91,6 +91,27 @@ export async function denyTool(sdk: Client, name: string, args: Record<string, u
 }
 export async function command(state: string, cache: string, ...args: string[]): Promise<any> {
   return JSON.parse((await execute(process.execPath, [cli, ...args, '--state', state, '--private-cache', cache], { timeout: 90_000 })).stdout);
+}
+/** A real one-shot CLI remains alive while its current signed history hydrates.
+ * Its fixture clock advances only the normal two-slot, five-minute scheduler. */
+export async function scheduledCommand(state: string, cache: string, ...args: string[]) {
+  const child = spawn(process.execPath, [await clockedCli(), ...args, '--state', state, '--private-cache', cache], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let stdout = '', stderr = '', port: number | undefined;
+  child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
+  child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); port = Number(/PRIVATE_CLOCK=(\d+)/.exec(stderr)?.[1]) || port; });
+  const result = new Promise<any>((resolve, reject) => child.once('exit', code => { if (code === 0) resolve(JSON.parse(stdout)); else reject(new Error(stderr)); }));
+  // Attach a handler while the scheduling readiness probe is in flight.
+  void result.catch(() => {});
+  return { result, advance: async (at: number) => {
+    for (let i = 0; i < 1000; i++) {
+      if (child.exitCode !== null) return;
+      if (port && await fetch(`http://127.0.0.1:${port}/`).then(r => r.text()).catch(() => '0') === '1') break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    if (!port) throw new Error('CLI clock not ready');
+    const response = await fetch(`http://127.0.0.1:${port}/?at=${at}`);
+    if (!response.ok) throw new Error(await response.text());
+  }, close: () => { if (child.exitCode === null) child.kill('SIGTERM'); } };
 }
 export async function agentState(session: import('../src/storage.js').RememberedAgent, origin = session.server) {
   const path = join(scratch, 'state-' + newId() + '.json');

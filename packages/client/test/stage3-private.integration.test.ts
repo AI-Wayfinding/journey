@@ -5,7 +5,7 @@ import { newId, sealIdentity, createAgeIdentity, createSigningIdentity } from '@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { localServer, scratch, addPerson, connected, change, request, as } from './local-server.js';
-import { cli, execute, privateFixture, privateMcp, tool, denyTool, command, privateProxy, agentState, privateDestination } from './stage3-fixtures.js';
+import { cli, execute, privateFixture, privateMcp, tool, denyTool, command, privateProxy, agentState, privateDestination, scheduledCommand } from './stage3-fixtures.js';
 
 localServer();
 describe('Stage 3 real CLI/MCP private workflows', () => {
@@ -221,8 +221,8 @@ describe('Stage 3 real denial and leakage matrix', () => {
 
   it('a live reader-person agent can read, cannot write, and loses all access when removed; agent read scope does not cap a write-person', async () => {
     // The creator is the signed guide. It may downgrade itself to read-only.
-    const f = await privateFixture(), reader = await connected(f.owner, f.trip, 'read');
-    const readerState = await agentState(reader.session), cache = join(scratch, 'reader-' + newId()); reader.close();
+    const f = await privateFixture(), reader = await connected(f.owner, f.trip, 'read'), proxy = await privateProxy();
+    const readerState = await agentState(reader.session, proxy.origin), cache = join(scratch, 'reader-' + newId()); reader.close();
     await command(f.state, f.cache, 'private', 'init'); // Backfill the newly admitted agent's encrypted content key.
     const m = await privateMcp(readerState, cache, true);
     try {
@@ -235,13 +235,19 @@ describe('Stage 3 real denial and leakage matrix', () => {
       await denyTool(m.sdk, 'private_create', { type: 'document', title: 'Denied' }, 'denied');
       await denyTool(m.sdk, 'private_backup', { path: join(scratch, 'denied-backup') }, 'denied');
       expect(await readFile(join(cache, f.vaultId, 'checkpoint.age'))).toEqual(before);
+      const start = proxy.trace.length;
       await expect(command(readerState, cache, 'private', 'create', '--type', 'document', '--title', 'Denied')).rejects.toMatchObject({ stdout: '', stderr: expect.stringContaining('denied') });
+      // Server content authority forbids read-only PUTs, so the client must not
+      // bypass that guard even for a dummy commit. This proves the current
+      // transport restriction, not the binding D36 requirement of GET+PUT on
+      // every open. That requirement needs an out-of-scope authority decision.
+      expect(proxy.trace.slice(start).filter(t => t.path.includes('/private-vault')).map(t => [t.method, t.status])).toEqual([['GET', 200]]);
       // Restore guide capability then remove the agent with signed ordinary authority.
       await change(f.trip, f.owner, 'member.role', { member: f.owner.principal, role: 'read-write' });
       await change(f.trip, f.owner, 'member.remove', { member: reader.session.principal });
       await denyTool(m.sdk, 'private_show', { id: f.copy }, 'ended');
       await expect(command(readerState, cache, 'private', 'list')).rejects.toMatchObject({ stdout: '', stderr: expect.stringContaining('ended') });
-    } finally { await m.close(); }
+    } finally { await m.close(); await proxy.close(); }
   }, 180_000);
 });
 
@@ -275,17 +281,27 @@ describe('Stage 3 independently admitted copies and handoff', () => {
     try {
       const c = await tool(recipient.sdk, 'private_show', { id: copied.id }); expect(c.copy.author).toEqual(original.copy.author);
       await tool(recipient.sdk, 'private_comment', { id: copied.id, text: 'Recipient private comment' });
-      const returned = join(scratch, 'private-return-' + newId()); await tool(recipient.sdk, 'private_return', { path: returned, destinationState: dest.state });
-      expect(await readFile(returned, 'utf8')).not.toContain('Recipient private comment');
       await recipient.advance(300_000);
       expect((await tool(recipient.sdk, 'private_init')).status).toBe('committed');
+      // Return a new proposal on top of the remotely committed history. An
+      // identical already-committed import is correctly reported as committed.
+      await tool(recipient.sdk, 'private_comment', { id: copied.id, text: 'Recipient private return proposal' });
+      const returned = join(scratch, 'private-return-' + newId()); await tool(recipient.sdk, 'private_return', { path: returned, destinationState: dest.state });
+      expect(await readFile(returned, 'utf8')).not.toContain('Recipient private return proposal');
       // Import the return through the CLI into the separately approved original
       // agent. No source journey session is supplied by either subprocess.
-      await command(dest.state, f.cache, 'private', 'import', returned);
+      const importing = await scheduledCommand(dest.state, f.cache, 'private', 'import', returned);
+      try {
+        // The retained cache may lack the other device's new COW slot. Import
+        // waits for a normal scheduled read, rather than bypassing history or
+        // fetching a third slot on a save.
+        await importing.advance(300_000);
+        expect((await importing.result).status).toBe('staged');
+      } finally { importing.close(); }
       const roundTrip = await command(dest.state, f.cache, 'private', 'show', copied.id);
       expect(roundTrip.copy.author).toEqual(original.copy.author);
       expect(roundTrip.copy.records.at(-1).actor.signingKey).toBe(nextAgent.session.signingKey);
-      expect(roundTrip.copy.payloads.at(-1).payload.body.text).toBe('Recipient private comment');
+      expect(roundTrip.copy.payloads.at(-1).payload.body.text).toBe('Recipient private return proposal');
     } finally { await recipient.close(); }
   }, 240_000);
 });
