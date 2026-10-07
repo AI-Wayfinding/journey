@@ -94,7 +94,7 @@ export class JourneyClient {
     if (!privateAccess(context, author, session)) throw new Error('Private vault access denied');
     const vault = await memberVaultId(this.session.journeyId, person, author.signingKey, author.recipient);
     const wrap = await this.request<{ ciphertext: string }>(`/journeys/${this.session.journeyId}/private-agent-wrap/${this.session.principal}`);
-    const contentIdentity = await openVaultAgentWrap(wrap.ciphertext, { journey: this.session.journeyId, person, agent: this.session.principal, vault, author, recipient: actor }, this.session.identity);
+    const contentIdentity = await openVaultAgentWrap(wrap.ciphertext, { journey: this.session.journeyId, person, agent: this.session.principal, vault, author, recipient: actor }, this.session.identity, context);
     const transport: VaultTransport = { read: async indices => decodeVaultWire(new Uint8Array(await (await this.response(`/journeys/${this.session.journeyId}/private-vault?slots=${indices === 'all' ? 'all' : indices.map(i => String(i).padStart(2, '0')).join(',')}`)).arrayBuffer()), indices), commit: async patch => (await this.response(`/journeys/${this.session.journeyId}/private-vault`, 'PUT', encodeVaultPatch(patch))).json() };
     const options: VaultOptions = { actor, contentIdentity, trust: { vault, author }, identity: this.session.identity, signingKey, contexts: [context], sessions: [session], paired, transport };
     if (this.options.cacheRoot) options.cache = new NodePrivateStore(this.options.cacheRoot, vault, options);

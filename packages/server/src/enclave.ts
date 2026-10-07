@@ -341,7 +341,7 @@ export class EnclaveObject {
     if (input.control.envelope.outside.epoch !== (proof.type === 'key.rotate' ? next.currentEpoch : state.currentEpoch)) return failure('old-epoch', 409);
     const supplied = input.wraps ?? [];
     const expected = proof.type === 'key.rotate' ? Object.keys(next.members) : proof.type === 'member.add' ? [String(proof.body.member && (proof.body.member as Member).id)] : [];
-    const historical = proof.type === 'member.add' && (proof.body.member as Member).kind === 'person';
+    const historical = proof.type === 'member.add' && admission?.link !== true;
     const wrapCount = historical ? state.currentEpoch : expected.length;
     if (supplied.length !== wrapCount || new Set(supplied.map(w => JSON.stringify([w.principal, w.epoch]))).size !== wrapCount || supplied.some(w => !expected.includes(w.principal) || !Number.isSafeInteger(w.epoch) || (historical ? w.epoch < 1 || w.epoch > state.currentEpoch : w.epoch !== next.currentEpoch))) return failure('invalid-request', 400);
     const removed = Object.keys(state.members).filter(id => !next.members[id]);

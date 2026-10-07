@@ -1,8 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import { PRIVATE_CHUNK_BYTES, PRIVATE_SLOT_BYTES, PRIVATE_HEADER_BYTES, newPrivateId, sealPrivateSlot, openPrivateSlot, sealPrivateFrame, openPrivateFrame, privateRandomBytes, createAgeIdentity, deriveRecipient, privateDecode } from '../src/index.js';
 import { encode } from '../src/codec.js';
+import { privateFixture } from './stage0-fixture.js';
 
 describe('fixed private ciphertext and independent key domains', () => {
+  it('accepts a sibling agent wrap signer only with verified same-person authority', async () => {
+    const { sealVaultAgentWrap, openVaultAgentWrap, privateIdentity } = await import('../src/index.js');
+    const f = await privateFixture(), content = await createAgeIdentity(), writer = privateIdentity(f.reader.member), recipient = privateIdentity(f.writer.member);
+    const binding = { journey: f.context.journey, person: f.author.member.id, agent: f.writer.member.id, vault: f.vault, author: f.identity, recipient };
+    const wrap = await sealVaultAgentWrap(binding, content.identity, f.reader.key, { writer, context: f.context });
+    expect(await openVaultAgentWrap(wrap, binding, f.writer.identity, f.context)).toBe(content.identity);
+    await expect(openVaultAgentWrap(wrap, binding, f.writer.identity)).rejects.toThrow('signer denied');
+    await expect(sealVaultAgentWrap(binding, content.identity, f.foreign.key, { writer: privateIdentity(f.foreign.member), context: f.context })).rejects.toThrow('signer denied');
+    const forged = await sealVaultAgentWrap(binding, content.identity, f.foreign.key, { writer, context: f.context });
+    await expect(openVaultAgentWrap(forged, binding, f.writer.identity, f.context)).rejects.toThrow('signature');
+  });
   it('pads zero and populated slots alike, changes nonces, binds vault/index/key and refuses overflow', async () => {
     const root = privateRandomBytes(32), vault = newPrivateId(), bytes = new TextEncoder().encode('PRIVATE SLOT CANARY');
     const empty = await sealPrivateSlot(root, vault, 0, new Uint8Array()), filled = await sealPrivateSlot(root, vault, 0, bytes), again = await sealPrivateSlot(root, vault, 0, bytes);

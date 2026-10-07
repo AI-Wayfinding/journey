@@ -112,9 +112,12 @@ function violations(source, path) {
         ['packages/server/src/enclave.ts', "proof.body.role === 'read-only'"],
         ['packages/core/src/rules.ts', "settings.defaultRole === 'read-only'"],
       ].some(([file, input]) => path === file && expression === input);
+      // Optional signed-wrap writer is an exact message-shape branch. Eligibility
+      // still comes from privateAgentAudience's production Bend decision.
+      const wrapWriterSchema = path === 'packages/core/src/private-crypto.ts' && ["value.message.writer === undefined", "value.message.writer !== undefined"].includes(expression);
       const roleSchema = path === 'packages/core/src/log.ts' && ts.isBinaryExpression(node.parent)
         && text(node.parent) === "b.role === 'read-only' || b.role === 'read-write'";
-      if ((roleTest || ownedTest || artifactOwnership || artifactDecision && !artifactFormat) && !mapping && !bendInput && !parser && !roleInput && !roleSchema) findings.push('role/owner/artifact decision must call Bend');
+      if ((roleTest || ownedTest || artifactOwnership || artifactDecision && !artifactFormat) && !mapping && !bendInput && !parser && !roleInput && !roleSchema && !wrapWriterSchema) findings.push('role/owner/artifact decision must call Bend');
     }
     if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && ['filter', 'some', 'find', 'includes', 'has'].includes(node.expression.name.text)) {
       const expression = text(node);

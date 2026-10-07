@@ -24,7 +24,7 @@ def Laws.agent_never_exceeds_member(setting):
 def Laws.agent_matches_live_person_role(member, setting):
   {==}
 
-def Laws.agents_never_guides(guide):
+def Laws.agent_stored_guide_not_authority(guide):
   {==}
 
 def Laws.only_guides_manage(xs, actor, e):

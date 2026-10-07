@@ -133,7 +133,7 @@ export async function privatePersonSession(context: PrivateContext, identity: Pr
 export interface PrivateChallenge { message: { format: 'private-v1'; purpose: 'handoff'; author: PrivateIdentity; journey: string; principal: string; admissionHash: string; recipient: string; challenge: string }; ciphertext: string }
 const challenges = new WeakMap<PrivateChallenge, { context: PrivateContext; author: PrivateIdentity; agent: PrivateIdentity; used: boolean }>();
 export async function createPrivateChallenge(context: PrivateContext, author: PrivateSession, agent: PrivateIdentity): Promise<PrivateChallenge> {
-  const auth = sessions.get(author); if (!auth || auth.context !== context || author.identity.kind !== 'person' || !contextData(context).current || !validatePrivateIdentity(agent) || agent.kind !== 'agent') throw new Error('Invalid private handoff author');
+  const auth = sessions.get(author); if (!auth || auth.context !== context || !privateAccess(context, author.identity, author) || !contextData(context).current || !validatePrivateIdentity(agent) || agent.kind !== 'agent') throw new Error('Invalid private handoff author');
   const binding = privateBinding(context, agent);
   const message = { format: PRIVATE_FORMAT, purpose: 'handoff' as const, author: copyPrivateIdentity(author.identity), journey: context.journey, principal: binding.principal, admissionHash: binding.admissionHash, recipient: agent.recipient, challenge: newPrivateId() };
   const value = Object.freeze({ message: Object.freeze(message), ciphertext: await sealIdentity(message.challenge, [agent.recipient]) });
@@ -432,7 +432,7 @@ export async function verifyPrivateHeader(value: PrivateHeader, trust: { vault: 
   if (h.vault !== trust.vault || !sameIdentity(h.author, trust.author) || h.contentsHash !== options.contentsHash) throw new Error('Private header binding/digest mismatch');
   if (h.writer) {
     const authority = h.authority!, current = options.contexts?.find(c => c.journey === authority.journey);
-    if (!current || h.version === 1) throw new Error('Private agent header authority denied');
+    if (!current) throw new Error('Private agent header authority denied');
     const history = contextData(current).history;
     const position = (await Promise.all(history.controls.map(row => hashControlProof(row.proof)))).indexOf(authority.head);
     if (position < 0) throw new Error('Private agent header admission mismatch');

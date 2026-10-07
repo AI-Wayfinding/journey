@@ -18,6 +18,18 @@ async function fixture() {
 }
 
 describe('scheduled fixed member vault controller', () => {
+  it('an agent with legacy read scope initialises its person vault with its own signature', async () => {
+    const f = await fixture(), actor = privateIdentity(f.f.reader.member);
+    const session = await privateAgentSession(f.f.context, actor, f.f.reader.key, f.f.reader.identity, 'authenticated');
+    const delegated = new PrivateVault({ ...f.options, cache: undefined, actor, identity: f.f.reader.identity, signingKey: f.f.reader.key, sessions: [session] });
+    try {
+      await delegated.open();
+      expect(delegated.retainedCheckpoint!.version).toBe(1);
+      const raw = await openPrivateFrame(f.head()!, f.f.author.identity, f.f.identity.recipient) as { header: import('../src/index.js').PrivateHeader };
+      expect(raw.header.writer).toEqual(actor); expect(raw.header.author).toEqual(f.f.identity);
+      expect(delegated.agentContentIdentity).toMatch(/^AGE-SECRET-KEY-/);
+    } finally { delegated.close(); }
+  }, 60000);
   it('persists an agent author and a distinct sibling signer in the person vault', async () => {
     const f = await fixture(), author = privateIdentity(f.f.writer.member), actor = privateIdentity(f.f.reader.member);
     const writer = await privateAgentSession(f.f.context, author, f.f.writer.key, f.f.writer.identity, 'authenticated');
@@ -60,10 +72,12 @@ describe('scheduled fixed member vault controller', () => {
     try {
       await expect(reopened.open()).resolves.toBeUndefined();
       expect(reopened.branches[0]!.bundle).toEqual(f.bundle);
-      expect(reopened.retainedCheckpoint!.version).toBe(agentHead.version + 1);
+      // Removal leaves rotation pending for both person and agents. Reads remain
+      // possible, but neither may issue the scheduled dummy write until rotation.
+      expect(reopened.retainedCheckpoint!.version).toBe(reason === 'removal' ? agentHead.version : agentHead.version + 1);
       const next = await openPrivateFrame(f.head()!, f.f.author.identity, f.f.identity.recipient) as { header: import('../src/index.js').PrivateHeader };
-      expect(next.header.writer).toBeUndefined();
-      expect(next.header.prev).toBe(agentHead.head);
+      expect(next.header.writer).toEqual(reason === 'removal' ? actor : undefined);
+      expect(reason === 'removal' ? reopened.retainedCheckpoint!.head : next.header.prev).toBe(agentHead.head);
     } finally { reopened.close(); }
   }, 60000);
   it('uses Bend dirty-first unique in-range two-slot selection', () => {

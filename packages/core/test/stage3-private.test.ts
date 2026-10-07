@@ -167,7 +167,9 @@ describe('fixed private header, schedule and fork contracts', () => {
     const next = await header(f, 3, checked.checkpoint.head);
     expect((await verifyPrivateHeader(next, trust, { checkpoint: checked.checkpoint, contentsHash: next.contentsHash })).checkpoint.version).toBe(3);
     for (const actor of [f.foreign]) await expect(verifyPrivateHeader(await signed(actor), trust, { contentsHash: own.contentsHash, contexts: [f.context] })).rejects.toThrow('authority');
-    await expect(verifyPrivateHeader(await signed(f.writer, f.context, 1), trust, { contentsHash: own.contentsHash, contexts: [f.context] })).rejects.toThrow('authority');
+    const initialized = await signPrivateHeader({ format: first.format, v: 1, vault: f.vault, author: f.identity, version: 1, prev: null, contentsHash: first.contentsHash, slots: first.slots, writer: privateIdentity(f.writer.member), authority: privateAuthority(f.context, privateIdentity(f.writer.member)) }, f.writer.key);
+    expect((await verifyPrivateHeader(initialized, trust, { contentsHash: first.contentsHash, contexts: [f.context] })).checkpoint.version).toBe(1);
+    await expect(verifyPrivateHeader(await signed(f.writer, f.context, 1), trust, { contentsHash: own.contentsHash, contexts: [f.context] })).rejects.toThrow('predecessor');
     await expect(verifyPrivateHeader({ ...own, vault: newPrivateId() }, trust, { contentsHash: own.contentsHash, contexts: [f.context] })).rejects.toThrow('binding');
     await expect(verifyPrivateHeader({ ...own, sig: first.sig }, trust, { contentsHash: own.contentsHash, contexts: [f.context] })).rejects.toThrow('signature');
     await expect(verifyPrivateHeader(own, trust, { contentsHash: own.contentsHash })).rejects.toThrow('authority');

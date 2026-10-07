@@ -52,7 +52,8 @@ law agent_matches_live_person_role:
   for setting: R.Role
   {R.agent_access(member, setting) == member : R.Role}
 
-law agents_never_guides:
+# Stored agent guide flags do not grant authority; agent_guide_inherits_person does.
+law agent_stored_guide_not_authority:
   for guide: Bool
   {R.person_guide(R.Agent{}, guide) == False{} : Bool}
 

@@ -2,17 +2,17 @@ import { mkdir, open, readFile, rename, rm, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { canonical, openIdentity, sealIdentity, privateHash, validPrivateId, validateVaultCache, verifyVaultCacheAdvance } from '@ai-wayfinding/core';
 import type { VaultCache, VaultCacheRecord, VaultOptions } from '@ai-wayfinding/core';
-import { PrivateVault, privateBinding, privateAgentAudience, privateIdentity, sealVaultAgentWrap } from '@ai-wayfinding/core';
+import { PrivateVault, privateBinding, privateAgentAudience, privateIdentity, privateVaultOwner, sealVaultAgentWrap } from '@ai-wayfinding/core';
 import type { PrivateContext, Member } from '@ai-wayfinding/core';
 
-/** Person-side Node adapter: call at approval and on every journey open. The
- * transport authenticates as the person, not as an agent session. */
+/** Shared person-vault adapter: backfill each live agent on every open. */
 export async function openPersonPrivateVault(options: VaultOptions, context: PrivateContext, delivery: {
   agents(): Promise<Member[]>;
   put(agent: string, ciphertext: string): Promise<void>;
 }): Promise<PrivateVault> {
-  if (options.trust.author.kind !== 'person' || options.actor?.kind === 'agent' || options.contentIdentity) throw new Error('Person vault keys required');
-  const person = privateBinding(context, options.trust.author).principal;
+  const actor = options.actor ?? options.trust.author;
+  const person = privateVaultOwner(context, actor).id;
+  if (canonical(privateIdentity(privateVaultOwner(context, actor))) !== canonical(options.trust.author)) throw new Error('Person vault binding mismatch');
   const controller = new PrivateVault(options); rememberNodePrivateVault(controller);
   try {
     await controller.open();
@@ -21,7 +21,7 @@ export async function openPersonPrivateVault(options: VaultOptions, context: Pri
       const recipient = privateIdentity(member);
       if (!privateAgentAudience(context, options.trust.author, recipient)) continue;
       const agent = privateBinding(context, recipient).principal;
-      const ciphertext = await sealVaultAgentWrap({ journey: context.journey, person, agent, vault: options.trust.vault, author: options.trust.author, recipient }, controller.agentContentIdentity, options.signingKey);
+      const ciphertext = await sealVaultAgentWrap({ journey: context.journey, person, agent, vault: options.trust.vault, author: options.trust.author, recipient }, controller.agentContentIdentity, options.signingKey, actor.kind === 'agent' ? { writer: actor, context } : undefined);
       await delivery.put(agent, ciphertext);
     }
     return controller;

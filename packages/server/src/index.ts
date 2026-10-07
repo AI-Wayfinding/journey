@@ -560,7 +560,7 @@ app.post('/v1/agent-sessions/:id/approve', async c => {
   if (!attempt.available) return failure('not-found', 404);
   if (!attempt.matched) return failure('invalid-request', 400);
   if (row.keyStorage === 'link' && b.scope !== 'read') return failure('invalid-request', 400);
-  if (!validString(b.principal, 128) || !validExpiry(b.expiresAt) || b.expiresAt > Date.now() + maxDuration || !encrypted(b.wrap, 100_000)) return failure('invalid-request', 400);
+  if (!validString(b.principal, 128) || !validExpiry(b.expiresAt) || b.expiresAt > Date.now() + maxDuration || row.keyStorage === 'link' && !encrypted(b.wrap, 100_000)) return failure('invalid-request', 400);
   const signed = control(b.control, row.journeyId);
   if (!signed || signed.proof.type !== 'member.add' || row.keyStorage === 'link' && (!object(signed.proof.body.member) || signed.proof.body.member.scope !== 'read')) return failure('invalid-request', 400);
   const s: Subject = authenticatedAgent ?? { principal: b.principal, accountHash: auth!.accountHash, ...capability(c) };
@@ -568,7 +568,9 @@ app.post('/v1/agent-sessions/:id/approve', async c => {
   const check = await enclave(c.env, row.journeyId, { op: 'access', journeyId: row.journeyId, subject: s });
   if (!check.ok) return check;
   const { epoch } = await check.json() as { epoch: number };
-  const result = await enclave(c.env, row.journeyId, { op: 'controlWrite', journeyId: row.journeyId, subject: s, control: signed, admission: { id: row.principal, kind: 'agent', recipient: row.recipient, signingKey: row.signingKey, scope: row.keyStorage === 'link' ? 'read' : undefined, expiresAt: b.expiresAt }, wraps: [{ principal: row.principal, epoch, wrap: b.wrap }] });
+  const supplied = row.keyStorage === 'link' ? [{ principal: row.principal, epoch, wrap: b.wrap as string }] : b.wraps === undefined && encrypted(b.wrap, 100_000) ? [{ principal: row.principal, epoch, wrap: b.wrap }] : wraps(b.wraps, epoch, true);
+  if (!supplied || supplied.some(w => w.principal !== row.principal)) return failure('invalid-request', 400);
+  const result = await enclave(c.env, row.journeyId, { op: 'controlWrite', journeyId: row.journeyId, subject: s, control: signed, admission: { id: row.principal, kind: 'agent', recipient: row.recipient, signingKey: row.signingKey, scope: row.keyStorage === 'link' ? 'read' : undefined, expiresAt: b.expiresAt, link: row.keyStorage === 'link' }, wraps: supplied });
   if (!result.ok) return result;
   await registry(c.env, { op: 'agentApprove', id, scope: row.keyStorage === 'link' ? 'read' : 'readwrite', expires: b.expiresAt });
   await registry(c.env, { op: 'activity', id: row.journeyId, memberDelta: 1, bytes: JSON.stringify(signed).length });
