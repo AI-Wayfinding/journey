@@ -2,9 +2,9 @@
 
 ## 1. Purpose and reading guide
 
-This draft names the app's concepts, relationships, states and access rules. It reflects [decision 0001](decisions/0001-artifacts-projects-sensemaking.md), including amendments D31–D42. Approval of this model is not approval of an implementation or a security claim.
+This draft names the app's concepts, relationships, states and access rules. It reflects [decision 0001](decisions/0001-artifacts-projects-sensemaking.md), including amendments D31–D45. Approval of this model is not approval of an implementation or a security claim.
 
-- **Agreed** means accepted in decision 0001. `D1`–`D42` refer to its numbered decisions; amendments take precedence over earlier wording.
+- **Agreed** means accepted in decision 0001. `D1`–`D45` refer to its numbered decisions; amendments take precedence over earlier wording.
 - **Built** means present in the cited code. It does not mean independently verified as secure.
 - **Open** means unresolved. An unanswered question grants no permission.
 
@@ -32,10 +32,10 @@ These are the **agreed** app terms. Technical sign-in and encryption terms are d
 - **Journey:** a space for shared work. It is private or public, chosen at creation and fixed for this release. The model and storage must allow conversion later (D1, D40).
 - **Member:** a participant in a journey. Its two kinds are person and agent (D7).
 - **Role:** a member's content access, either read-only or read-write. Only guides change roles (D5, D33).
-- **Guide:** a person member with authority to manage members and journey settings. A guide may have either content role. Agents cannot be guides (D7, D32–D33).
+- **Guide:** a person member with authority to manage members and journey settings. A guide may have either content role. An authenticated member agent inherits its person's live guide authority (D45).
 - **Facilitator:** an assignment to run a round, not guide authority. It draws on the [framework's facilitator practice](../../wayfinding-framework/framework/practice/guide.md). Read-write members assign facilitators when creating rounds (D7, D37).
 - **Author:** the member who creates an artifact. Sharing or marking it as someone's interview document does not change its author (D38).
-- **Agent:** acts within its adding member's access, limited by the read-only or read-write setting chosen when added. It follows that member into projects. There are no separate agent access rules beyond this limit (D34–D35).
+- **Agent:** has exactly its adding person's live capabilities, including role, guide authority, project participation and private access. Old stored access settings are accepted and ignored. It remains distinct for attribution, credentials/keys and addition/removal by its person. It has no vault; its private artifacts live in that person's vault (D45).
 - **Listing:** a journey's discovery setting, not permission to read or join it. Private journeys start unlisted and may be listed to signed-in people. Public journeys may be unlisted, listed to signed-in people or listed to anyone (D2).
 - **Joining policy:** one of three choices for either journey type: anyone can request and a guide approves; anyone joins immediately; or invitation only. Guides issue and cancel invites and may refuse requests. The journey sets a default role for new members (D4, D41).
 - **Agent link:** a secret-bearing URL for read-only agent access. Anyone holding a live link can read through it. This is an explicit exception to private-journey encryption: the server decrypts available content while answering. Private artifacts never appear through links (D28, D31, D34).
@@ -48,12 +48,12 @@ These are the **agreed** app terms. Technical sign-in and encryption terms are d
 - **Version:** a saved revision of an artifact (D10).
 - **Comment:** a response on the whole artifact. Comments on selected passages come later (D10).
 - **Project:** a grouping inside one journey. It has a purpose, members and a state: getting started, active, looking for others or archived. Any journey member can join or leave. Any project member can edit its purpose and state. Agents follow their adding member's participation. Archived projects stay readable and may reopen (D16–D20, D35).
-- **Private artifact:** an artifact visible only to its author, with the author's agents acting within that access under D34. Everyone else must be unable to see even that it exists. See the single access reference in section 6 (D15 as amended by D36).
+- **Private artifact:** an artifact visible to its author's person and all that person's live authenticated agents. An agent author stays the author but uses the person's vault and authority (D45). Everyone else must be unable to see even that it exists. See the single access reference in section 6 (D15 as amended by D36).
 - **Sensemaking round (round):** a container for recurring [framework sensemaking](../../wayfinding-framework/framework/source/The%20AI%20Wayfinding%20Framework.md#getting-started). It has a purpose, interview guidance, a sensemaking document, contribution instructions, related artifacts, participants, facilitators and a status. It belongs to the journey or to one project. “Initial position and heading” is the round used so far (D21–D24, D37).
 - **Interview guidance:** the round's script, crib notes and guidance (D22).
 - **Interview:** an artifact marked as a given member's interview document for one round. It is private by default. A member's agent or a facilitator may conduct it. The facilitator may mark the relationship. The label does not transfer authorship; it gives the subject read access and nobody else (D25, D36, D38, D44). The app relationship does not redefine interviewing practice.
 - **Sensemaking document:** the collaborative artifact that receives a round's shared findings, not its private transcripts (D9, D22, D26).
-- **Contribution:** an addition to that document, marked with its contributor and round. The member's agent follows the contribution instructions. The member confirms each addition before it is saved. This is an action, not a separate artifact type (D26).
+- **Contribution:** an addition to that document, marked with its contributor and round. The member's agent follows the contribution instructions. The member or their authenticated agent confirms each addition before it is saved. This is an action, not a separate artifact type (D26).
 - **File/blob:** the uploaded file's bytes, separate from the artifact's title and other details. Private files are encrypted in the browser before upload. The limit is 25 MB per file (D11).
 
 ### Artifact types
@@ -123,12 +123,12 @@ This table is the **agreed** lifecycle, not a claim that all routes exist. Recor
 | Request → admitted or refused | Applicant; guide | Applies to guide-approved joining (D41). |
 | Join immediately → active | Joining person | No guide-visit delay, including for private journeys (D41). |
 | Issue invite → accepted; unused invite → cancelled or expired | Guide; invitee; guide or clock | Guides control invitations (D41). |
-| Add member | Guide admits person; person adds own agent | Role and agent limit apply (D5, D33–D34). |
-| Remove another member | Guide | Preserve the last guide; removing a person removes their agents. Built agent-removal layers differ; see section 10.3. |
+| Add member | Guide admits person; person adds own agent | The person's live role applies; no independent agent limit (D5, D45). |
+| Remove another member | Guide | Preserve the last guide; removing a person removes their agents. Agents act with their person's live removal authority (D45). |
 | Remove own agent | Adding person | Allowed with either content role (D33). |
 | Leave journey | Person leaving | Allowed with either role; the last guide must arrange a remaining guide first (D33). |
-| Change content role | Guide | Agents follow the change, subject to their setting at addition (D5, D34). |
-| Give or remove guide authority | Guide | People only; retain a person guide (D7, D33). |
+| Change content role | Guide | Agents follow the change, with no setting-at-addition cap (D5, D45). |
+| Give or remove guide authority | Guide | Change the person's authority; their agents inherit it. Retain a person guide (D7, D45). |
 | Time-limited access → expired | Clock | Access ends; already received copies cannot be recalled. **Built**; see section 10.3. |
 | Agent link: created → live → expired or revoked; live/expired → renewed | Adding person; clock or removal | Read-only. Built renewal keeps the same URL; revoked links need new creation. See section 10.4. |
 | Create drop or propose one through an agent link | Member; agent-link proposer | Proposal is not content inclusion (D28, D42). |
@@ -151,7 +151,7 @@ This is the single detailed reference for **agreed** permissions and visibility.
 | --- | --- | --- |
 | Non-private artifact in a private journey | Journey members within their access, plus holders of deliberately created live agent links. The server normally stores encrypted content; a live link is the explicit server-readable exception. | D1, D31, D34 |
 | Non-private artifact in a public journey | Anyone, even if the journey is unlisted. The server stores it readably. The journey is labelled **Public: not encrypted**. | D1, D14 |
-| Private artifact in either journey type | Its author and the author's agents within D34. No one else, including guides, facilitators, the server or link holders, may see its content, versions, comments, title, size, date, authorship or existence. | D36 |
+| Private artifact in either journey type | The author's person and all that person's live authenticated agents under D45. No one else, including guides, facilitators, the server or link holders, may see its content, versions, comments, title, size, date, authorship or existence. | D36 |
 | Private artifact shared into another journey | The same author-only audience. Destination membership or public visibility grants no new access. | D36 |
 | Non-private artifact shared into another journey | That journey's normal audience. It is public if the destination is public. Its author is unchanged. | D36, D38 |
 | Project artifact, including in an archived project | The containing journey's audience, subject to the private-artifact rule. Project artifacts stay out of the main list unless filtered for. | D18–D19, D36 |
@@ -181,7 +181,7 @@ Sharing is between journeys the author belongs to. There is no member-to-member 
 
 **Additional guide actions:** change journey settings, admit people, change roles, grant/remove guide authority, issue/cancel invites and refuse join requests. A guide's own content role still governs ordinary content writes (D5, D7, D32–D33, D41).
 
-**Agents:** effective access is the adding member's current access limited by the agent's setting at addition. A read-only agent remains read-only if its member becomes read-write. A read-write agent loses writes while its member is read-only. Agents cannot become guides or manage membership. Agent links are always read-only; proposing a drop is not a direct write (D28, D34).
+**Agents:** every authority check evaluates the live adding person. The agent has exactly that person's capabilities, including guide and membership controls, and loses them when the person does. It signs as itself. Agent-created private artifacts are in the person's vault, readable by the person and all their live authenticated agents. Legacy agent access settings are ignored. URL agent links stay read-only and exclude private content; proposing a drop is not a direct write (D28, D31, D45).
 
 **Applet data:** public and private applets may read any data available to the viewer, not to the applet's author. This is the explicit amendment to D12's “no journey access” rule for applets. HTML retains D12's restriction. Neither may reach the network. D13's optional small encrypted store remains journey-shared; private data must not be copied there automatically (D12–D13, D39).
 
@@ -191,7 +191,7 @@ A hostile or careless caller must not defeat these rules. **Agreed** boundaries 
 
 1. Non-members cannot obtain ordinary private content without a deliberately created live link. Removed or expired members cannot fetch new private records or keys. Previously received keys and copies cannot be recalled. Public reads need no membership; content writes still require authority (D1, D5, D31).
 2. A private artifact must not leak content or existence to another member, the server, the public or an agent link. Sharing it into a public journey must not publish it (D36).
-3. An agent must not exceed its adding member's current access or its original read-only/read-write limit. Removing a person removes their agents (D34).
+3. A hostile caller must not make an agent exceed or outlive its adding person's current capabilities, or use legacy agent settings to cap authorized actions. Removing a person removes their agents (D45).
 4. A guide must not impersonate another person's profile, remove the last person guide or gain content-write permission merely through guide authority (D5, D33).
 5. A private interview must not become readable beyond its author and its subject (D44), including through its label or through findings contributed to a sensemaking document. Every contribution needs the member's confirmation (D26, D36, D38).
 6. A drop's delivery URL must not let its holder bypass the creator's approval, write directly to the journey or become a member (D42).
@@ -209,7 +209,7 @@ The ontology comes before implementation. Workspecs stay drafts until it is appr
 ### Stage 0 — Journey settings and member roles
 
 - Choose records for settings, person roles and guide authority. Bind server access changes to verified authority rather than trusting plain access rows.
-- Enforce D34's exact access rule across reads, writes and role changes. Independent agent scopes must not bypass the adding member's current access.
+- Enforce D45 across every authority check. Independent agent settings must neither bypass nor cap the live adding person's capabilities.
 - Allow own profiles, own-agent management and leaving for read-only people. Separate these controls from ordinary content writes and support guides with either role.
 - Align core, server and browser removal paths. A non-guide must be able to remove their own agent; guide removal must work consistently. Keep last-guide and rotation rules.
 - Plan new record formats across stages and enforce D30's required update for clients 0.1.3 and older in every interface. This is not an optional compatibility policy.
@@ -285,7 +285,7 @@ Fresh passkey confirmation protects credential changes, backup-code replacement,
 | Journey registry | Server already stores unlisted private journey names, creator emails, account mappings, activity/count/storage. D2 presents listing as the name-disclosure step; this is a built/agreed discrepancy. | `packages/server/src/registry.ts`, `packages/server/src/index.ts` |
 | Accounts and operator view | Plain account emails and membership mappings exist in storage. The operator registry API exposes journey creator email, not every account email. | `packages/server/src/registry.ts`, `packages/server/src/index.ts` |
 | Member profile | Name and opt-in email are self-signed in the encrypted journey log. Email opt-in is not secrecy from the server operator's account storage. | `packages/core/src/log.ts`, `packages/web/src/main.ts` |
-| Invites and agent sessions | Hashes, account links/public keys, proposed agent name/scope/expiry; invite email delivery is transient. Session details are available through the session URL. | `packages/server/src/registry.ts`, `packages/server/src/index.ts`, `packages/server/src/email.ts` |
+| Invites and agent sessions | Hashes, account links/public keys, proposed agent name/expiry and legacy ignored scopes; invite email delivery is transient. Session details are available through the session URL. | `packages/server/src/registry.ts`, `packages/server/src/index.ts`, `packages/server/src/email.ts` |
 
 ### 10.3 Signed history, authority and rotation
 
@@ -294,25 +294,21 @@ A **signed log** is the membership/control history. Entries contain sequence, pr
 | Built entry | Effect and authority in core |
 | --- | --- |
 | `genesis` | Creator establishes a private/sealed journey, first guide, epoch 1, minimum version, name and optional description/classification. |
-| `member.add` | Guide adds person; person adds own agent with no management grants. |
+| `member.add` | Guide adds person; person or their authenticated agent adds agents for that person. Agent authority inherits the live person, not separate grants. |
 | `member.remove` | Guide removes another member; person may remove self or own agent. Removes a person's agents and preserves the last guide. |
 | `member.rename` | Guide or adding person renames an agent. |
-| `member.profile` | Person sets only their own name and optional email. |
+| `member.profile` | Person or their authenticated agent sets that person's own name and optional email. |
 | `grant.add`, `grant.remove` | Guide changes a person's `members.manage`; temporary support people cannot receive it. |
 | `key.rotate` | Guide advances one epoch and binds the remaining member/recipient set. |
 | `client.minVersion` | Guide raises or retains the minimum client version. |
 
 Sources: `packages/core/src/log.ts`; browser encryption and server storage: `packages/web/src/journey.ts`, `packages/server/src/enclave.ts`.
 
-**Removal has three different built layers:**
-
-- Core verification permits person self-removal and own-agent removal without guide authority (`packages/core/src/log.ts:45–51`).
-- The browser removal helper requires a person guide and refuses self-removal; the browser exposes other-member removal only to guides. Leaving uses a separate signed self-removal path (`packages/core/src/removal.ts:5–7`, `packages/web/src/main.ts:451–463`). An ordinary non-guide cannot use the helper to remove their own agent.
-- The server permits direct agent removal only by its adding person, even if another guide could sign it in core. Person removal cascades to their agents. All log writes require server `readwrite` scope, blocking read-only self-removal and own-agent controls (`packages/server/src/enclave.ts:44–46,84–85,92–96`).
+**Removal:** core and server resolve authenticated agents to their live adding person for authorization. Self-removal, own-agent removal and guide removal use that person's capabilities, independent of content role. Person removal cascades to their agents. The last person guide is preserved (`packages/core/src/membership.ts`, `packages/core/src/removal.ts`, `packages/server/src/enclave.ts`).
 
 **Rotation:** removal sets `pendingRotation`. New `reserve` operations and `recordWrite` operations fail during this interval; content writes also require the current epoch. `logWrite` and `renew` do not have a pending-rotation block. Existing reservations cannot bypass the content-write check. Reservations are tied to their creating principal and expire (`packages/server/src/enclave.ts:50–126`).
 
-**Role and guide gaps:** ordinary people have implicit write access; agents have independent `read`/`readwrite` scopes; temporary support people have explicit read scope. General person-role changes and agent inheritance are not built. Server agent access checks do not check the adding person's current scope. Core only permits person guides, but temporary support people cannot hold grants. The browser skips read-only profile writes (`packages/core/src/log.ts`, `packages/server/src/enclave.ts`, `packages/web/src/main.ts`). These differ from D33–D34.
+**Role and guide authority:** content role and guide grants are independent. Authenticated agents inherit the live person's exact role and guide authority; old scopes are ignored. Temporary support people and their agents remain read-only and cannot hold guide authority. Profile and own-agent controls are independent of content role (D45; `packages/core/src/membership.ts`, `packages/server/src/enclave.ts`).
 
 **Admission gaps:** one-use invite acceptance creates a pending request, not immediate access. A guide browser hands over keys. The browser limits issuing invites to guides, but the server accepts any read-write principal; agent email delivery is forbidden. Refusal and cancellation are not built (`packages/server/src/registry.ts`, `packages/server/src/index.ts`, `packages/web/src/journey.ts`). D41 replaces this as the complete joining model.
 
@@ -336,6 +332,6 @@ Sources: `packages/core/src/log.ts`; browser encryption and server storage: `pac
 Decision 0001 keeps these outside ontology approval and stages 0–7:
 
 - Account deletion.
-- Hardening: key-bound sessions, signed content records, expiry, historical key wraps for newly added agents and log rollback/checkpoints. Newly added agents receive only the current-epoch wrap despite full-history verification; no automatic rollback checkpoint exists (`packages/web/src/main.ts`, `packages/core/src/envelope.ts`, `packages/core/src/items.ts`, `packages/core/src/log.ts`, `packages/server/src/enclave.ts`). These are not new questions for Dan.
+- Hardening: continued review of key-bound sessions, signed content records, expiry and log rollback/checkpoints. Authenticated member agents now receive all historical epoch wraps at admission, like people; URL links retain current-epoch-only delivery (D45; `packages/web/src/main.ts`, `packages/server/src/enclave.ts`). These are not new questions for Dan.
 - Recovery/key-persistence and protocol-guidance discrepancies described in section 10.1.
 - A second independent security review.

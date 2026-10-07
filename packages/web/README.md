@@ -52,7 +52,7 @@ IndexedDB retains ciphertext and an independently encrypted signed checkpoint, n
 
 Private backup/import uses a separate download encrypted to the person's existing keys, never the journey recovery recipient. Imports cannot replace newer history or resurrect deletions. Verified device snapshots can be submitted for portable fork merging; higher artifact versions win and tied versions remain visible rather than silently replacing one another.
 
-Agent handoff uses a local one-use challenge requiring both signing-key and age-key possession by an eligible authenticated agent. The agent reads the person's scoped content; the person reviews and records the result. Agent authorship is not enabled. Link credentials never receive private content.
+Authenticated member agents have exactly their person's live capabilities, including guide authority and private read/write access. The approval screen chooses a name and lifetime, not an access cap. Old stored scopes are ignored. Agent-created private artifacts live in the person's vault, keep the agent as author and writer, and are readable by the person and sibling authenticated agents. Agents can initialize and sign that vault with their own keys. A local one-use possession challenge remains available for explicit handoffs; no person-only recording step is required. URL link credentials keep their read-only, shared-content-only behavior (D28/D31).
 
 Browser Stage 3 evidence runs with:
 

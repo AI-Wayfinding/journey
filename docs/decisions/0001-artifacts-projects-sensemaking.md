@@ -28,7 +28,7 @@ We want a journey to hold any kind of artifact, group work into projects, keep s
 ### Members and roles
 
 5. **Every member is read-only or read-write.** Only guides can change a member's role.
-6. **An agent has the same access as the member who added it** and follows that member's access when it changes. It can hold no more than that member.
+6. **Amended by D45.** **An agent has the same access as the member who added it** and follows that member's access when it changes. It can hold no more than that member.
 7. **Guide** is the name for a member who can manage members (today's `members.manage` grant). **Member** is the one word for anyone in a journey; its two kinds are **person** and **agent**. "Wayfinder" stays a website word and is not used in the app. A **facilitator** runs a sensemaking round and is not necessarily a guide.
 
 ### Artifacts
@@ -53,7 +53,7 @@ We want a journey to hold any kind of artifact, group work into projects, keep s
 
 ### Private artifacts
 
-15. **A private artifact** can be read only by its author and the author's agents. The author can later share it with the journey or with one named person, such as a facilitator. Neither the server nor other members can read it; they can see that it exists, its size and date. It always shows whose it is.
+15. **Amended by D45** for the person-vault audience of agent-created artifacts. **A private artifact** can be read only by its author and the author's agents. The author can later share it with the journey or with one named person, such as a facilitator. Neither the server nor other members can read it; they can see that it exists, its size and date. It always shows whose it is.
 
 ### Projects
 
@@ -70,7 +70,7 @@ We want a journey to hold any kind of artifact, group work into projects, keep s
 23. **Round states:** planning, gathering, making sense, complete.
 24. **A round belongs to the journey or to one project.**
 25. **Interviews** belong to one round and one member. They are private by default and labelled with the member they are about. The interview is run by the member's own agent or by a facilitator; if a facilitator runs it, the facilitator can read it by default and the member is told before it starts.
-26. **Contributing.** The member's agent follows the round's instructions and adds findings to the shared sensemaking document, which is collaborative. The interview itself stays private. Each addition is marked with its contributor and round, and the member confirms each addition before it is saved.
+26. **Amended by D45**: an authenticated member agent may confirm with its person's authority; there is no extra person-only confirmation. **Contributing.** The member's agent follows the round's instructions and adds findings to the shared sensemaking document, which is collaborative. The interview itself stays private. Each addition is marked with its contributor and round, and the member confirms each addition before it is saved.
 
 ### Interfaces
 
@@ -100,7 +100,7 @@ The journey ontology comes before all of them. Workspecs stay drafts until it is
 ## Separate backlog
 
 - Account deletion.
-- Hardening: key-bound sessions, log rollback/checkpoints, signed records, expiry, and historical key wraps for newly added agents.
+- Hardening: key-bound sessions, log rollback/checkpoints, signed records and expiry. Historical wraps for authenticated member agents are required by D45.
 - Second independent security review.
 
 ## Naming (settled 2026-09-30)
@@ -113,12 +113,12 @@ These decisions replace the earlier rules where they differ. Unchanged rules sti
 
 31. **Agent links are an explicit encryption exception.** Amends D1 and clarifies D28. When a member deliberately creates a live agent link, the server may decrypt the content available through it while answering. Private artifacts never appear through agent links, including their existence.
 32. **Guides change journey settings.** Amends D2–D4 and D7 by assigning settings authority to guides.
-33. **Personal controls are separate from content roles.** Amends D5 and D7. Read-only members can manage their own profile, manage their own agents and leave. Person guides may be read-only or read-write. Agents cannot be guides. Leaving or removing a member must preserve at least one person guide.
-34. **An agent follows its adding member's access, with one limit.** Amends D6. Its access is always that member's access, limited by the read-only or read-write setting chosen when the agent was added. There are no other agent-specific access rules. A read-only agent never gains writes when its member gains them; a read-write agent cannot write while its member is read-only. D28's read-only agent links remain read-only.
+33. **Amended by D45.** **Personal controls are separate from content roles.** Amends D5 and D7. Read-only members can manage their own profile, manage their own agents and leave. Person guides may be read-only or read-write. Agents cannot be guides. Leaving or removing a member must preserve at least one person guide.
+34. **Amended by D45.** **An agent follows its adding member's access, with one limit.** Amends D6. Its access is always that member's access, limited by the read-only or read-write setting chosen when the agent was added. There are no other agent-specific access rules. A read-only agent never gains writes when its member gains them; a read-write agent cannot write while its member is read-only. D28's read-only agent links remain read-only.
 35. **Agents follow their adding member into projects.** Amends D17 and D20 to settle participation as well as access.
-36. **Artifacts are shared between journeys, not directly between members.** Amends D14–D16, D18 and D25. The author may share an artifact into another journey they belong to. A private artifact stays private in the destination. A non-private artifact takes the destination journey's visibility; in a public journey it is public. The author remains its author. Private artifacts are invisible to everyone else, including their existence. The author's agents act within that author's access under D34; no separate recipient grants exist. This replaces named-person sharing and D25's default read grant to a facilitator who is not the author. Projects remain groupings, not sharing destinations or new access boundaries. Shared copies still record their origin under D14; public disclosure of that origin is the one remaining decision for Dan.
+36. **Amended by D45** for the person-vault audience and uncapped agent authority. **Artifacts are shared between journeys, not directly between members.** Amends D14–D16, D18 and D25. The author may share an artifact into another journey they belong to. A private artifact stays private in the destination. A non-private artifact takes the destination journey's visibility; in a public journey it is public. The author remains its author. Private artifacts are invisible to everyone else, including their existence. The author's agents act within that author's access under D34; no separate recipient grants exist. This replaces named-person sharing and D25's default read grant to a facilitator who is not the author. Projects remain groupings, not sharing destinations or new access boundaries. Shared copies still record their origin under D14; public disclosure of that origin is the one remaining decision for Dan.
 37. **Read-write members create rounds and assign facilitators.** Amends D7 and D21–D24. A round includes all journey members by default. Its creator may choose a subset at creation. The facilitator moves it forward and may skip a stage, go back or reopen it. Complete ends that round, not sensemaking.
-38. **The creator of an artifact is its author.** Amends D15, D25 and Naming. The author is separate from the member an interview is about. A facilitator may mark an artifact as a given member's interview document for the round. This label does not change its author or grant access. A private interview created by a facilitator is that facilitator's private artifact, not automatically the interview subject's.
+38. **Amended by D45** for agent-created private artifacts; agent authorship remains distinct. **The creator of an artifact is its author.** Amends D15, D25 and Naming. The author is separate from the member an interview is about. A facilitator may mark an artifact as a given member's interview document for the round. This label does not change its author or grant access. A private interview created by a facilitator is that facilitator's private artifact, not automatically the interview subject's.
 39. **Data is an artifact type, and applets can use it.** Amends D9 and D12–D13. Data includes JSON, CSV, SQLite, TOML, YAML and similar formats, with a data view. Public and private applets may read any data available to the user viewing them. This explicitly replaces D12's "no journey access" rule for applet data reads. No network access remains the rule. Applets still run only in the browser; D13's small encrypted, journey-shared store remains separate from access to data artifacts.
 40. **Journey visibility type is fixed in this release.** Amends D1. The model and storage must allow conversion to be added later. This release offers no private-to-public or public-to-private conversion.
 41. **Each journey chooses one of three joining policies.** Amends D2–D3 and D7, for both private and public journeys: anyone may request and a guide approves; anyone joins immediately; or invitation only. Guides issue and cancel invites, and may refuse join requests. This replaces D3's automatic approval on the next guide visit. Immediate private joining must not depend on a guide opening their browser; how to deliver keys safely is for the build.
@@ -126,4 +126,13 @@ These decisions replace the earlier rules where they differ. Unchanged rules sti
 
 43. **Each member chooses their public visibility.** Settles the public-origin question left open by D36. Each person member has a visibility setting: **public** or **journeys only**. Public: in public journeys, artifacts they author show their display name and profile picture. Journeys only: in public journeys, their artifacts say "a member", with no name or picture. Other members of the journey still see them as usual. A private source journey is never named publicly. The profile holds only display name and profile picture for now.
 
-44. **The member an interview is about can read it.** Amends D36 and D38. When a facilitator marks an artifact as a member's interview document, that member can read it. The author does not change, and nobody else gains access. The subject can read it but cannot edit it, unless they are also its author. This is the one exception to "private artifacts are invisible to everyone but their author".
+44. **Amended by D45**: the subject's agents have the subject's read access. **The member an interview is about can read it.** Amends D36 and D38. When a facilitator marks an artifact as a member's interview document, that member can read it. The author does not change, and nobody else gains access. The subject can read it but cannot edit it, unless they are also its author. This is the one exception to "private artifacts are invisible to everyone but their author".
+
+
+## Amendment 2026-10-07
+
+45. **A member agent has exactly its adding person's live capabilities.** Amends D6, D15, D26, D33, D34, D36, D38 and D44 wherever they impose an agent-only limit. Every authority check uses the adding person's current role, guide authority, participation and private access. If the person can do it, the agent can do it. An agent never exceeds or outlives the person; removal, expiry or loss of a capability applies immediately. The setting chosen when an agent was added is no longer a limit. Old stored read-only/read-write agent settings are accepted and ignored.
+
+    The agent remains a distinct identity only for attribution as author/writer, its credentials and keys, and addition/removal by its person. It signs as itself, never with the person's keys. Agents have no vault: agent-created private artifacts live in the person's vault and are readable and writable by the person and all of that person's live authenticated agents, subject to the person's current access. Agent authorship remains visible. The same audience and authority apply to vault initialization, signed headers, key delivery, backups and cross-journey copies.
+
+    D28/D31 URL agent links are a different credential and are unchanged: read-only, no private content or existence, no member-control or vault access. This decision does not bypass credential possession, format/signature checks, last-person-guide preservation or limits that apply equally to the person.
