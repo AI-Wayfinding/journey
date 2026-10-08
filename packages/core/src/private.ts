@@ -290,13 +290,13 @@ export async function verifyPrivateRecords(records: readonly PrivateRecord[], pa
   const knownTypes = await Promise.all(ARTIFACT_TYPES.map(artifactTypeHash));
   const sourceCopies = options.source ? views.get(options.source)?.copies : undefined;
   if (options.source && !sourceCopies) throw new Error('Unverified private source');
-  const provenanceSources = new Map<string, Map<string, PrivateCopyState>>(), provenanceCurrent = new Map<string, PrivateCopyState>();
+  const provenanceSources = new Map<string, Map<string, PrivateCopyState>>();
   for (const view of options.provenance ?? []) {
     const verified = views.get(view);
     if (!verified) throw new Error('Unverified private provenance');
     for (const [copy, versions] of verified.versions) {
       if (provenanceSources.has(copy)) throw new Error('Conflicting private provenance');
-      provenanceSources.set(copy, versions); provenanceCurrent.set(copy, verified.copies.get(copy)!);
+      provenanceSources.set(copy, versions);
     }
   }
   for (const input of records) {
@@ -321,15 +321,19 @@ export async function verifyPrivateRecords(records: readonly PrivateRecord[], pa
     const cleanPayload = await validatePrivatePayload(r, payload);
     const old = copies.get(r.copy);
     if (old && old.journey !== r.authority.journey) throw new Error('Private copy changed journey');
-    const actorSession = options.sessions?.find(s => sessions.get(s)?.context === context && sameIdentity(s.identity, r.actor));
-    // Historical cryptographic replay checks entry-time authority. It never issues
-    // a session or authorizes a new mutation/key handoff.
-    const model = normalizedMembers(data.state, [], options.historical ? Date.parse(r.at) : data.now);
+    // Replay always checks the signed writer's entry-time authority. Live
+    // verification additionally requires a current write session in the person's
+    // audience, not possession of every historical writer's private keys. An
+    // approved agent can therefore act on its person's signed history under D45.
+    const model = normalizedMembers(data.state, [], Date.parse(r.at));
     const historicalCredential: PrivateCredential = { $: r.actor.kind === 'person' ? 'PrivatePersonCredential' : 'PrivateAuthenticatedAgent' };
-    const allowed = options.historical ? rules.private_write(model.members, model.id(privateBinding(context, trust.author).principal), model.id(binding.principal), historicalCredential, ruleVersion(data.state.minClientVersion), data.state.pendingRotation === true, true)
-      : !!actorSession && privateAccess(context, trust.author, actorSession, true);
+    const historicalAllowed = rules.private_write(model.members, model.id(privateBinding(context, trust.author).principal), model.id(binding.principal), historicalCredential, ruleVersion(data.state.minClientVersion), data.state.pendingRotation === true, true);
+    const allowed = historicalAllowed && (options.historical === true || (options.sessions ?? []).some(s => {
+      const live = sessions.get(s)?.context;
+      return !!live && live.journey === context.journey && privateAccess(live, trust.author, s, true);
+    }));
     const strings = [r.copy, r.body.artifact as string, canonical(author), canonical(r.actor), r.authority.journey, r.sig, r.prev ?? '', ...Object.keys(data.state.projects?.items ?? {})];
-    for (const c of [...copies.values(), ...(sourceCopies?.values() ?? []), ...provenanceCurrent.values()]) strings.push(...ruleCopyStrings(c));
+    for (const c of [...copies.values(), ...(sourceCopies?.values() ?? [])]) strings.push(...ruleCopyStrings(c));
     for (const key of ['version', 'typeHash', 'predecessor', 'comment', 'onVersion', 'project']) if (typeof r.body[key] === 'string') strings.push(r.body[key]);
     if (r.type === 'private.copy') {
       // SAFETY: validatePrivateRecord above checks the exact origin fields.
@@ -350,21 +354,39 @@ export async function verifyPrivateRecords(records: readonly PrivateRecord[], pa
     if (r.type === 'private.copy') {
       // SAFETY: copyPrivateRecord validated the exact private.copy origin fields.
       const o = r.body.origin as unknown as PrivateOrigin;
-      let source = sourceCopies?.get(o.copy) ?? (options.historical ? provenanceSources.get(o.copy)?.get(o.version) : provenanceCurrent.get(o.copy));
+      const replay = options.historical === true || !options.source;
+      let source = sourceCopies?.get(o.copy) ?? provenanceSources.get(o.copy)?.get(o.version);
       // A complete author backup carries the independently signed source history.
       // Replay only its origin prefix: later edits/deletion cannot invalidate a
       // snapshot already copied into another journey. Live proposals still need
       // the explicitly supplied current source and current write sessions.
-      if (options.historical && !source) source = historicalSources.get(o.copy)?.get(o.version);
+      if (replay && !source) source = historicalSources.get(o.copy)?.get(o.version);
       if (!source || source.journey !== o.journey || source.artifact !== o.artifact || !rules.private_origin_version(id(source.head), id(o.version)) || !sameIdentity(source.author, author)) throw new Error('Private copy origin mismatch');
       const sourceRecord = source.records[0]!, sourceContext = authorities.find(c => rules.private_authority_snapshot(authorityIds.id(c.journey), authorityIds.id(c.head), authorityIds.id(source.journey), authorityIds.id(sourceRecord.authority.head)));
-      if (!sourceContext || sourceRecord.vault === trust.vault || sourceRecord.vault !== await memberVaultId(source.journey, privateVaultOwner(sourceContext, source.author).id, trust.author.signingKey, trust.author.recipient)) throw new Error('Private source vault mismatch');
+      if (!sourceContext || sourceRecord.vault === trust.vault || sourceRecord.vault !== await memberVaultId(source.journey, privateVaultOwner(sourceContext, source.author, Date.parse(sourceRecord.at)).id, trust.author.signingKey, trust.author.recipient)) throw new Error('Private source vault mismatch');
       const versionRecord = source.records.find(v => v.body.version === o.version)!;
       const sourcePayload = source.payloads.find(v => v.record === versionRecord.id)!.payload;
       if (await privateHash(versionRecord) !== o.recordHash || await privateSnapshotHash(sourcePayload) !== r.body.snapshotHash || await privateSnapshotHash(cleanPayload) !== r.body.snapshotHash) throw new Error('Private copy snapshot mismatch');
       const srcContext = authorities.find(c => c.journey === source.journey && contextData(c).current);
       const srcSession = options.sessions?.find(s => sessions.get(s)?.context === srcContext && sameIdentity(s.identity, r.actor));
-      const copyAllowed = options.historical ? allowed : rules.private_copy_access(!!srcContext && !!srcSession && privateAccess(srcContext, trust.author, srcSession, true), allowed, o.journey !== context.journey, { $: context.visibility === 'public' ? 'Public' : 'Private' });
+      // The destination signature binds the accepted snapshot. Replaying its
+      // verified provenance must not require possession of the source keys today,
+      // but the copy signer still needs independently verified source authority
+      // at entry time. An explicit source marks a new live copy proposal.
+      // Use the newest supplied source snapshot at or before the signed copy,
+      // never fall back to an earlier permissive head after a known downgrade.
+      const historicalContext = authorities.filter(c => c.journey === source.journey && Date.parse(contextData(c).history.controls.at(-1)!.proof.at) <= Date.parse(r.at))
+        .sort((a, b) => contextData(b).state.lastSeq - contextData(a).state.lastSeq)[0];
+      let historicalSourceAllowed = false;
+      if (historicalContext) {
+        try {
+          const d = contextData(historicalContext), actor = privateBinding(historicalContext, r.actor), owner = privateBinding(historicalContext, trust.author);
+          const m = normalizedMembers(d.state, [], Date.parse(r.at));
+          historicalSourceAllowed = rules.private_write(m.members, m.id(owner.principal), m.id(actor.principal), historicalCredential, ruleVersion(d.state.minClientVersion), d.state.pendingRotation === true, true);
+        } catch { /* Missing or expired source binding cannot authorize a copy. */ }
+      }
+      const sourceAllowed = replay ? historicalSourceAllowed : !!srcContext && !!srcSession && privateAccess(srcContext, trust.author, srcSession, true);
+      const copyAllowed = rules.private_copy_access(sourceAllowed, allowed, o.journey !== context.journey, { $: context.visibility === 'public' ? 'Public' : 'Private' });
       if ((r.body.blobs as PrivateBlob[]).some(b => source.records.some(v => ((v.body.blobs as PrivateBlob[] | undefined) ?? []).some(oldBlob => oldBlob.id === b.id || oldBlob.nonce === b.nonce || oldBlob.digest === b.digest)))) throw new Error('Private copy reused source ciphertext');
       transition = rules.private_copied(ruleCopy(source, id), id(r.copy), id(canonical(r.actor)), id(r.sig), id(context.journey), id(r.body.version as string), ruleList((r.body.blobs as PrivateBlob[]).map(b => id(b.id))), id(source.records.at(-1)!.sig), !old && r.seq === 0 && r.prev === null, copyAllowed);
     } else {

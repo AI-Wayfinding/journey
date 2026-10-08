@@ -35,6 +35,37 @@ export async function openPersonPrivateVault(options: VaultOptions, context: Pri
 const controllers = new Set<{ close(): void }>();
 export function rememberNodePrivateVault(controller: { close(): void }): void { controllers.add(controller); }
 export function closeNodePrivateVaults(): void { for (const controller of controllers) controller.close(); controllers.clear(); }
+/** Encrypted queued proposal, independent from the retained committed checkpoint. */
+export class NodePrivatePending {
+  private folder: string;
+  constructor(root: string, vault: string, private identity: string, private recipient: string) {
+    if (!validPrivateId(vault)) throw new Error('Invalid private staging binding');
+    this.folder = join(root, vault);
+  }
+  async read(): Promise<{ token: string; bundle: unknown } | null> {
+    let ciphertext: string;
+    try { ciphertext = await readFile(join(this.folder, 'pending.age'), 'utf8'); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
+    return { token: await privateHash(ciphertext), bundle: JSON.parse(await openIdentity(ciphertext, [this.identity])) };
+  }
+  private async locked<T>(expected: string | null, action: () => Promise<T>): Promise<T> {
+    await mkdir(this.folder, { recursive: true, mode: 0o700 });
+    const lock = join(this.folder, '.pending-lock');
+    await mkdir(lock, { mode: 0o700 }).catch(() => { throw new Error('Private staging concurrent write'); });
+    try { if (((await this.read())?.token ?? null) !== expected) throw new Error('Private staging concurrent revision'); return await action(); }
+    finally { await rm(lock, { recursive: true, force: true }); }
+  }
+  async write(expected: string | null, bundle: import('@ai-wayfinding/core').PrivateBundle | import('@ai-wayfinding/core').VaultPendingMerge): Promise<string> {
+    return this.locked(expected, async () => {
+      const ciphertext = await sealIdentity(canonical(bundle), [this.recipient]), temp = join(this.folder, '.' + crypto.randomUUID());
+      const handle = await open(temp, 'wx', 0o600);
+      try { await handle.writeFile(ciphertext); await handle.sync(); await handle.close(); await rename(temp, join(this.folder, 'pending.age')); }
+      finally { await handle.close().catch(() => {}); await rm(temp, { force: true }); }
+      return privateHash(ciphertext);
+    });
+  }
+  async clear(expected: string): Promise<void> { await this.locked(expected, () => rm(join(this.folder, 'pending.age'), { force: true })); }
+}
 export class NodePrivateStore implements VaultCache {
   private folder: string;
   constructor(root: string, readonly vault: string, private options: VaultOptions) {

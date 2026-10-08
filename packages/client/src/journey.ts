@@ -1,11 +1,11 @@
 import { canWriteContent, canReadContent, effectiveScope } from '@ai-wayfinding/core';
-import { PrivateVault, decodeVaultWire, encodeVaultPatch, memberVaultId, privateIdentity, privateAgentSession, verifyPrivateContext, openVaultAgentWrap, privateAccess, privateAgentAudience, sealVaultAgentWrap } from '@ai-wayfinding/core';
+import { verifyPrivateBundle, PrivateVault, decodeVaultWire, encodeVaultPatch, memberVaultId, privateIdentity, privateAgentSession, verifyPrivateContext, openVaultAgentWrap, privateAccess, privateAgentAudience, sealVaultAgentWrap, privateVaultOwner, privateBinding, stage0Rules } from '@ai-wayfinding/core';
 import { PROJECT_FORMAT, projectPurposeHash, replayProject, sealProjectPayload, effectiveProjectParticipants, selectProjectArtifacts, projectSelector } from '@ai-wayfinding/core';
 import type { ProjectActionType } from '@ai-wayfinding/core';
 import { projectId, observedRevision, purposeText, stateValue } from './projects.js';
 import type { ProjectView } from './projects.js';
-import { CLIENT_VERSION, meetsMinClientVersion, newId, unwrapJourneyKey, verifyControlProofs, controlDefinitions, ARTIFACT_FORMAT, artifactTypeHash, canonical, readArtifactPayload, sealArtifactPayload, sealBlob, openBlob, signControlProof, importSigningKey, replayArtifact } from '@ai-wayfinding/core';
-import type { VaultOptions, VaultTransport, PrivateCheckpoint, ControlProof, Member, Envelope, JourneyKey, LogState, ArtifactActionType, ArtifactAttachment, ArtifactPayload, JsonObject } from '@ai-wayfinding/core';
+import { CLIENT_VERSION, meetsMinClientVersion, createAgeIdentity, newId, unwrapJourneyKey, verifyControlProofs, controlDefinitions, ARTIFACT_FORMAT, artifactTypeHash, canonical, readArtifactPayload, sealArtifactPayload, sealBlob, openBlob, signControlProof, importSigningKey, replayArtifact } from '@ai-wayfinding/core';
+import type { VaultOptions, VaultTransport, PrivateCheckpoint, PrivateContext, ControlProof, Member, Envelope, JourneyKey, LogState, ArtifactActionType, ArtifactAttachment, ArtifactPayload, JsonObject } from '@ai-wayfinding/core';
 import { artifactPayload, artifactText, attachmentName, localBytes, saveDownload, skillPackage, validateLocalAttachment } from './artifacts.js';
 import type { ArtifactInput, ArtifactItem, ArtifactView, ArtifactComment, LocalAttachment } from './artifacts.js';
 import { readCache, writeCache } from './cache.js';
@@ -13,10 +13,16 @@ import type { CipherRow } from './cache.js';
 import { signedHeaders } from './signing.js';
 import { networkFetch } from './network.js';
 import type { RememberedAgent } from './storage.js';
-import { NodePrivateStore, rememberNodePrivateVault } from './private-store.js';
+import { NodePrivateStore, NodePrivatePending, rememberNodePrivateVault } from './private-store.js';
 
+/** ID-only adapter to the production snapshot rule, not host authority logic. */
+export function samePrivateContext(left: PrivateContext, right: PrivateContext): boolean {
+  const ids = [...new Set([left.journey, left.head, right.journey, right.head])];
+  const id = (value: string) => BigInt(ids.indexOf(value));
+  return stage0Rules.private_authority_snapshot(id(left.journey), id(left.head), id(right.journey), id(right.head));
+}
 export type AddInput = ArtifactInput;
-export interface JourneyOptions { fetch?: typeof fetch; cacheRoot?: string }
+export interface JourneyOptions { fetch?: typeof fetch; cacheRoot?: string; privateNow?: () => number; privateRandomOrder?: () => number[]; privateManualSchedule?: boolean; privateSchedule?: (tick: () => Promise<boolean>) => () => void }
 export interface ItemView { item: ArtifactItem; comments: ArtifactComment[]; versions: ArtifactView['versions'] }
 interface Verified { state: LogState; epochs: Map<number, JourneyKey>; log: CipherRow[] }
 const historyError = 'This journey history could not be verified. Stop and ask a member for help.';
@@ -81,28 +87,68 @@ export class JourneyClient {
   }
   private privateController?: PrivateVault;
   private privateHead?: string;
-  /** Open the adding person's vault using only this agent's delivered content key. */
-  async openPrivateVault(paired?: PrivateCheckpoint): Promise<PrivateVault> {
+  private stopPrivateSchedule?: () => void;
+  /** Independently verified live authority for private workflows. */
+  async privateAuthority() {
     const verified = await this.verified();
-    if (this.privateController && this.privateHead === verified.state.lastHash) return this.privateController;
+    const controls = verified.log.map(row => JSON.parse(Buffer.from(row.entry, 'base64url').toString()) as { proof: ControlProof; envelope: Envelope });
+    const context = await verifyPrivateContext({ journey: this.session.journeyId, creator: controls[0]!.proof.body.creator as Member, controls }, { now: Date.now(), currentHead: verified.state.lastHash! });
+    const member = verified.state.members[this.session.principal]!.member;
+    const owner = privateVaultOwner(context, privateIdentity(member));
+    const actor = privateIdentity(member), author = privateIdentity(owner), signingKey = await importSigningKey(this.session.signingPrivateKey);
+    const session = await privateAgentSession(context, actor, signingKey, this.session.identity, 'authenticated');
+    return { context, session, signingKey, author, vault: await memberVaultId(context.journey, owner.id, author.signingKey, author.recipient), members: verified.state.members };
+  }
+  get privateCacheRoot(): string | undefined { return this.options.cacheRoot; }
+  /** Open the adding person's vault using only this agent's delivered content key. */
+  async openPrivateVault(paired?: PrivateCheckpoint, fork?: import('@ai-wayfinding/core').VaultCacheRecord): Promise<PrivateVault> {
+    const verified = await this.verified();
+    if (!paired && this.privateController && this.privateHead === verified.state.lastHash) {
+      if (fork) await this.privateController.merge(fork);
+      return this.privateController;
+    }
+    this.stopPrivateSchedule?.(); this.stopPrivateSchedule = undefined;
     this.privateController?.close(); this.privateController = undefined;
     const controls = verified.log.map(row => JSON.parse(Buffer.from(row.entry, 'base64url').toString()) as { proof: ControlProof; envelope: Envelope });
     const context = await verifyPrivateContext({ journey: this.session.journeyId, creator: controls[0]!.proof.body.creator as Member, controls }, { now: Date.now(), currentHead: verified.state.lastHash! });
-    const member = verified.state.members[this.session.principal]!.member, person = member.addedBy;
-    if (!person || verified.state.members[person]?.member.kind !== 'person') throw new Error('Private vault owner unavailable');
-    const actor = privateIdentity(member), author = privateIdentity(verified.state.members[person]!.member), signingKey = await importSigningKey(this.session.signingPrivateKey);
+    const actor = privateIdentity(verified.state.members[this.session.principal]!.member);
+    const owner = privateVaultOwner(context, actor), person = privateBinding(context, privateIdentity(owner)).principal;
+    const author = privateIdentity(owner), signingKey = await importSigningKey(this.session.signingPrivateKey);
     const session = await privateAgentSession(context, actor, signingKey, this.session.identity, 'authenticated');
     if (!privateAccess(context, author, session)) throw new Error('Private vault access denied');
     const vault = await memberVaultId(this.session.journeyId, person, author.signingKey, author.recipient);
     const wrap = await this.response(`/journeys/${this.session.journeyId}/private-agent-wrap/${this.session.principal}`, 'GET', undefined, {}, true);
-    const contentIdentity = wrap.status === 404 ? undefined : await openVaultAgentWrap((await wrap.json() as { ciphertext: string }).ciphertext, { journey: this.session.journeyId, person, agent: this.session.principal, vault, author, recipient: actor }, this.session.identity, context);
-    const transport: VaultTransport = { read: async indices => decodeVaultWire(new Uint8Array(await (await this.response(`/journeys/${this.session.journeyId}/private-vault?slots=${indices === 'all' ? 'all' : indices.map(i => String(i).padStart(2, '0')).join(',')}`)).arrayBuffer()), indices), commit: async patch => (await this.response(`/journeys/${this.session.journeyId}/private-vault`, 'PUT', encodeVaultPatch(patch))).json() };
-    const options: VaultOptions = { actor, contentIdentity, trust: { vault, author }, identity: this.session.identity, signingKey, contexts: [context], sessions: [session], paired, transport };
-    if (this.options.cacheRoot) options.cache = new NodePrivateStore(this.options.cacheRoot, vault, options);
+    // A fresh dedicated key can initialize only an empty server container.
+    // Existing ciphertext must decrypt with a delivered key; never fall back to
+    // the person's key or overwrite a header whose wrap is missing.
+    const contentIdentity = wrap.status === 404 ? (await createAgeIdentity()).identity : await openVaultAgentWrap((await wrap.json() as { ciphertext: string }).ciphertext, { journey: this.session.journeyId, person, agent: this.session.principal, vault, author, recipient: actor }, this.session.identity, context);
+    const transport: VaultTransport = { read: async indices => decodeVaultWire(new Uint8Array(await (await this.response(`/journeys/${this.session.journeyId}/private-vault?slots=${indices === 'all' ? 'all' : indices.map(i => String(i).padStart(2, '0')).join(',')}`)).arrayBuffer()), indices), commit: async patch => {
+      const live = await this.privateAuthority();
+      if (!samePrivateContext(live.context, context) || !privateAccess(live.context, author, live.session, true)) throw new Error('Private authority changed; reopen before saving');
+      return (await this.response(`/journeys/${this.session.journeyId}/private-vault`, 'PUT', encodeVaultPatch(patch))).json();
+    } };
+    const options: VaultOptions = { actor, contentIdentity, trust: { vault, author }, identity: this.session.identity, signingKey, contexts: [context], sessions: [session], paired, transport, now: this.options.privateNow, randomOrder: this.options.privateRandomOrder };
+    if (this.options.cacheRoot) {
+      options.cache = new NodePrivateStore(this.options.cacheRoot, vault, options);
+      const pending = new NodePrivatePending(this.options.cacheRoot, vault, this.session.identity, actor.recipient);
+      let revision: string | null = null;
+      options.mergeStore = {
+        read: async () => { const saved = await pending.read(); revision = saved?.token ?? null; return saved && saved.bundle && typeof saved.bundle === 'object' && 'format' in saved.bundle && saved.bundle.format === 'private-merge-v1' ? saved.bundle : null; },
+        save: async value => {
+          const saved = await pending.read();
+          if (saved) {
+            const checked = await verifyPrivateBundle(saved.bundle, { trust: { vault, author }, historical: true });
+            if (!controller.branches.some(b => canonical(b.bundle.records) === canonical(checked.bundle.records))) throw new Error('Private vault has a pending proposal');
+          }
+          revision = await pending.write(saved?.token ?? null, value);
+        },
+        clear: async () => { const saved = await pending.read(); if (saved && saved.bundle && typeof saved.bundle === 'object' && 'format' in saved.bundle && saved.bundle.format === 'private-merge-v1') { await pending.clear(revision!); revision = null; } },
+      };
+    }
     const controller = new PrivateVault(options); rememberNodePrivateVault(controller);
     try {
-      await controller.open();
-      if (controller.retainedCheckpoint) {
+      await controller.open(fork);
+      if (controller.retainedCheckpoint && privateAccess(context, author, session, true)) {
         const audience = await this.request<{ agents: { principal: string }[] }>(`/journeys/${this.session.journeyId}/private-agents`);
         for (const candidate of audience.agents) {
           const target = verified.state.members[candidate.principal]?.member;
@@ -111,7 +157,11 @@ export class JourneyClient {
           await this.request(`/journeys/${this.session.journeyId}/private-agent-wrap/${target.id}`, 'PUT', { ciphertext });
         }
       }
-      controller.start(); this.privateController = controller; this.privateHead = verified.state.lastHash!; return controller; }
+      if (!this.options.privateManualSchedule) {
+        if (this.options.privateSchedule) this.stopPrivateSchedule = this.options.privateSchedule(() => controller.tick());
+        else controller.start();
+      }
+      this.privateController = controller; this.privateHead = verified.state.lastHash!; return controller; }
     catch (error) { controller.close(); throw error; }
   }
   private async writable(): Promise<Verified> {
@@ -273,5 +323,5 @@ export class JourneyClient {
     if (!scope) throw new Error('This agent is no longer a member of the journey.');
     return { journeyId: this.session.journeyId, principal: this.session.principal, scope, expiresAt: this.session.expiresAt, seq: state.lastSeq };
   }
-  close(): void { this.privateController?.close(); this.privateController = undefined; for (const value of this.keys.values()) value.key.fill(0); this.keys.clear(); }
+  close(): void { this.stopPrivateSchedule?.(); this.stopPrivateSchedule = undefined; this.privateController?.close(); this.privateController = undefined; for (const value of this.keys.values()) value.key.fill(0); this.keys.clear(); }
 }

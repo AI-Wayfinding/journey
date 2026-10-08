@@ -10,6 +10,7 @@ import type { JourneyClient } from '../src/journey.js';
 export const root = resolve('../..'), server = 'http://localhost:18787';
 export const scratch = join(root, '.scratch', 'client-integration');
 let worker: ChildProcess, workerOutput = '';
+export const localWorkerLog = () => workerOutput;
 const headers = { Origin: server, 'X-Wayfinding': '1', 'Content-Type': 'application/json', 'X-Client-Version': '0.1.7', 'X-Control-Format': 'control-proof-v1', 'X-Artifact-Format': 'artifact-v1', 'X-Project-Format': 'project-v1', 'X-Private-Format': 'private-v1' };
 export async function request(path: string, method = 'GET', body?: object, extra: Record<string, string> = {}): Promise<Response> {
   return fetch(server + path, { method, headers: { ...headers, ...extra }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
@@ -24,14 +25,15 @@ async function ready(): Promise<void> {
 }
 export function localServer() {
 beforeAll(async () => {
+  workerOutput = '';
   await rm(scratch, { recursive: true, force: true });
   await mkdir(scratch, { recursive: true });
   // API-only suites must not depend on a previous browser build creating assets.
   const assets = join(scratch, 'assets');
   await mkdir(assets, { recursive: true });
   worker = spawn(process.execPath, [join(root, 'node_modules/wrangler/bin/wrangler.js'), 'dev', '--config', join(root, 'packages/server/test/wrangler.jsonc'), '--assets', assets, '--port', '18787', '--local', '--persist-to', scratch], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'] });
-  worker.stdout!.on('data', (value: Buffer) => { workerOutput = (workerOutput + value.toString()).slice(-8000); });
-  worker.stderr!.on('data', (value: Buffer) => { workerOutput = (workerOutput + value.toString()).slice(-8000); });
+  worker.stdout!.on('data', (value: Buffer) => { workerOutput += value.toString(); });
+  worker.stderr!.on('data', (value: Buffer) => { workerOutput += value.toString(); });
   await ready();
 }, 45_000);
 afterAll(async () => { if (worker && worker.exitCode === null) { await new Promise<void>(resolve => { worker.once('exit', () => resolve()); worker.kill('SIGTERM'); }); } await rm(scratch, { recursive: true, force: true }); });

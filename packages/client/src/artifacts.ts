@@ -41,14 +41,14 @@ export function artifactPayload(input: ArtifactInput, attachments: ArtifactAttac
   return payload;
 }
 /** Explicit local files only. Size is checked before reading; symlinks are refused. */
-export async function localBytes(path: string): Promise<Uint8Array> {
+export async function localBytes(path: string, maxBytes = MAX_BLOB_BYTES): Promise<Uint8Array> {
   const info = await lstat(path);
   if (!info.isFile() || info.isSymbolicLink()) throw new Error('Choose a regular local file, not a symlink.');
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const opened = await file.stat();
     if (!opened.isFile() || info.ino !== opened.ino || info.dev !== opened.dev) throw new Error('Choose a regular local file, not a symlink.');
-    if (opened.size > MAX_BLOB_BYTES) throw new Error('Files can be at most 25,000,000 bytes (25 MB).');
+    if (opened.size > maxBytes) throw new Error(maxBytes === MAX_BLOB_BYTES ? 'Files can be at most 25,000,000 bytes (25 MB).' : 'Private fork file is too large.');
     const bytes = new Uint8Array(opened.size);
     let offset = 0;
     while (offset < bytes.length) {

@@ -166,6 +166,8 @@ The server/core authorize member and guide controls through the agent's live add
 
 `JourneyClient.openPrivateVault()` uses the person's vault with the agent's own keys and encrypted content-key wrap. The agent may initialize, create, edit and sign private content when its person can; private author/writer attribution stays the actual agent. The person and sibling authenticated agents share that vault. URL link credentials are excluded.
 
+Private bundles use explicit local paths. `private handoff --output FILE --destination-state APPROVED_FILE` encrypts to a separately approved agent in the same person's audience. `private return --output FILE --destination-state APPROVED_FILE` sends the verified return to that approved recipient; without `--destination-state`, it encrypts to the current agent. MCP `private_handoff` and `private_return` use `path` and `destinationState`. `private import FILE` checks the recipient and live authority before staging the verified history. These commands require `--private-cache PATH`; exports never print private content or keys.
+
 ## Agent link (fallback)
 
 Some agent sandboxes, for example Claude Cowork, cannot reach `app.wayfinding.support`, and many people cannot change the allowlist. If the CLI fails with exit code 5 ("Could not reach the journey server"), the agent can still read a web page with its web fetch tool. Ask the person to open their journey, go to **People & agents → Add agent by link**, choose how long the link should last (1, 7 or 30 days) and confirm with their passkey. They give you a link like `https://app.wayfinding.support/a/<secret>`. Read it with your web fetch tool; it returns JSON with the journey's items and people, in pages of under 12 KB (`page.next` holds the next page's URL).

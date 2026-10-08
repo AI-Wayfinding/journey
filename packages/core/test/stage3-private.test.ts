@@ -90,6 +90,36 @@ describe('private-v1 verified audience and records', () => {
     expect(privateAccess(removed, identity, writer)).toBe(false);
     await expect(privateAgentSession(removed, identity, f.writer.key, f.writer.identity, 'authenticated')).rejects.toThrow('admission');
   });
+  it('replays person history for a current same-person agent without granting foreign, read-only or expired write authority', async () => {
+    const f = await privateFixture(), c = await created(f);
+    // Admit a new read-hinted agent after the person authored the record. Under
+    // D45 its capabilities come from the live person, never the admission hint.
+    const later = await agent(f.author.member.id, 'read');
+    later.member.expiresAt = new Date(now + 1000).toISOString();
+    await artifactAppend(f.f, f.author, 'member.add', { member: later.member, kind: 'agent', grants: [] });
+    const live = await contextFor(f.f);
+    const own = await privateAgentSession(live, privateIdentity(later.member), later.key, later.identity, 'authenticated');
+    const trust = { vault: f.vault, author: f.identity };
+    const replay = (session: typeof own) => verifyPrivateRecords(c.records, c.payloads, [f.context], trust, { sessions: [session] });
+    const copies = privateCopies(await replay(own));
+    expect(copies).toHaveLength(1);
+    expect(copies[0]!.author).toEqual(f.identity);
+    expect(copies[0]!.records[0]!.actor).toEqual(f.identity);
+    const foreign = await privateAgentSession(live, privateIdentity(f.foreign.member), f.foreign.key, f.foreign.identity, 'authenticated');
+    await expect(replay(foreign)).rejects.toThrow('denied');
+    const expired = await contextFor(f.f, { now: now + 2000 });
+    const expiredSession = await privateAgentSession(expired, privateIdentity(later.member), later.key, later.identity, 'authenticated');
+    await expect(replay(expiredSession)).rejects.toThrow('denied');
+    await artifactAppend(f.f, f.f.guide, 'member.role', { member: f.author.member.id, role: 'read-only' });
+    const downgraded = await contextFor(f.f);
+    const readonly = await privateAgentSession(downgraded, privateIdentity(later.member), later.key, later.identity, 'authenticated');
+    await expect(replay(readonly)).rejects.toThrow('denied');
+    const forged = structuredClone(c.record); forged.sig = encode(new Uint8Array(64));
+    await expect(verifyPrivateRecords([forged], c.payloads, [f.context], trust, { sessions: [own] })).rejects.toThrow('signature');
+    // Historical replay cannot make a write signed under a read-only person valid.
+    const denied = await record(downgraded, later, f.vault, newPrivateId(), newPrivateId(), f.identity);
+    await expect(verifyPrivateRecords([denied.record], [denied.payload], [downgraded], trust, { historical: true })).rejects.toThrow('denied');
+  });
   it('attributes actual writers and refuses stale, immutable-author, type, signature, index and payload attacks atomically', async () => {
     const f = await privateFixture(), c = await created(f), writer = await privateAgentSession(f.context, privateIdentity(f.writer.member), f.writer.key, f.writer.identity, 'authenticated');
     const edited = await record(f.context, f.writer, f.vault, f.copy, f.artifact, f.identity, 'private.version', c.records, content('New version'));

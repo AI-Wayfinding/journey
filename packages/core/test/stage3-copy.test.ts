@@ -58,6 +58,37 @@ describe('private copy contracts in private and public destination models', () =
     expect(privateCopies(offline.view).map(c => c.copy)).toEqual([f.copy]);
     expect(offline.bundle.sourceHistories![0]!.records).toEqual(f.original.records);
   });
+  it('replays and exports an accepted snapshot without a live source after source edit and deletion, but new proposals still need that session', async () => {
+    const f = await copyFixture('private'), bundle = await destinationBundle(f);
+    // Explicit source is the new-proposal path. Provenance is signed historical
+    // evidence, not a source credential or a replacement for destination access.
+    await expect(verifyPrivateRecords([f.r.record], [f.r.payload], [f.source.context, f.context], f.trust, { source: f.original.view, sessions: [f.session] })).rejects.toThrow('conflict');
+    const accepted = await verifyPrivateRecords([f.r.record], [f.r.payload], [f.source.context, f.context], f.trust, f.options);
+    expect(privateCopies(accepted)[0]!.head).toBe(f.r.record.body.version);
+    const edit = await record(f.source.context, f.source.author, f.source.vault, f.source.copy, f.source.artifact, f.source.identity, 'private.version', f.original.records, content('Later source'));
+    const deleted = await record(f.source.context, f.source.author, f.source.vault, f.source.copy, f.source.artifact, f.source.identity, 'private.delete', [...f.original.records, edit.record], marker());
+    const records = [...f.original.records, edit.record, deleted.record], payloads = [...f.original.payloads, edit.payload, deleted.payload];
+    const provenance = await verifyPrivateRecords(records, payloads, [f.source.context], { vault: f.source.vault, author: f.source.identity }, { historical: true });
+    const replayed = await verifyPrivateRecords([f.r.record], [f.r.payload], [f.source.context, f.context], f.trust, { provenance: [provenance], sessions: [f.session] });
+    expect(privateCopies(replayed)[0]!.deleted).toBe(false);
+    expect(privateCopies(replayed)[0]!.payloads[0]!.payload.body.title).toBe('Private title 🌱');
+    bundle.sourceHistories = [{ vault: f.source.vault, records, payloads }];
+    const options = { trust: f.trust, contexts: [f.context], sessions: [f.session] };
+    const encrypted = await exportPrivateBundle(bundle, { ...options, recipient: f.session });
+    const imported = await importPrivateBundle(encrypted, f.source.author.identity, { ...options, recipient: f.source.identity });
+    expect(privateCopies(imported.view)[0]!.records).toEqual([f.r.record]);
+    expect(privateCopies(imported.view)[0]!.deleted).toBe(false);
+    await expect(verifyPrivateRecords([f.r.record], [f.r.payload], [f.source.context, f.context], f.trust, { provenance: [provenance] })).rejects.toThrow('conflict');
+    const forged = structuredClone(f.r.record); forged.sig = encode(new Uint8Array(64));
+    await expect(verifyPrivateRecords([forged], [f.r.payload], [f.source.context, f.context], f.trust, { provenance: [provenance], sessions: [f.session] })).rejects.toThrow('signature');
+  });
+  it('does not use an older permissive source snapshot when supplied history denies the copy signer at copy time', async () => {
+    const f = await copyFixture('private');
+    await artifactAppend(f.source.f, f.source.f.guide, 'member.role', { member: f.source.author.member.id, role: 'read-only' });
+    const denied = await contextFor(f.source.f);
+    await expect(verifyPrivateRecords([f.r.record], [f.r.payload], [f.source.context, denied, f.context], f.trust, { provenance: [f.original.view], sessions: [f.session] })).rejects.toThrow('conflict');
+    await expect(verifyPrivateRecords([f.r.record], [f.r.payload], [f.source.context, denied, f.context], f.trust, { provenance: [f.original.view], historical: true })).rejects.toThrow('conflict');
+  });
   it('refuses an independently verified origin owned by another author', async () => {
     const f = await copyFixture('private');
     const foreign = privateIdentity(f.source.f.guide.member);

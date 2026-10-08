@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { homedir } from 'node:os';
+import { validPrivateId } from '@ai-wayfinding/core';
 import { stdin, stderr } from 'node:process';
 import { join } from 'node:path';
 import { connectJourney, requestConnection, resumeConnection } from './connection.js';
@@ -7,10 +8,14 @@ import { ExpiredStateError, loadState } from './state.js';
 import type { AgentState } from './state.js';
 import { importMarkdown } from './import.js';
 import { JourneyClient } from './journey.js';
+import type { JourneyOptions } from './journey.js';
+import { pathToFileURL } from 'node:url';
 import { runMcp } from './mcp.js';
 import { forgetRemembered, loadRemembered } from './storage.js';
 import { NetworkError } from './network.js';
 import type { ArtifactInput } from './artifacts.js';
+import { PrivateArtifacts } from './private.js';
+import { localBytes } from './artifacts.js';
 
 const help = `wayfinding — read and write an approved journey
 
@@ -37,6 +42,9 @@ wayfinding show <id>
 wayfinding comment <id> <text> [--version VERSION]
 wayfinding comments <id>
 wayfinding status
+wayfinding private init|list|show|branches|merge|create|edit|comment|delete|project|copy|backup|import|handoff|return|checkpoint|watch
+Private commands require --private-cache PATH; use --paired FILE for a trusted exported checkpoint.
+Private saves are staged, not immediately uploaded. Keep mcp or private watch open for five-minute sync.
 wayfinding mcp [--connect <journey-id>] [--name "Agent name"]
 
 Use --state FILE with commands or mcp to use an approved file-backed session.
@@ -44,17 +52,17 @@ Use --journey <journey-id> with any one-shot command to ask for approval each ti
 Use --cache to store only encrypted journey records and a verified log head; --no-cache turns it off.
 Keys never go into the local cache. Agent capabilities follow the adding person’s current access.`;
 
-const valueFlags = new Set(['--name', '--server', '--key-folder', '--journey', '--connect', '--type', '--title', '--body', '--tags', '--state', '--timeout', '--tag', '--file', '--format', '--url', '--summary', '--notes', '--predecessor', '--blob', '--output', '--version', '--project', '--purpose', '--project-state']);
+const valueFlags = new Set(['--name', '--server', '--key-folder', '--journey', '--connect', '--type', '--title', '--body', '--tags', '--state', '--timeout', '--tag', '--file', '--format', '--url', '--summary', '--notes', '--predecessor', '--blob', '--output', '--version', '--project', '--purpose', '--project-state', '--private-cache', '--paired', '--destination-state']);
 const boolFlags = new Set(['--remember', '--cache', '--no-cache', '--help', '--no-wait', '--wait', '--json']);
 function parse(args: string[]): { command: string; positional: string[]; flags: Record<string, string | boolean> } {
   const command = args[0] ?? '--help', flags: Record<string, string | boolean> = {}, positional: string[] = [];
   for (let index = 1; index < args.length; index++) {
     const part = args[index]!;
     if (valueFlags.has(part)) {
-      if (args[index + 1] === undefined || args[index + 1]!.startsWith('--')) throw new Error(part + ' needs a value.');
+      if (args[index + 1] === undefined || (args[index + 1]!.startsWith('--') && !(command === 'private' && validPrivateId(args[index + 1])))) throw new Error(part + ' needs a value.');
       flags[part] = args[++index]!;
     } else if (boolFlags.has(part)) flags[part] = true;
-    else if (part.startsWith('-')) throw new Error('Unknown option: ' + part);
+    else if (part.startsWith('-') && !(command === 'private' && validPrivateId(part))) throw new Error('Unknown option: ' + part);
     else positional.push(part);
   }
   return { command, positional, flags };
@@ -94,7 +102,7 @@ function cacheFolder(): string {
   if (process.platform === 'darwin') return join(homedir(), 'Library', 'Caches', 'wayfinding', 'journeys');
   return join(process.env.XDG_CACHE_HOME ?? join(homedir(), '.cache'), 'wayfinding', 'journeys');
 }
-export async function main(args = process.argv.slice(2)): Promise<void> {
+export async function main(args = process.argv.slice(2), journeyOptions: JourneyOptions = {}): Promise<void> {
   const { command, positional, flags } = parse(args);
   if (command === '--help' || command === 'help' || flags['--help']) { console.log(help); return; }
   const keyFolder = flag(flags, '--key-folder');
@@ -148,20 +156,22 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     if (statePath) {
       const state = await loadState(statePath);
       if (state.status !== 'approved') throw new Error('This journey is still pending approval. Run connect --state FILE --wait first.');
-      held = new JourneyClient(state.session, flags['--cache'] && !flags['--no-cache'] ? { cacheRoot: cacheFolder() } : {});
+      held = new JourneyClient(state.session, { ...journeyOptions, ...(flag(flags, '--private-cache') ? { cacheRoot: flag(flags, '--private-cache') } : flags['--cache'] && !flags['--no-cache'] ? { cacheRoot: cacheFolder() } : {}) });
     } else if (oneShot) { held = (await connect(oneShot, command === 'mcp')).client; }
     else {
       const session = await loadRemembered({ folder: keyFolder, passphrase: secret });
       if (!session) throw new Error('No remembered journey connection. Use wayfinding connect <journey-id> --remember, --state FILE for an approved file, or --journey <journey-id> to ask for approval for this command.');
-      held = new JourneyClient(session, flags['--no-cache'] ? {} : { cacheRoot: cacheFolder() });
+      held = new JourneyClient(session, { ...journeyOptions, ...(flag(flags, '--private-cache') ? { cacheRoot: flag(flags, '--private-cache') } : flags['--no-cache'] ? {} : { cacheRoot: cacheFolder() }) });
     }
     if ((flags['--cache'] || flags['--no-cache']) && oneShot && held) {
-      if (flags['--cache']) held = new JourneyClient(held.session, { cacheRoot: cacheFolder() });
-      if (flags['--no-cache']) held = new JourneyClient(held.session);
+      if (flags['--cache']) held = new JourneyClient(held.session, { ...journeyOptions, cacheRoot: cacheFolder() });
+      if (flags['--no-cache']) held = new JourneyClient(held.session, journeyOptions);
     }
     return held;
   };
-  if (command === 'mcp') { await runMcp(getClient); return; }
+  const pairedPath = flag(flags, '--paired');
+  const paired = pairedPath ? JSON.parse(new TextDecoder().decode(await localBytes(pairedPath))) as import('@ai-wayfinding/core').PrivateCheckpoint : undefined;
+  if (command === 'mcp') { await runMcp(getClient, paired); return; }
   try {
     const client = await getClient(); let result: unknown;
     const input = (): ArtifactInput => {
@@ -177,6 +187,44 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       return Number(value);
     };
     switch (command) {
+      case 'private': {
+        if (!flag(flags, '--private-cache')) throw new Error('Private commands need --private-cache with an explicit encrypted staging folder.');
+        const [action, id, text] = positional;
+        const required = (value: string | undefined, name: string) => { if (!value) throw new Error('Supply ' + name); return value; };
+        const workflow = await PrivateArtifacts.open(client, paired, action === 'merge' ? required(id, 'fork cache path') : undefined);
+        const observed = () => required(flag(flags, '--predecessor'), '--predecessor');
+        const target = async () => {
+          const state = await loadState(required(flag(flags, '--destination-state'), '--destination-state FILE'));
+          if (state.status !== 'approved') throw new Error('Destination requires separate approved state');
+          return new JourneyClient(state.session, { ...journeyOptions, cacheRoot: flag(flags, '--private-cache') });
+        };
+        switch (action) {
+          case 'init': case 'merge': result = await workflow.status(); break;
+          case 'branches': result = await workflow.branches(); break;
+          case 'list': result = await workflow.list(flag(flags, '--project')); break;
+          case 'show': result = await workflow.show(required(id, 'copy ID')); break;
+          case 'create': result = await workflow.save(input()); break;
+          case 'edit': result = await workflow.save(input(), required(id, 'copy ID'), observed()); break;
+          case 'comment': result = await workflow.comment(required(id, 'copy ID'), required(text, 'comment text'), flag(flags, '--version')); break;
+          case 'delete': result = await workflow.delete(required(id, 'copy ID'), observed()); break;
+          case 'project': result = await workflow.project(required(id, 'copy ID'), required(text, 'project ID or none') === 'none' ? null : text!, observed() === 'null' ? null : observed()); break;
+          case 'download': result = await workflow.download(required(id, 'copy ID'), required(flag(flags, '--blob'), '--blob'), required(flag(flags, '--output'), '--output PATH')); break;
+          case 'backup': result = await workflow.backup(required(flag(flags, '--output'), '--output PATH')); break;
+          case 'return': {
+            const destination = flag(flags, '--destination-state') ? await target() : undefined;
+            try { result = await workflow.backup(required(flag(flags, '--output'), '--output PATH'), 'agent-return', destination); }
+            finally { destination?.close(); }
+            break;
+          }
+          case 'import': result = await workflow.import(required(id, 'bundle path')); break;
+          case 'checkpoint': result = await workflow.checkpoint(required(flag(flags, '--output'), '--output PATH')); break;
+          case 'handoff': { const destination = await target(); try { result = await workflow.backup(required(flag(flags, '--output'), '--output PATH'), 'agent-handoff', destination); } finally { destination.close(); } break; }
+          case 'copy': { const destination = await target(); try { result = await workflow.copyTo(required(id, 'copy ID'), observed(), await PrivateArtifacts.open(destination)); } finally { destination.close(); } break; }
+          case 'watch': console.log(JSON.stringify(await workflow.status())); await new Promise<void>(resolve => { process.once('SIGTERM', resolve); process.once('SIGINT', resolve); }); return;
+          default: throw new Error('Unknown private command');
+        }
+        break;
+      }
       case 'project': {
         const [action, id] = positional;
         switch (action) {
@@ -209,7 +257,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     console.log(JSON.stringify(result, null, 2));
   } finally { held?.close(); }
 }
-main().catch(error => {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main().catch(error => {
   if (error instanceof NetworkError && process.argv.includes('--json')) console.error(JSON.stringify({ error: error.reason, exitCode: error.exitCode, fallback: error.fallback }));
   else console.error(error instanceof Error ? error.message : String(error));
   process.exitCode = error && typeof error.exitCode === 'number' ? error.exitCode : 1; });
