@@ -1,5 +1,5 @@
 import { canWriteContent, canReadContent, effectiveScope } from '@ai-wayfinding/core';
-import { PrivateVault, decodeVaultWire, encodeVaultPatch, memberVaultId, privateIdentity, privateAgentSession, verifyPrivateContext, openVaultAgentWrap, privateAccess, privateAgentAudience, sealVaultAgentWrap, privateVaultOwner, privateBinding, stage0Rules } from '@ai-wayfinding/core';
+import { verifyPrivateBundle, PrivateVault, decodeVaultWire, encodeVaultPatch, memberVaultId, privateIdentity, privateAgentSession, verifyPrivateContext, openVaultAgentWrap, privateAccess, privateAgentAudience, sealVaultAgentWrap, privateVaultOwner, privateBinding, stage0Rules } from '@ai-wayfinding/core';
 import { PROJECT_FORMAT, projectPurposeHash, replayProject, sealProjectPayload, effectiveProjectParticipants, selectProjectArtifacts, projectSelector } from '@ai-wayfinding/core';
 import type { ProjectActionType } from '@ai-wayfinding/core';
 import { projectId, observedRevision, purposeText, stateValue } from './projects.js';
@@ -13,7 +13,7 @@ import type { CipherRow } from './cache.js';
 import { signedHeaders } from './signing.js';
 import { networkFetch } from './network.js';
 import type { RememberedAgent } from './storage.js';
-import { NodePrivateStore, rememberNodePrivateVault } from './private-store.js';
+import { NodePrivateStore, NodePrivatePending, rememberNodePrivateVault } from './private-store.js';
 
 /** ID-only adapter to the production snapshot rule, not host authority logic. */
 export function samePrivateContext(left: PrivateContext, right: PrivateContext): boolean {
@@ -128,7 +128,24 @@ export class JourneyClient {
       return (await this.response(`/journeys/${this.session.journeyId}/private-vault`, 'PUT', encodeVaultPatch(patch))).json();
     } };
     const options: VaultOptions = { actor, contentIdentity, trust: { vault, author }, identity: this.session.identity, signingKey, contexts: [context], sessions: [session], paired, transport, now: this.options.privateNow, randomOrder: this.options.privateRandomOrder };
-    if (this.options.cacheRoot) options.cache = new NodePrivateStore(this.options.cacheRoot, vault, options);
+    if (this.options.cacheRoot) {
+      options.cache = new NodePrivateStore(this.options.cacheRoot, vault, options);
+      const pending = new NodePrivatePending(this.options.cacheRoot, vault, this.session.identity, actor.recipient);
+      let revision: string | null = null;
+      options.mergeStore = {
+        read: async () => { const saved = await pending.read(); revision = saved?.token ?? null; return saved && saved.bundle && typeof saved.bundle === 'object' && 'format' in saved.bundle && saved.bundle.format === 'private-merge-v1' ? saved.bundle : null; },
+        save: async value => {
+          const saved = await pending.read();
+          if (saved) {
+            const checked = await verifyPrivateBundle(saved.bundle, { trust: { vault, author }, historical: true });
+            if (!controller.branches.some(b => canonical(b.bundle.records) === canonical(checked.bundle.records))) throw new Error('Private vault has a pending proposal');
+            await pending.clear(saved.token);
+          }
+          revision = await pending.write(null, value);
+        },
+        clear: async () => { const saved = await pending.read(); if (saved && saved.bundle && typeof saved.bundle === 'object' && 'format' in saved.bundle && saved.bundle.format === 'private-merge-v1') { await pending.clear(revision!); revision = null; } },
+      };
+    }
     const controller = new PrivateVault(options); rememberNodePrivateVault(controller);
     try {
       await controller.open(fork);

@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { writeFile } from 'node:fs/promises';
-import { artifactTypeHash, canonical, deriveRecipient, importSigningKey, newId, openPrivateFrame, privateAuthority, privateBytesHash, privateDecode, privateHash, privatePlainBytes, sealPrivateFrame, sealPrivateSlot, signPrivateHeader, signPrivateRecord, verifyPrivateContext } from '@ai-wayfinding/core';
+import { PRIVATE_CHUNK_BYTES, artifactTypeHash, canonical, deriveRecipient, importSigningKey, newId, openPrivateFrame, privateAuthority, privateBytesHash, privateDecode, privateHash, privatePlainBytes, sealPrivateFrame, sealPrivateSlot, signPrivateHeader, signPrivateRecord, verifyPrivateContext } from '@ai-wayfinding/core';
 import type { PrivateBundle, PrivateHeader, ProtocolRecord, VaultCacheRecord } from '@ai-wayfinding/core';
 import type { privateFixture } from './stage3-fixtures.js';
 import { scratch } from './local-server.js';
@@ -20,9 +20,10 @@ export async function forkCache(f: Fixture, base: VaultCacheRecord, bundle: Priv
   const raw = await openPrivateFrame(base.frame, f.owner.age.identity, f.bundle.author.recipient) as Frame;
   const bytes = privatePlainBytes(bundle), root = privateDecode(raw.root, 32), slots = base.slots.slice();
   try {
-    const index = raw.directory.branches[0]![0]!;
-    slots[index] = await sealPrivateSlot(root, f.vaultId, index, bytes);
-    raw.directory.branches = [[index]];
+    const indices = [...raw.directory.branches[0]!, ...Array.from({ length: 64 }, (_, i) => i).filter(i => !raw.directory.branches.flat().includes(i))].slice(0, Math.ceil(bytes.length / PRIVATE_CHUNK_BYTES));
+    for (let n = 0; n < indices.length; n++) slots[indices[n]!] = await sealPrivateSlot(root, f.vaultId, indices[n]!, bytes.subarray(n * PRIVATE_CHUNK_BYTES, (n + 1) * PRIVATE_CHUNK_BYTES));
+    raw.directory.branches = [indices];
+    raw.directory.initialized = [...new Set([...raw.directory.initialized, ...indices])];
     const hashes = await Promise.all(slots.map(s => privateBytesHash(privateDecode(s))));
     const { sig: _sig, writer: _writer, authority: _authority, ...header } = raw.header;
     raw.header = await signPrivateHeader({ ...header, slots: hashes, contentsHash: await privateHash({ slots: hashes, root: raw.root, directory: raw.directory, contentIdentity: raw.contentIdentity }) }, await importSigningKey(f.owner.signing.privateKey));

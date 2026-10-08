@@ -16,6 +16,10 @@ export interface VaultTransport { read(indices: readonly number[] | 'all'): Prom
 export interface VaultCache { read(): Promise<VaultCacheRecord | null>; commit(expected: string | null, value: VaultCacheRecord): Promise<void> }
 export interface VaultCacheRecord { token: string; frame: string; slots: string[]; checkpoint: PrivateCheckpoint }
 export interface VaultDirectory { branches: number[][]; initialized: number[] }
+/** Signed source caches plus a copy-on-write layout, never caller-authored output. */
+export interface VaultMergeSource { frame: string; checkpoint: PrivateCheckpoint; slots: { index: number; ciphertext: string }[] }
+export interface VaultPendingMerge { format: 'private-merge-v1'; left: VaultMergeSource; right: VaultMergeSource; branches: number[][] }
+export interface VaultMergeStore { read(): Promise<unknown>; save(value: VaultPendingMerge): Promise<void>; clear(): Promise<void> }
 interface VaultFrame { header: PrivateHeader; root: string; directory: VaultDirectory; contentIdentity?: string }
 export interface VaultOptions extends PrivateBundleOptions {
   identity: AgeIdentity; signingKey: CryptoKey; transport: VaultTransport; cache?: VaultCache;
@@ -23,6 +27,7 @@ export interface VaultOptions extends PrivateBundleOptions {
   contentIdentity?: string; actor?: import('./private.js').PrivateIdentity;
   /** Trusted out-of-band input from a paired device. No pairing UI is implied. */
   paired?: PrivateCheckpoint; now?: () => number; randomOrder?: () => number[];
+  mergeStore?: VaultMergeStore;
 }
 const list = (xs: readonly number[]): List<bigint> => xs.reduceRight<List<bigint>>((tail, n) => ({ $: 'Con', head: BigInt(n), tail }), { $: 'Nil' });
 export function selectPrivateSlots(dirty: readonly number[], order: readonly number[]): number[] {
@@ -179,6 +184,8 @@ export class PrivateVault {
     await this.refreshBranches(); this.alive(generation);
     // An explicit independently retained fork must verify against the local
     // checkpoint before the scheduled open can upload anything.
+    const pendingMerge = await this.options.mergeStore?.read(); this.alive(generation);
+    if (pendingMerge) await this.resumeMerge(pendingMerge);
     if (fork) await this.merge(fork);
     if (!this.options.historical) await this.sync(true);
   }
@@ -207,6 +214,7 @@ export class PrivateVault {
   /** Copy-on-write chunks become live together, only after all have been uploaded. */
   async stage(bundle: PrivateBundle): Promise<void> {
     this.assertOpen(); if (!this.slots.length || this.busy || this.staging || !this.available) throw new Error('Private vault not ready');
+    if (this.merging) throw new Error('Private versions conflict; finish the pending merge before editing');
     this.staging = true;
     try {
     const checked = await verifyPrivateBundle(bundle, { ...this.options, historical: true }), copies = privateCopies(checked.view);
@@ -273,6 +281,7 @@ export class PrivateVault {
           if (!dir.initialized.includes(row.index)) dir.initialized.push(row.index);
         }
       } finally { root.fill(0); }
+      const completingMerge = this.merging && !!this.pendingBranches && [...this.pending.keys()].every(i => indices.includes(i));
       if (this.pendingBranches && [...this.pending.keys()].every(i => indices.includes(i))) dir.branches = this.pendingBranches.map(b => b.slice());
       const context = actor.kind === 'agent' ? this.options.contexts!.find(c => this.options.sessions?.some(s => canonical(s.identity) === canonical(actor) && s.binding.journey === c.journey && privateAccess(c, this.options.trust.author, s, true)))! : undefined;
       // Old person-only frames migrate on the next scheduled commit, never on a private save.
@@ -288,6 +297,7 @@ export class PrivateVault {
       if (!this.pending.size) { this.pendingBranches = null; this.merging = false; }
       await this.refreshBranches(); this.alive(generation);
       if (this.options.cache) { await this.options.cache.commit(this.cachedHead, { token: this.token, frame, slots, checkpoint: checked.checkpoint }); this.alive(generation); this.cachedHead = checked.checkpoint.head; }
+      if (completingMerge) await this.options.mergeStore?.clear();
       if (stagingConflict) throw new Error('Private vault concurrent staging conflict; reload before saving');
       return true;
     } finally { this.busy = false; this.notifyReady(); }
@@ -298,6 +308,8 @@ export class PrivateVault {
     this.assertOpen(); if (this.busy || this.staging || !this.available || !this.current) throw new Error('Private vault not ready');
     this.staging = true; const generation = this.generation;
     try {
+    if (this.hasPending) throw new Error('Private vault has a pending proposal');
+    const left: VaultCacheRecord = { token: this.token, frame: await sealPrivateFrame(this.current, this.options.trust.author.recipient, this.current.contentIdentity ? await deriveRecipient(this.current.contentIdentity) : undefined), slots: this.slots.slice(), checkpoint: this.retainedCheckpoint! };
     const checked = await validateVaultCache(other, { ...this.options, paired: undefined }), remote = await decodeFrame(checked.frame, this.options);
     this.alive(generation);
     const decision = await verifyPrivateHeader(remote.header, this.options.trust, { checkpoint: this.checkpoint, contentsHash: remote.header.contentsHash, contexts: this.options.contexts });
@@ -313,12 +325,72 @@ export class PrivateVault {
     // Stage against the remote live references before adopting it; a full or
     // invalid merge must leave the original retained state untouched.
     const previous = this.current;
-    this.alive(generation); this.current = remote;
-    try { await this.stageBranches(groups.map(g => bundleForCopies(g, sources))); } catch (error) { if (this.active && generation === this.generation) this.current = previous; throw error; }
+    this.alive(generation); this.current = { ...remote, directory: { branches: [...remote.directory.branches, ...previous.directory.branches], initialized: remote.directory.initialized } };
+    try { await this.stageBranches(groups.map(g => bundleForCopies(g, sources))); this.current = remote; } catch (error) { if (this.active && generation === this.generation) this.current = previous; throw error; }
+    const source = (cache: VaultCacheRecord, frame: VaultFrame): VaultMergeSource => ({ frame: cache.frame, checkpoint: cache.checkpoint, slots: frame.directory.branches.flat().map(index => ({ index, ciphertext: cache.slots[index]! })) });
+    try { await this.options.mergeStore?.save({ format: 'private-merge-v1', left: source(left, previous), right: source(checked, remote), branches: this.pendingBranches!.map(b => b.slice()) }); }
+    catch (error) { this.current = previous; for (const bytes of this.pending.values()) bytes.fill(0); this.pending.clear(); this.pendingBranches = null; throw error; }
     this.alive(generation); this.slots = checked.slots.slice(); this.hashes = hashes; this.token = checked.token;
     this.merging = true;
     return selected;
     } finally { this.staging = false; this.notifyReady(); }
+  }
+  private async resumeMerge(value: unknown): Promise<void> {
+    const generation = this.generation;
+    if (!privateObject(value) || !privateShape(value, ['format', 'left', 'right', 'branches']) || value.format !== 'private-merge-v1') throw new Error('Invalid private merge staging');
+    const sources: { checkpoint: PrivateCheckpoint; frame: VaultFrame; slots: string[]; bundles: { bundle: PrivateBundle; view: PrivateView }[] }[] = [];
+    for (const input of [value.left, value.right]) {
+      if (!privateObject(input) || !privateShape(input, ['frame', 'checkpoint', 'slots']) || typeof input.frame !== 'string' || !Array.isArray(input.slots)) throw new Error('Invalid private merge source');
+      const frame = await decodeFrame(input.frame, this.options);
+      const verified = await verifyPrivateHeader(frame.header, this.options.trust, { checkpoint: input.checkpoint as PrivateCheckpoint, contentsHash: frame.header.contentsHash, contexts: this.options.contexts });
+      if (verified.decision === 'merge' || canonical(verified.checkpoint) !== canonical(input.checkpoint)) throw new Error('Private merge source checkpoint conflict');
+      const wanted = frame.directory.branches.flat(), slots: string[] = [], hashes = frame.header.slots.slice();
+      if (input.slots.length !== wanted.length) throw new Error('Private merge source slots mismatch');
+      for (let n = 0; n < wanted.length; n++) {
+        const row = input.slots[n];
+        if (!privateObject(row) || !privateShape(row, ['index', 'ciphertext']) || row.index !== wanted[n] || typeof row.ciphertext !== 'string' || await privateBytesHash(privateDecode(row.ciphertext, PRIVATE_SLOT_BYTES)) !== hashes[wanted[n]!]) throw new Error('Private fork contents digest mismatch');
+        slots[wanted[n]!] = row.ciphertext;
+      }
+      const bundles = await readBranches(frame, slots, hashes, this.options);
+      if (!bundles || bundles.length !== 1) throw new Error('Private fork merge requires complete verified branches');
+      sources.push({ checkpoint: verified.checkpoint, frame, slots, bundles });
+    }
+    const [left, right] = sources as [typeof sources[number], typeof sources[number]];
+    const decision = await verifyPrivateHeader(right.frame.header, this.options.trust, { checkpoint: left.checkpoint, contentsHash: right.frame.header.contentsHash, contexts: this.options.contexts });
+    if (decision.decision !== 'merge') throw new Error('Private fork merge requires complete verified branches');
+    const selected = mergePrivateViews(left.bundles[0]!.view, right.bundles[0]!.view);
+    const groups: PrivateCopyState[][] = selected.some(c => c.branches.length > 1) ? [[], []] : [[]];
+    for (const choice of selected) for (let i = 0; i < groups.length; i++) groups[i]!.push(choice.branches[i] ?? choice.branches[0]!);
+    const outputs = groups.map(g => bundleForCopies(g, [left.bundles[0]!.bundle, right.bundles[0]!.bundle]));
+    // Stored output is never trusted: re-derive it from both complete signed sources.
+    for (const bundle of outputs) { this.writable(bundle); await verifyPrivateBundle(bundle, { ...this.options, historical: true }); }
+    const layout = directory({ branches: value.branches, initialized: Array.from({ length: 64 }, (_, i) => i) }).branches;
+    const bytes = outputs.map(privatePlainBytes), chunks = new Map<number, Uint8Array>();
+    try {
+      if (layout.length !== bytes.length || layout.some((b, i) => b.length !== Math.ceil(bytes[i]!.length / PRIVATE_CHUNK_BYTES)) || layout.flat().some(i => sources.some(s => s.frame.directory.branches.flat().includes(i)))) throw new Error('Private merge staging layout mismatch');
+      this.alive(generation);
+      if (!this.current || !this.available) throw new Error('Private merge restart requires complete verified history');
+      // Encrypted staging is not a checkpoint authority. It may not install or
+      // clear itself against a head below either independently retained source.
+      for (const source of sources) await verifyPrivateHeader(this.current.header, this.options.trust, { checkpoint: source.checkpoint, contentsHash: this.current.header.contentsHash, contexts: this.options.contexts });
+      this.alive(generation);
+      if (canonical(this.verifiedBranches.map(b => b.bundle)) === canonical(outputs)) { await this.options.mergeStore?.clear(); return; }
+      const matchesSource = sources.some(s => this.current!.root === s.frame.root && canonical(this.current!.directory.branches) === canonical(s.frame.directory.branches) && canonical(this.verifiedBranches.map(b => b.bundle)) === canonical(s.bundles.map(b => b.bundle)));
+      if (!matchesSource) throw new Error('Private merge restart history changed');
+      if (await privateHash(this.current.header) === left.checkpoint.head) {
+        this.current = right.frame;
+        for (const i of right.frame.directory.branches.flat()) this.slots[i] = right.slots[i]!;
+        this.hashes = await Promise.all(this.slots.map(s => privateBytesHash(privateDecode(s))));
+      }
+      for (let b = 0; b < layout.length; b++) for (let c = 0; c < layout[b]!.length; c++) chunks.set(layout[b]![c]!, bytes[b]!.slice(c * PRIVATE_CHUNK_BYTES, (c + 1) * PRIVATE_CHUNK_BYTES));
+      const root = privateDecode(this.current.root, 32);
+      try { for (const [i, chunk] of chunks) if (this.current.directory.initialized.includes(i) && this.hashes[i] === this.current.header.slots[i]) {
+        const uploaded = await openPrivateSlot(root, this.options.trust.vault, i, this.slots[i]!);
+        try { if (uploaded.length === chunk.length && uploaded.every((byte, n) => byte === chunk[n])) { chunk.fill(0); chunks.delete(i); } } finally { uploaded.fill(0); }
+      } } finally { root.fill(0); }
+      if (!chunks.size) throw new Error('Private merge staging has no unpublished chunks');
+      this.alive(generation); this.pending = chunks; this.pendingBranches = layout; this.merging = true;
+    } finally { for (const value of bytes) value.fill(0); if (this.pending !== chunks) for (const chunk of chunks.values()) chunk.fill(0); }
   }
   close(): void {
     this.active = false; this.generation++;

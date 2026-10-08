@@ -391,7 +391,7 @@ work:
             npm run build:rules
             npm run build -w @ai-wayfinding/core
             npm run build -w @ai-wayfinding/client
-            npm run test -w @ai-wayfinding/client -- test/stage3-private.integration.test.ts
+            npm run test -w @ai-wayfinding/client
             after=$(git diff --binary HEAD -- .)
             test "$before" = "$after"
             test -z "$(git status --porcelain)"
@@ -400,7 +400,7 @@ work:
           expect:
             exit: 0
             output_includes: "Stage 3 client-private assertions passed"
-          timeout_ms: 600000
+          timeout_ms: 1800000
   - id: integration
     task: "Prove Stage 3 negative controls and assembled regressions"
     depends_on: ["browser-private","client-private"]

@@ -55,7 +55,7 @@ export class NodePrivatePending {
     try { if (((await this.read())?.token ?? null) !== expected) throw new Error('Private staging concurrent revision'); return await action(); }
     finally { await rm(lock, { recursive: true, force: true }); }
   }
-  async write(expected: string | null, bundle: import('@ai-wayfinding/core').PrivateBundle): Promise<string> {
+  async write(expected: string | null, bundle: import('@ai-wayfinding/core').PrivateBundle | import('@ai-wayfinding/core').VaultPendingMerge): Promise<string> {
     return this.locked(expected, async () => {
       const ciphertext = await sealIdentity(canonical(bundle), [this.recipient]), temp = join(this.folder, '.' + crypto.randomUUID());
       const handle = await open(temp, 'wx', 0o600);

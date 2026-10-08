@@ -25,7 +25,10 @@ export class PrivateArtifacts {
     if (client.privateCacheRoot) {
       value.store = new NodePrivatePending(client.privateCacheRoot, authority.vault, client.session.identity, authority.session.identity.recipient);
       const saved = await value.store.read(); value.revision = saved?.token ?? null;
-      if (saved) {
+      if (saved && saved.bundle && typeof saved.bundle === 'object' && 'format' in saved.bundle && saved.bundle.format === 'private-merge-v1') {
+        // Core restored the signed-source merge before the mandatory open sync.
+        // Keep its encrypted plan until the complete branch directory is live.
+      } else if (saved) {
         const checked = await value.verify(saved.bundle);
         await value.vault.whenReady();
         const current = value.vault.branches;
@@ -46,10 +49,19 @@ export class PrivateArtifacts {
   }
   async status() {
     if (this.vault.branches.length <= 1) this.bundle();
-    if (!this.pending) await this.clearPending();
+    if (!this.pending && !this.vault.hasPending) await this.clearPending();
     return { status: this.pending || this.vault.hasPending ? 'staged' : 'committed', freshness: this.vault.freshness, version: this.vault.retainedCheckpoint?.version ?? 0, branches: this.vault.branches.length, warning: 'Server-backed encrypted vault. Saves wait for the next five-minute sync. Downloaded copies cannot be recalled. A server-only head has unverified freshness.' };
   }
-  private async clearPending() { if (this.store && this.revision) { await this.store.clear(this.revision); this.revision = null; } }
+  private async clearPending() {
+    if (this.store && this.revision) {
+      const saved = await this.store.read();
+      if (!saved) { this.revision = null; return; }
+      // Core owns a merge proposal's revision and removes it only after the
+      // complete directory is committed. Ordinary staging cannot clear it.
+      if (saved.bundle && typeof saved.bundle === 'object' && 'format' in saved.bundle && saved.bundle.format === 'private-merge-v1') return;
+      await this.store.clear(this.revision); this.revision = null;
+    }
+  }
   private async writer() {
     const live = await this.client.privateAuthority();
     if (!samePrivateContext(live.context, this.authority.context) || !privateAccess(live.context, this.authority.author, live.session, true)) throw new Error('Private write authority changed or denied; reopen');

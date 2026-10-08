@@ -237,15 +237,18 @@ describe('Stage 3 real denial and leakage matrix', () => {
       await denyTool(m.sdk, 'private_create', { type: 'document', title: 'Denied' }, 'denied');
       await denyTool(m.sdk, 'private_backup', { path: join(scratch, 'denied-backup') }, 'denied');
       expect(await readFile(join(cache, f.vaultId, 'checkpoint.age'))).toEqual(before);
+      const readStart = proxy.trace.length;
+      await command(readerState, cache, 'private', 'list');
+      expect(proxy.trace.slice(readStart).filter(t => t.path.includes('/private-vault')).map(t => [t.method, t.status])).toEqual([['GET', 200]]);
       const start = proxy.trace.length;
       await expect(command(readerState, cache, 'private', 'create', '--type', 'document', '--title', 'Denied')).rejects.toMatchObject({ stdout: '', stderr: expect.stringContaining('denied') });
-      // Server content authority forbids read-only PUTs, so the client must not
-      // bypass that guard even for a dummy commit. This proves the current
-      // transport restriction, not the binding D36 requirement of GET+PUT on
-      // every open. That requirement needs an out-of-scope authority decision.
+      // D46: read-only opens GET only; padding never grants write authority.
       expect(proxy.trace.slice(start).filter(t => t.path.includes('/private-vault')).map(t => [t.method, t.status])).toEqual([['GET', 200]]);
       // Restore guide capability then remove the agent with signed ordinary authority.
       await change(f.trip, f.owner, 'member.role', { member: f.owner.principal, role: 'read-write' });
+      const writerStart = proxy.trace.length;
+      await command(readerState, cache, 'private', 'list');
+      expect(proxy.trace.slice(writerStart).filter(t => t.path.includes('/private-vault')).map(t => [t.method, t.status])).toEqual([['GET', 200], ['PUT', 200]]);
       await change(f.trip, f.owner, 'member.remove', { member: reader.session.principal });
       await denyTool(m.sdk, 'private_show', { id: f.copy }, 'ended');
       await expect(command(readerState, cache, 'private', 'list')).rejects.toMatchObject({ stdout: '', stderr: expect.stringContaining('ended') });

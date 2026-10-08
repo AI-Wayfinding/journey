@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { readFile, access, rm } from 'node:fs/promises';
+import { join } from 'node:path';
 import { privateHash, importSigningKey, signPrivateHeader } from '@ai-wayfinding/core';
 import { localServer } from './local-server.js';
 import { agentState, cacheBytes, cli, command, denyTool, execute, privateFixture, privateMcp, privateProxy, retained, tool } from './stage3-fixtures.js';
@@ -39,6 +41,70 @@ describe('real CLI/MCP signed forks', () => {
         expect(JSON.stringify(proxy.trace)).not.toContain('CANARY');
       } finally { await m?.close(); await proxy.close(); }
     }
+  }, 240_000);
+
+  it('CLI resumes a multi-branch signed merge across repeated process exits without the fork file', async () => {
+    const f = await privateFixture(), proxy = await privateProxy(), state = await agentState(f.agentSession, proxy.origin);
+    try {
+      await command(state, f.cache, 'private', 'init');
+      const bundle = structuredClone(f.bundle);
+      // Large earlier signed versions make *both* tied branches span several slots.
+      for (let i = 0; i < 5; i++) await forkRecord(f, bundle, 'LARGE RESTART CANARY ' + String(i) + 'x'.repeat(240_000));
+      // Extend the left branch to an equal artifact version with independent signatures.
+      const left = structuredClone(f.bundle);
+      for (let i = 0; i < 5; i++) await forkRecord(f, left, 'LEFT RESTART CANARY ' + String(i) + 'y'.repeat(240_000));
+      const { sealIdentity, canonical } = await import('@ai-wayfinding/core');
+      const transfer = await forkFile(null);
+      await (await import('node:fs/promises')).writeFile(transfer, await sealIdentity(canonical(bundle), [f.agentSession.recipient]));
+      await command(state, f.cache, 'private', 'import', transfer);
+      const writer = await privateMcp(state, f.cache, true);
+      try { await tool(writer.sdk, 'private_init'); await writer.advance(300_000); await writer.advance(600_000); } finally { await writer.close(); }
+      const base = await retained(f.cache, f.vaultId, f.agentSession.identity);
+      const leftPath = await forkFile(await forkCache(f, base, left));
+      // Seed an independently verified left cache without changing the live server.
+      const { NodePrivateStore } = await import('../src/private-store.js');
+      const { openPrivateFrame, privateAgentSession, verifyPrivateContext, privateHash, importSigningKey } = await import('@ai-wayfinding/core');
+      const context = await verifyPrivateContext({ journey: f.trip.id, creator: f.trip.entries[0]!.proof.body.creator as import('@ai-wayfinding/core').Member, controls: f.trip.entries }, { now: Date.now(), currentHead: await privateHash(f.trip.entries.at(-1)!.proof) });
+      const actor = { kind: 'agent' as const, signingKey: f.agentSession.signingKey, recipient: f.agentSession.recipient };
+      const signingKey = await importSigningKey(f.agentSession.signingPrivateKey);
+      const session = await privateAgentSession(context, actor, signingKey, f.agentSession.identity, 'authenticated');
+      const leftCache = JSON.parse(await readFile(leftPath, 'utf8'));
+      const { contentIdentity } = await openPrivateFrame(base.frame, f.owner.age.identity, f.bundle.author.recipient) as { contentIdentity: string };
+      const path = await forkFile(base);
+      // A same-version independent fork cannot advance a retained cache: start a separate device cache.
+      const mergeCache = join(f.cache, 'merge-device');
+      const seeded = new NodePrivateStore(mergeCache, f.vaultId, { contentIdentity, trust: { vault: f.vaultId, author: f.bundle.author }, actor, identity: f.agentSession.identity, signingKey, contexts: [context], sessions: [session], transport: { read: async () => { throw Error('unused'); }, commit: async () => { throw Error('unused'); } } });
+      await seeded.commit(null, leftCache);
+      const credentials = await readFile(state), start = proxy.trace.length;
+      expect((await command(state, mergeCache, 'private', 'merge', path)).status).toBe('staged');
+      await rm(path); await rm(leftPath);
+      const pending = join(mergeCache, f.vaultId, 'pending.age');
+      const encrypted = await readFile(pending, 'utf8');
+      expect(encrypted).not.toContain('RESTART CANARY');
+      const { openIdentity } = await import('@ai-wayfinding/core');
+      const hostile = JSON.parse(await openIdentity(encrypted, [f.agentSession.identity]));
+      hostile.left.slots[0].ciphertext = Buffer.alloc(1_048_576).toString('base64');
+      await (await import('node:fs/promises')).writeFile(pending, await sealIdentity(canonical(hostile), [f.agentSession.recipient]));
+      const retainedBefore = await cacheBytes(mergeCache, f.vaultId), writesBefore = proxy.trace.filter(t => t.method === 'PUT').length;
+      await expect(command(state, mergeCache, 'private', 'init')).rejects.toMatchObject({ code: 1, stdout: '', stderr: expect.stringContaining('digest mismatch') });
+      expect(await cacheBytes(mergeCache, f.vaultId)).toEqual(retainedBefore);
+      expect(proxy.trace.filter(t => t.method === 'PUT')).toHaveLength(writesBefore);
+      await (await import('node:fs/promises')).writeFile(pending, encrypted);
+      // Every init is a fresh shipped CLI process and one normal open sync.
+      expect((await command(state, mergeCache, 'private', 'init')).status).toBe('staged');
+      expect((await command(state, mergeCache, 'private', 'init')).status).toBe('committed');
+      await expect(access(pending)).rejects.toMatchObject({ code: 'ENOENT' });
+      const branches = JSON.parse((await execute(process.execPath, [cli, 'private', 'branches', '--state', state, '--private-cache', mergeCache], { timeout: 90_000, maxBuffer: 12_000_000 })).stdout);
+      expect(branches).toHaveLength(2);
+      expect(branches.map((b: any[]) => b[0].copy.records.length)).toEqual([6, 6]);
+      expect(branches.map((b: any[]) => b[0].content.title.replace(/[xy]+$/, '')).sort()).toEqual(['LARGE RESTART CANARY 4', 'LEFT RESTART CANARY 4']);
+      const patches = proxy.trace.slice(start).filter(t => t.path.endsWith('/private-vault') && t.method === 'PUT');
+      expect(patches.slice(0, 3).flatMap(t => t.slots)).toHaveLength(6);
+      expect(new Set(patches.slice(0, 3).flatMap(t => t.slots)).size).toBe(6);
+      expect((await retained(mergeCache, f.vaultId, f.agentSession.identity)).checkpoint.version).toBeGreaterThan(base.checkpoint.version);
+      expect(await readFile(state)).toEqual(credentials);
+      expect(JSON.stringify(proxy.trace)).not.toContain('RESTART CANARY');
+    } finally { await proxy.close(); }
   }, 240_000);
 
   it.each(['CLI', 'MCP'] as const)('%s rejects unsigned, corrupt, stale, bad-signature/digest/predecessor forks without local/server mutation', async surface => {
