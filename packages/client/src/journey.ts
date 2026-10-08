@@ -139,9 +139,8 @@ export class JourneyClient {
           if (saved) {
             const checked = await verifyPrivateBundle(saved.bundle, { trust: { vault, author }, historical: true });
             if (!controller.branches.some(b => canonical(b.bundle.records) === canonical(checked.bundle.records))) throw new Error('Private vault has a pending proposal');
-            await pending.clear(saved.token);
           }
-          revision = await pending.write(null, value);
+          revision = await pending.write(saved?.token ?? null, value);
         },
         clear: async () => { const saved = await pending.read(); if (saved && saved.bundle && typeof saved.bundle === 'object' && 'format' in saved.bundle && saved.bundle.format === 'private-merge-v1') { await pending.clear(revision!); revision = null; } },
       };

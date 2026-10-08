@@ -75,6 +75,11 @@ describe('real CLI/MCP signed forks', () => {
       const mergeCache = join(f.cache, 'merge-device');
       const seeded = new NodePrivateStore(mergeCache, f.vaultId, { contentIdentity, trust: { vault: f.vaultId, author: f.bundle.author }, actor, identity: f.agentSession.identity, signingKey, contexts: [context], sessions: [session], transport: { read: async () => { throw Error('unused'); }, commit: async () => { throw Error('unused'); } } });
       await seeded.commit(null, leftCache);
+      // An accepted ordinary proposal may still have its encrypted pending file
+      // after a crash; replace that revision with the merge plan, never unlink it.
+      const { NodePrivatePending } = await import('../src/private-store.js');
+      const queued = new NodePrivatePending(mergeCache, f.vaultId, f.agentSession.identity, f.agentSession.recipient);
+      await queued.write(null, left);
       const credentials = await readFile(state), start = proxy.trace.length;
       expect((await command(state, mergeCache, 'private', 'merge', path)).status).toBe('staged');
       await rm(path); await rm(leftPath);
