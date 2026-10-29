@@ -1,0 +1,19 @@
+{
+  "name": "@ai-wayfinding/proxy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {"./mls": "./src/mls/index.ts"},
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --test --test-reporter=tap test/*.test.ts"
+  },
+  "dependencies": {
+    "@hpke/core": "1.9.0",
+    "ts-mls": "1.6.4"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "typescript": "5.9.3"
+  }
+}
