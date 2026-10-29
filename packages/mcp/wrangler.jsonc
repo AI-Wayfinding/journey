@@ -9,7 +9,8 @@
   "routes": [{ "pattern": "poc.wayfinding.support", "custom_domain": true }],
   "vars": {
     "AUTHKIT_ISSUER": "https://welcoming-folk-53-staging.authkit.app",
-    "MCP_RESOURCE": "https://poc.wayfinding.support/mcp"
+    "MCP_RESOURCE": "https://poc.wayfinding.support/mcp",
+    "AUTHKIT_AUTHORIZE_URL": "https://welcoming-folk-53-staging.authkit.app/oauth2/authorize"
   },
   "r2_buckets": [{ "binding": "BLOBS", "bucket_name": "wayfinding-ciphertext" }],
   "durable_objects": {
