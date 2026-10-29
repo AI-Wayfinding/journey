@@ -1,6 +1,6 @@
 import { encodeJourney, encodeProject, encodeAgentCard, encodeGrant, JOURNEY, PROJECT, decodeChoice, type JourneyNeed, type JourneyOp } from '../../rules/src/encode.ts';
 import { agentCardRule, artifactRule, grantRule, journeyRule, projectRule, taskRule, RULES, SLOTS, sameRules, sameState, scalar, cell, type Snapshot, type RulesStamp } from './rules.ts';
-import { Refused, isRelay, type Command, type ToolData } from './commands.ts';
+import { Refused, isRelay, type Command, type TaskMethod, type ToolData } from './commands.ts';
 import { Serial, type KeyValueStorage } from './storage.ts';
 import { relay, deleteArtifactBlobs, type BlobStore } from './relay.ts';
 
@@ -9,7 +9,7 @@ interface Project { id: string; name: string; purpose: string; rule: Snapshot }
 interface Agent { id: string; owner: string; card: Snapshot }
 interface Grant { id: string; need: JourneyNeed; resource: string; expiresAt: number; rule: Snapshot }
 interface Artifact { id: string; name: string; type: string; size: number; rule: Snapshot }
-interface Task { id: string; name: string; deadline: number; rule: Snapshot }
+interface Task { id: string; name: string; assignee?: string; deadline: number; createdAt: number; updatedAt: number; rule: Snapshot }
 export interface JourneyState {
   id: string; name: string; rulesHash: RulesStamp; identities: Identity[]; membership: Snapshot;
   projects: Project[]; agents: Agent[]; grants: Grant[]; artifacts: Artifact[]; tasks: Task[];
@@ -22,6 +22,7 @@ function requireChange(before: Snapshot, after: Snapshot, what: string, ignore: 
 
 /** One journey's entire record is read, stepped and atomically replaced under a serial turn. */
 export class JourneyHost {
+  private readonly watchers = new Map<ReadableStreamDefaultController<Uint8Array>, string>();
   private readonly serial = new Serial();
   private readonly storage: KeyValueStorage;
   private readonly now: () => number;
@@ -64,6 +65,13 @@ export class JourneyHost {
     if (!this.live(state, actor)) throw new Refused('Agent is no longer a live member');
     return actor;
   }
+  private taskView(state: JourneyState, task: Task): ToolData {
+    return { taskId: task.id, name: task.name, assignee: task.assignee, deadline: task.deadline,
+      creator: state.identities[scalar(task.rule, 'creator') - 1]?.id,
+      claimant: state.identities[scalar(task.rule, 'claimant') - 1]?.id,
+      status: ['none', 'open', 'claimed', 'inRound', 'done', 'expired', 'cancelled'][scalar(task.rule, 'status')],
+      roundsUsed: scalar(task.rule, 'roundsUsed'), maxRounds: scalar(task.rule, 'cap') };
+  }
   private view(state: JourneyState): ToolData {
     return {
       journeyId: state.id, name: state.name, rulesHash: state.rulesHash,
@@ -80,7 +88,7 @@ export class JourneyHost {
       agents: state.agents.map((a) => ({ agentId: a.id, owner: a.owner, signed: scalar(a.card, 'signed') === 1, read: scalar(a.card, 'mayRead') === 1, write: scalar(a.card, 'mayWrite') === 1, grant: scalar(a.card, 'mayGrant') === 1 })),
       grants: state.grants.map((g) => ({ grantId: g.id, need: g.need, resource: g.resource, expiresAt: g.expiresAt, status: ['unissued', 'live', 'revoked', 'ended'][scalar(g.rule, 'status')], usesLeft: scalar(g.rule, 'usesLeft') })),
       artifacts: state.artifacts.map((a) => ({ artifactId: a.id, name: a.name, type: a.type, size: a.size, version: scalar(a.rule, 'version'), deleted: scalar(a.rule, 'at') === 2 })),
-      tasks: state.tasks.map((t) => ({ taskId: t.id, name: t.name, deadline: t.deadline, status: ['none', 'open', 'claimed', 'inRound', 'done', 'expired', 'cancelled'][scalar(t.rule, 'status')], roundsUsed: scalar(t.rule, 'roundsUsed'), maxRounds: scalar(t.rule, 'cap') })),
+      tasks: state.tasks.map((t) => this.taskView(state, t)),
     };
   }
   /** Used by the account directory, without leaking private journeys to nonmembers. */
@@ -89,6 +97,79 @@ export class JourneyHost {
       const state = await this.load();
       if (!state || !this.has(state, this.slot(state, personId), 'read')) return undefined;
       return { journeyId: state.id, name: state.name };
+    });
+  }
+  private inboxView(state: JourneyState, personId: string): ToolData {
+    const recipients = new Set([personId, ...state.agents.filter((agent) => agent.owner === personId && this.live(state, this.slot(state, agent.id))).map((agent) => agent.id)]);
+    return { journeyId: state.id, tasks: state.tasks.filter((task) => task.assignee === undefined || recipients.has(task.assignee)).map((task) => this.taskView(state, task)) };
+  }
+  inbox(personId: string): Promise<ToolData> {
+    return this.serial.run(async () => {
+      const state = await this.load();
+      if (!state || !this.has(state, this.slot(state, personId), 'read')) throw new Refused('Inbox reading refused');
+      return this.inboxView(state, personId);
+    });
+  }
+  watchInbox(personId: string): Promise<ReadableStream<Uint8Array>> {
+    return this.serial.run(async () => {
+      const state = await this.load();
+      if (!state || !this.has(state, this.slot(state, personId), 'read')) throw new Refused('Inbox subscription refused');
+      let controller: ReadableStreamDefaultController<Uint8Array>;
+      return new ReadableStream<Uint8Array>({
+        start: (value) => { controller = value; this.watchers.set(controller, personId); controller.enqueue(new TextEncoder().encode('\n')); },
+        cancel: () => { this.watchers.delete(controller); },
+      }, { highWaterMark: 16 });
+    });
+  }
+  private async commit(state: JourneyState): Promise<void> {
+    const before = await this.load();
+    await this.storage.transaction(async (storage) => {
+      await storage.put('journey', JSON.stringify(state));
+      await this.schedule(state, storage);
+    });
+    for (const [controller, personId] of this.watchers) {
+      if (!this.has(state, this.slot(state, personId), 'read') || (controller.desiredSize ?? 0) <= 0) {
+        this.watchers.delete(controller); controller.close(); continue;
+      }
+      if (before && JSON.stringify(this.inboxView(before, personId)) === JSON.stringify(this.inboxView(state, personId))) continue;
+      controller.enqueue(new TextEncoder().encode(`${JSON.stringify({ uri: `wayfinding://journey/${state.id}/inbox` })}\n`));
+    }
+  }
+  private async schedule(state: JourneyState, storage: Pick<KeyValueStorage, 'setAlarm' | 'deleteAlarm'> = this.storage): Promise<void> {
+    const active = state.tasks.filter((task) => scalar(task.rule, 'status') >= 1 && scalar(task.rule, 'status') <= 3);
+    if (active.length) await storage.setAlarm(Math.min(...active.map((task) => task.deadline)));
+    else await storage.deleteAlarm();
+  }
+  alarm(): Promise<void> {
+    return this.serial.run(async () => {
+      const state = await this.load();
+      if (!state) return;
+      const now = this.now();
+      let changed = false;
+      for (const task of state.tasks) {
+        const next = taskRule.step(task.rule, { op: 6, actor: 0, actorIsLive: 0, deadlinePassed: +(now >= task.deadline), maxRounds: 0 });
+        if (!sameState(task.rule, next)) { task.rule = next; task.updatedAt = now; changed = true; }
+      }
+      if (changed) await this.commit(state);
+      else await this.schedule(state);
+    });
+  }
+  task(personId: string, method: TaskMethod, taskId: string): Promise<ToolData> {
+    return this.serial.run(async () => {
+      const state = await this.load();
+      if (!state || !this.has(state, this.slot(state, personId), 'read')) throw new Refused('Task access refused');
+      const task = state.tasks.find((task) => task.id === taskId);
+      if (!task) throw new Refused('Task not found');
+      if (method === 'cancel') {
+        this.apply(state, this.slot(state, personId), personId, { tool: 'task_step', input: { journeyId: state.id, taskId, action: 'cancel' } });
+        await this.commit(state);
+      }
+      if (method !== 'get') return { resultType: 'complete' };
+      const status = scalar(task.rule, 'status');
+      const result: ToolData = { resultType: 'complete', taskId, status: status === 6 ? 'cancelled' : status >= 4 ? 'completed' : 'working',
+        createdAt: new Date(task.createdAt).toISOString(), lastUpdatedAt: new Date(task.updatedAt).toISOString(), ttlMs: null, pollIntervalMs: 1000 };
+      if (status === 4 || status === 5) result.result = { content: [{ type: 'text', text: JSON.stringify(this.taskView(state, task)) }], structuredContent: this.taskView(state, task), isError: status === 5 };
+      return result;
     });
   }
   execute(personId: string, command: Command, journeyId?: string): Promise<ToolData> {
@@ -114,6 +195,10 @@ export class JourneyHost {
           const sender = command.input.actingAgent ?? personId;
           return relay(this.storage, this.blobs, sender, command);
         }
+        if (command.tool === 'agent_capabilities') {
+          return { journeyId: state.id, agentId: command.input.actingAgent,
+            capabilities: { read: this.has(state, actor, 'read'), write: this.has(state, actor, 'write'), grant: false, guide: this.has(state, actor, 'guide') } };
+        }
         if (command.tool === 'journey_read') {
           if (!this.has(state, actor, 'read')) throw new Refused('Reading journey refused');
           return this.view(state);
@@ -121,7 +206,7 @@ export class JourneyHost {
         this.apply(state, actor, personId, command);
         if (command.tool === 'artifact_delete' && this.blobs) await deleteArtifactBlobs(this.storage, this.blobs, state.id, command.input.artifactId);
       }
-      await this.storage.put('journey', JSON.stringify(state));
+      await this.commit(state);
       // Respond under the acting identity's read limit, never its owner's broader authority.
       const readerId = 'actingAgent' in command.input ? command.input.actingAgent ?? personId : personId;
       if (!this.has(state, this.slot(state, readerId), 'read')) return { journeyId: state.id, accepted: true };
@@ -239,16 +324,26 @@ export class JourneyHost {
         return;
       }
       case 'task_create': {
-        if (command.input.deadline <= this.now()) throw new Refused('Task deadline must be in the future');
+        const now = this.now();
+        if (command.input.deadline <= now) throw new Refused('Task deadline must be in the future');
+        const assignee = command.input.assignee;
+        if (assignee !== undefined && !this.live(state, this.slot(state, assignee))) throw new Refused('Task assignee is not a live member');
         const rule = taskRule.step(taskRule.init(), { op: 0, actor, actorIsLive: +this.live(state, actor), deadlinePassed: 0, maxRounds: command.input.maxRounds });
         if (scalar(rule, 'status') !== 1) throw new Refused('Task create refused');
-        state.tasks.push({ id: `task_${crypto.randomUUID()}`, name: command.input.name, deadline: command.input.deadline, rule }); return;
+        state.tasks.push({ id: `task_${state.id.slice('journey_'.length)}_${crypto.randomUUID()}`, name: command.input.name,
+          ...(assignee === undefined ? {} : { assignee }), deadline: command.input.deadline, createdAt: now, updatedAt: now, rule }); return;
       }
       case 'task_step': {
         const task = state.tasks.find((t) => t.id === command.input.taskId);
         if (!task) throw new Refused('Task not found');
+        if (command.input.action === 'claim' && task.assignee !== undefined && this.slot(state, task.assignee) !== actor) throw new Refused('Only the task assignee may claim it');
+        const deadlinePassed = +(this.now() >= task.deadline);
+        if (deadlinePassed && command.input.action !== 'expire') throw new Refused('Task change refused: deadline passed');
         task.rule = requireChange(task.rule, taskRule.step(task.rule, { op: ['create', 'claim', 'startRound', 'endRound', 'finish', 'cancel', 'expire'].indexOf(command.input.action), actor,
-          actorIsLive: +this.live(state, actor), deadlinePassed: +(this.now() >= task.deadline), maxRounds: 0 }), 'Task change'); return;
+          actorIsLive: +this.live(state, actor), deadlinePassed, maxRounds: 0 }), 'Task change');
+        // The generated expire operation also enforces the round cap outside a round.
+        task.rule = taskRule.step(task.rule, { op: 6, actor: 0, actorIsLive: 0, deadlinePassed, maxRounds: 0 });
+        task.updatedAt = this.now(); return;
       }
       default: throw new Refused('Not a journey command');
     }

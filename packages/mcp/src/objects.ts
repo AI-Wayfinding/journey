@@ -28,18 +28,30 @@ async function respond(operation: () => Promise<unknown>): Promise<Response> {
   }
 }
 
-/** Fetch-only DO adapters: no rules or writes live outside the tested hosts. */
+/** DO adapters keep rules and writes in the serial, tested host. */
 export class Journey {
   private readonly host: JourneyHost;
-  constructor(state: ObjectState, env?: Pick<ObjectBindings, 'BLOBS'>) { this.host = new JourneyHost(state.storage, Date.now, env?.BLOBS); }
+  constructor(state: ObjectState, env?: Pick<ObjectBindings, 'BLOBS'>, now: () => number = Date.now) { this.host = new JourneyHost(state.storage, now, env?.BLOBS); }
+  alarm(): Promise<void> { return this.host.alarm(); }
   async fetch(request: Request): Promise<Response> {
-    return respond(async () => {
+    try {
       if (request.method !== 'POST') throw new Refused('Internal requests must be POST');
       const body = record(await request.json());
       const personId = field(body, 'personId');
-      if (body['action'] === 'summary') return this.host.summary(personId);
-      return this.host.execute(personId, command(body), typeof body['journeyId'] === 'string' ? field(body, 'journeyId') : undefined);
-    });
+      if (body['action'] === 'watchInbox') return new Response(await this.host.watchInbox(personId), { headers: { 'content-type': 'application/x-ndjson' } });
+      return respond(async () => {
+        if (body['action'] === 'summary') return this.host.summary(personId);
+        if (body['action'] === 'inbox') return this.host.inbox(personId);
+        if (body['action'] === 'task') {
+          const method = field(body, 'method');
+          if (method !== 'get' && method !== 'update' && method !== 'cancel') throw new Refused('Invalid task method');
+          return this.host.task(personId, method, field(body, 'taskId'));
+        }
+        return this.host.execute(personId, command(body), typeof body['journeyId'] === 'string' ? field(body, 'journeyId') : undefined);
+      });
+    } catch (error) {
+      return respond(async () => { throw error; });
+    }
   }
 }
 export class Accounts {
@@ -65,6 +77,11 @@ async function call<T>(namespace: ObjectNamespace, name: string, body: Record<st
   if (!response.ok) throw new Refused(typeof envelope['error'] === 'string' ? envelope['error'] : 'Coordination operation failed');
   return envelope['value'] as T;
 }
+async function watch(namespace: ObjectNamespace, id: string, personId: string): Promise<ReadableStream<Uint8Array>> {
+  const response = await namespace.getByName(id).fetch(new Request('https://coordination.internal/', { method: 'POST', body: JSON.stringify({ action: 'watchInbox', personId }) }));
+  if (!response.ok || !response.body) throw new Refused('Inbox subscription refused');
+  return response.body;
+}
 export function durableBackend(env: ObjectBindings): Backend {
   const accounts: AccountsPort = {
     provision: (subject) => call<Account>(env.ACCOUNTS, 'accounts', { action: 'provision', subject }),
@@ -75,5 +92,8 @@ export function durableBackend(env: ObjectBindings): Backend {
   return new Backend(accounts, (id): JourneyPort => ({
     execute: (personId, command, journeyId) => call<ToolData>(env.JOURNEYS, id, { personId, journeyId, tool: command.tool, input: command.input }),
     summary: (personId) => call<ToolData | undefined>(env.JOURNEYS, id, { action: 'summary', personId }),
+    inbox: (personId) => call<ToolData>(env.JOURNEYS, id, { action: 'inbox', personId }),
+    watchInbox: (personId) => watch(env.JOURNEYS, id, personId),
+    task: (personId, method, taskId) => call<ToolData>(env.JOURNEYS, id, { action: 'task', personId, method, taskId }),
   }));
 }

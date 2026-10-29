@@ -34,6 +34,7 @@ export const inputs = {
   journey_leave: z.object(context).strict(),
   agent_add: z.object({ journeyId: id, name: text, ...limits }).strict(),
   agent_card: z.object({ journeyId: id, agentId: id, action: z.enum(['edit', 'withdraw', 'sign']), ...limits }).strict(),
+  agent_capabilities: z.object({ journeyId: id, actingAgent: id }).strict(),
   project_create: z.object({ ...context, name: text, purpose: text }).strict(),
   project_join: z.object(project).strict(),
   project_leave: z.object(project).strict(),
@@ -46,7 +47,7 @@ export const inputs = {
   artifact_version: z.object({ ...context, artifactId: id, size: nat, baseVersion: nat }).strict(),
   artifact_rename: z.object({ ...context, artifactId: id, name: text }).strict(),
   artifact_delete: z.object({ ...context, artifactId: id }).strict(),
-  task_create: z.object({ ...context, name: text, maxRounds: nat.min(1), deadline: nat }).strict(),
+  task_create: z.object({ ...context, name: text, assignee: id.optional(), maxRounds: nat.min(1), deadline: nat.max(8_640_000_000_000_000) }).strict(),
   task_step: z.object({ ...context, taskId: id, action: z.enum(['claim', 'startRound', 'endRound', 'finish', 'cancel', 'expire']) }).strict(),
   personal_group_read: z.object({}).strict(),
   personal_group_add: z.object({ name: text, kind: z.enum(['device', 'agent']) }).strict(),
@@ -76,4 +77,10 @@ export function parseCommand(tool: string, input: unknown): Command {
 }
 export class Refused extends Error {}
 export type ToolData = Record<string, unknown>;
-export interface CoordinationBackend { execute(subject: string, command: Command): Promise<ToolData> }
+export type TaskMethod = 'get' | 'update' | 'cancel';
+export interface CoordinationBackend {
+  execute(subject: string, command: Command): Promise<ToolData>;
+  inbox?(subject: string, journeyId: string): Promise<ToolData>;
+  watchInbox?(subject: string, journeyId: string): Promise<ReadableStream<Uint8Array>>;
+  task?(subject: string, method: TaskMethod, taskId: string): Promise<ToolData>;
+}

@@ -2,7 +2,7 @@
 
 This repository builds AI Wayfinding journeys. "Enclave" is the technical term used in code; "journey" is the word people see.
 
-The repository is being rebuilt from a clean start. The rules pipeline, coordination tools, MCP server, MCP Apps views, encrypted relay and local proxy exist.
+The repository is being rebuilt from a clean start. The rules pipeline, coordination tools, MCP server, MCP Apps views, encrypted relay, task inboxes and local proxy exist.
 
 ## Layout
 
@@ -29,10 +29,12 @@ The repository is being rebuilt from a clean start. The rules pipeline, coordina
   - Tests named `proxy` exercise multiple clients against the in-process Worker, scan all server storage and blobs, and test fake-AS PKCE plus private local persistence.
 - `packages/mcp`: the MCP server, a Cloudflare Worker built on the official `@modelcontextprotocol/server` (pinned exactly).
   - `src/worker.ts`: the Worker entry; reads `AUTHKIT_ISSUER`, `AUTHKIT_AUTHORIZE_URL` and `MCP_RESOURCE` from `wrangler.jsonc` vars.
-  - `src/app.ts`: OAuth metadata and `/signin`, then `/mcp` behind Host validation and `requireBearerAuth`, then `createMcpHandler` serving 2026-07-28 and 2025-era clients statelessly from one factory.
+  - `src/app.ts`: OAuth metadata and `/signin`, then `/mcp` behind Host validation and `requireBearerAuth`, then `createMcpHandler` serving 2026-07-28 and 2025-era clients statelessly from one factory. Modern inbox subscriptions stay open only while the authenticated member may read them.
   - `src/auth.ts`: verifies WorkOS AuthKit access tokens with jose (issuer, `aud` equal to the resource, RS256, `exp`). The key lookup is injectable; tests sign with a local key pair.
-  - `src/server.ts`: the per-request `McpServer` factory and its tools.
-  - `test/*.test.ts`: drive the Worker's `fetch` in-process with the official `@modelcontextprotocol/client`. Name tests so `--test-name-pattern=auth` and `--test-name-pattern=era` select the auth and protocol-era cases.
+  - `src/backend.ts`, `src/journey.ts` and `src/objects.ts`: coordination, relay and Durable Object adapters. Task creation commits the task and next deadline alarm atomically; alarms expire overdue tasks after eviction. Agent capabilities are the intersection of the live person's authority and current card, and agents never receive grant authority.
+  - `src/inbox.ts`: authenticated `wayfinding://journey/{id}/inbox` resources for assigned task polling and modern update subscriptions. Removal closes the subscription and prevents later reads.
+  - `src/server.ts`: the per-request `McpServer` factory. `tasks/get`, `tasks/update` and `tasks/cancel` require the `io.modelcontextprotocol/tasks` extension metadata on every request and return `-32021` when it is absent. MCP Apps resources and tools are registered in the same server.
+  - `test/*.test.ts`: drive the Worker's `fetch` in-process with the official `@modelcontextprotocol/client`. Name tests so `--test-name-pattern=auth`, `era`, `tasks`, `apps` and `relay` select the relevant cases.
 
 ## gdp-wired rules
 
