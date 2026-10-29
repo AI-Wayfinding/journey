@@ -1,0 +1,21 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "wayfinding-mcp",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-10-01",
+  "account_id": "16c42d94e589cc74c99aed7d51687cbc",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [{ "pattern": "poc.wayfinding.support", "custom_domain": true }],
+  "vars": {
+    "AUTHKIT_ISSUER": "https://welcoming-folk-53-staging.authkit.app",
+    "MCP_RESOURCE": "https://poc.wayfinding.support/mcp"
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "JOURNEYS", "class_name": "Journey" },
+      { "name": "ACCOUNTS", "class_name": "Accounts" }
+    ]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Journey", "Accounts"] }]
+}
