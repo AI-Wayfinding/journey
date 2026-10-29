@@ -1,5 +1,5 @@
 import { AccountsHost, type Account, type Profiles } from './accounts.ts';
-import { Refused, parseCommand, type Command, type CoordinationBackend, type ToolData } from './commands.ts';
+import { Refused, parseCommand, type Command, type CoordinationBackend, type TaskMethod, type ToolData } from './commands.ts';
 import { JourneyHost } from './journey.ts';
 import { MemoryStorage } from './storage.ts';
 
@@ -11,6 +11,9 @@ export interface AccountsPort {
 export interface JourneyPort {
   execute(personId: string, command: Command, journeyId?: string): Promise<ToolData>;
   summary(personId: string): Promise<ToolData | undefined>;
+  inbox(personId: string): Promise<ToolData>;
+  watchInbox(personId: string): Promise<ReadableStream<Uint8Array>>;
+  task(personId: string, method: TaskMethod, taskId: string): Promise<ToolData>;
 }
 
 /** Authenticated people, never caller-supplied ids, select the acting account. */
@@ -41,6 +44,20 @@ export class Backend implements CoordinationBackend {
         if (!('journeyId' in command.input)) throw new Refused('Journey id required');
         return this.journey(command.input.journeyId).execute(account.personId, command);
     }
+  }
+  async inbox(subject: string, journeyId: string): Promise<ToolData> {
+    const account = await this.accounts.provision(subject);
+    return this.journey(journeyId).inbox(account.personId);
+  }
+  async watchInbox(subject: string, journeyId: string): Promise<ReadableStream<Uint8Array>> {
+    const account = await this.accounts.provision(subject);
+    return this.journey(journeyId).watchInbox(account.personId);
+  }
+  async task(subject: string, method: TaskMethod, taskId: string): Promise<ToolData> {
+    const match = /^task_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.exec(taskId);
+    if (!match) throw new Refused('Invalid task id');
+    const account = await this.accounts.provision(subject);
+    return this.journey(`journey_${match[1]}`).task(account.personId, method, taskId);
   }
 }
 
