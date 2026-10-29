@@ -6,6 +6,10 @@ import { MemoryBackend } from '../src/backend.ts';
 import type { JourneyState } from '../src/journey.ts';
 import { RULES } from '../src/rules.ts';
 import lock from '../../rules/rules.lock.json' with { type: 'json' };
+import { AccountsHost } from '../src/accounts.ts';
+import { Backend } from '../src/backend.ts';
+import { Journey } from '../src/objects.ts';
+import { MemoryStorage } from '../src/storage.ts';
 
 const signer = await keyPair('coordination');
 type Data = Record<string, unknown>;
@@ -260,4 +264,70 @@ test('coordination: concurrent creates keep both projects and refuse mismatched 
   state.rulesHash.journey = 'different-build';
   store.data.set('journey', JSON.stringify(state));
   await f.refused(f.alice, 'project_create', { journeyId, name: 'C', purpose: 'C' });
+});
+
+test('coordination: a revoked grant cannot be revoked twice or rewritten', async (t) => {
+  const f = await fixture(t);
+  const journeyId = (await f.call(f.alice, 'journey_create', { name: 'Revoke', policy: 'open' })).journeyId as string;
+  await f.call(f.bob, 'journey_join', { journeyId });
+  const grantId = list<Grant>(await f.call(f.alice, 'grant_issue', { journeyId, grantee: f.b, need: 'read', resource: journeyId, uses: 2, expiresAt: 5000 }), 'grants')[0]!.grantId;
+  await f.call(f.alice, 'grant_revoke', { journeyId, grantId });
+  await f.refused(f.alice, 'grant_revoke', { journeyId, grantId });
+});
+
+test('coordination: an agent may leave without guide authority and loses access', async (t) => {
+  const f = await fixture(t);
+  const journeyId = (await f.call(f.alice, 'journey_create', { name: 'Agent leave', policy: 'open' })).journeyId as string;
+  await f.call(f.bob, 'journey_join', { journeyId });
+  const agentId = list<Agent>(await f.call(f.bob, 'agent_add', { journeyId, name: 'Agent', read: true, write: false, grant: false }), 'agents')[0]!.agentId;
+  const sibling = list<Agent>(await f.call(f.bob, 'agent_add', { journeyId, name: 'Sibling', read: true, write: false, grant: false }), 'agents')[1]!.agentId;
+  await f.refused(f.bob, 'journey_remove', { journeyId, actingAgent: agentId, memberId: f.a });
+  await f.call(f.bob, 'journey_remove', { journeyId, actingAgent: agentId, memberId: sibling });
+  assert.equal(list<Member>(await f.call(f.bob, 'journey_read', { journeyId }), 'members').some((m) => m.memberId === sibling), false);
+  await f.call(f.bob, 'journey_leave', { journeyId, actingAgent: agentId });
+  assert.equal(list<Member>(await f.call(f.bob, 'journey_read', { journeyId }), 'members').some((m) => m.memberId === agentId), false);
+  await f.refused(f.bob, 'journey_read', { journeyId, actingAgent: agentId });
+});
+
+test('coordination: a guide agent without read permission never receives private state from a mutation', async (t) => {
+  const f = await fixture(t);
+  const journeyId = (await f.call(f.alice, 'journey_create', { name: 'Private guide' })).journeyId as string;
+  const agentId = list<Agent>(await f.call(f.alice, 'agent_add', { journeyId, name: 'Guide agent', read: false, write: false, grant: true }), 'agents')[0]!.agentId;
+  await f.refused(f.alice, 'journey_read', { journeyId, actingAgent: agentId });
+  const changed = await f.call(f.alice, 'journey_policy', { journeyId, actingAgent: agentId, policy: 'open', defaultRole: 'read' });
+  assert.deepEqual(changed, { journeyId, accepted: true });
+  assert.equal((await f.call(f.alice, 'journey_read', { journeyId })).policy, 'open');
+});
+
+test('coordination: Durable Object adapter reloads stored rules and members after eviction', async (t) => {
+  const stores = new Map<string, MemoryStorage>();
+  const accounts = new AccountsHost(new MemoryStorage(), { async get() { return { name: 'Person', email: 'person@example.test' }; } });
+  const backend = new Backend(accounts, (id) => {
+    let store = stores.get(id);
+    if (!store) { store = new MemoryStorage(); stores.set(id, store); }
+    // Recreate the actual DO adapter on every call, as if it had been evicted.
+    const object = new Journey({ storage: store });
+    return {
+      async execute(personId, command, journeyId) {
+        const response = await object.fetch(new Request('https://internal/', { method: 'POST', body: JSON.stringify({ personId, journeyId, tool: command.tool, input: command.input }) }));
+        assert.equal(response.status, 200);
+        return (await response.json() as { value: Data }).value;
+      },
+      async summary(personId) {
+        const response = await object.fetch(new Request('https://internal/', { method: 'POST', body: JSON.stringify({ action: 'summary', personId }) }));
+        assert.equal(response.status, 200);
+        return (await response.json() as { value?: Data }).value;
+      },
+    };
+  });
+  const client = new Client({ name: 'eviction-test', version: '1.0.0' });
+  await client.connect(new StreamableHTTPClientTransport(RESOURCE, { fetch: bridge(app(signer, backend)), requestInit: { headers: { authorization: `Bearer ${await token(signer, { sub: 'eviction-user' })}` } } }));
+  t.after(() => client.close());
+  const created = await client.callTool({ name: 'journey_create', arguments: { name: 'Persistent' } });
+  assert.notEqual(created.isError, true);
+  const journeyId = (created.structuredContent as Data).journeyId as string;
+  const read = await client.callTool({ name: 'journey_read', arguments: { journeyId } });
+  assert.deepEqual(read.structuredContent, created.structuredContent);
+  const listed = await client.callTool({ name: 'journey_list', arguments: {} });
+  assert.deepEqual(listed.structuredContent, { journeys: [{ journeyId, name: 'Persistent' }] });
 });

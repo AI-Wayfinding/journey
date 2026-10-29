@@ -108,8 +108,9 @@ export class JourneyHost {
         this.apply(state, actor, personId, command);
       }
       await this.storage.put('journey', JSON.stringify(state));
-      // A person who just left must not receive the remaining private journey state.
-      if (!this.has(state, this.slot(state, personId), 'read')) return { journeyId: state.id, accepted: true };
+      // Respond under the acting identity's read limit, never its owner's broader authority.
+      const readerId = 'actingAgent' in command.input ? command.input.actingAgent ?? personId : personId;
+      if (!this.has(state, this.slot(state, readerId), 'read')) return { journeyId: state.id, accepted: true };
       return this.view(state);
     });
   }
@@ -119,11 +120,16 @@ export class JourneyHost {
     };
     const op = membershipOps[command.tool];
     if (op !== undefined) {
-      // An agent never has authority beyond its card AND its person's current role.
-      if (cell(state.membership, 'Members', actor) === 2 && !this.has(state, actor, 'guide')) throw new Refused('Agent card does not allow guide action');
       let subject = actor;
       if ('personId' in command.input) subject = this.slot(state, command.input.personId, true);
       if (command.tool === 'journey_remove') subject = this.slot(state, command.input.memberId);
+      const ownAgentRemoval = op === 'remove' && cell(state.membership, 'Members', subject) === 2
+        && cell(state.membership, 'AddedBy', subject) === cell(state.membership, 'AddedBy', actor);
+      // Leaving or removing a sibling agent needs no guide authority in the journey rule.
+      // Every guide action still intersects the agent card with its person's authority.
+      if (cell(state.membership, 'Members', actor) === 2 && op !== 'leave' && !ownAgentRemoval && !this.has(state, actor, 'guide')) {
+        throw new Refused('Agent card does not allow guide action');
+      }
       const before = state.membership;
       const next = journeyRule.step(before, encodeJourney({ op, actor, subject,
         role: 'role' in command.input ? command.input.role : command.tool === 'journey_policy' ? command.input.defaultRole : undefined,
@@ -201,7 +207,7 @@ export class JourneyHost {
           actorLive: this.live(state, actor), actorIsAgent: cell(state.membership, 'Members', actor) === 2, actorIsGuide: this.has(state, actor, 'guide'),
           grantorHolds: this.has(state, scalar(grant.rule, 'grantor'), grant.need), grantorLive: this.live(state, scalar(grant.rule, 'grantor')),
           granteeLive: this.has(state, actor, 'read'), expired: this.now() >= grant.expiresAt }));
-        if (use ? scalar(next, 'used') !== 1 : scalar(next, 'status') !== 2) throw new Refused('Grant operation refused');
+        if (use ? scalar(next, 'used') !== 1 : scalar(grant.rule, 'status') !== 1 || scalar(next, 'status') !== 2) throw new Refused('Grant operation refused');
         grant.rule = next; return;
       }
       case 'artifact_create': {
