@@ -5,11 +5,13 @@ import type { KeyValueStorage } from './storage.ts';
 export interface BlobStore {
   put(key: string, value: Uint8Array): Promise<unknown>;
   get(key: string): Promise<{ arrayBuffer(): Promise<ArrayBuffer> } | null>;
+  delete(key: string): Promise<unknown>;
 }
 export class MemoryBlobs implements BlobStore {
   readonly data = new Map<string, Uint8Array>();
   writes = 0;
   async put(key: string, value: Uint8Array): Promise<void> { this.writes++; this.data.set(key, value.slice()); }
+  async delete(key: string): Promise<void> { this.writes++; this.data.delete(key); }
   async get(key: string): Promise<{ arrayBuffer(): Promise<ArrayBuffer> } | null> {
     const value = this.data.get(key);
     return value ? { async arrayBuffer() { return new Uint8Array(value).buffer; } } : null;
@@ -29,6 +31,15 @@ export function encodeBytes(bytes: Uint8Array): string {
 interface Message { sequence: number; epoch: number; kind: 'handshake' | 'application'; sender: string; key: string; size: number }
 interface Log { sequence: number; epoch: number; messages: Message[] }
 function objectKey(parts: (string | number)[]): string { return JSON.stringify(parts); }
+
+/** Authorization is the host's responsibility; includes every successfully stored version. */
+export async function deleteArtifactBlobs(storage: KeyValueStorage, blobs: BlobStore, groupId: string, artifactId: string): Promise<void> {
+  const indexKey = objectKey(['artifactVersions', groupId, artifactId]);
+  const raw = await storage.get(indexKey);
+  const versions: number[] = typeof raw === 'string' ? JSON.parse(raw) : [];
+  for (const version of versions) await blobs.delete(objectKey(['artifact', groupId, artifactId, version]));
+  await storage.put(indexKey, '[]');
+}
 
 /** Called inside the host's serialized authorization turn, never before authorization. */
 export async function relay(storage: KeyValueStorage, blobs: BlobStore | undefined, sender: string, command: RelayCommand): Promise<ToolData> {
@@ -64,6 +75,10 @@ export async function relay(storage: KeyValueStorage, blobs: BlobStore | undefin
     }
     return { messages, cursor };
   }
+  if (command.tool === 'artifact_blob_delete') {
+    await deleteArtifactBlobs(storage, blobs, input.groupId, command.input.artifactId);
+    return { deleted: true };
+  }
   const { artifactId, version } = command.input;
   const key = objectKey(['artifact', input.groupId, artifactId, version]);
   const existing = await blobs.get(key);
@@ -73,6 +88,11 @@ export async function relay(storage: KeyValueStorage, blobs: BlobStore | undefin
   }
   if (existing) throw new Refused('Artifact ciphertext version already exists');
   const bytes = decodeBytes(command.input.data, 10 * 1024 * 1024);
+  const indexKey = objectKey(['artifactVersions', input.groupId, artifactId]);
+  const raw = await storage.get(indexKey);
+  const versions: number[] = typeof raw === 'string' ? JSON.parse(raw) : [];
+  if (!versions.includes(version)) versions.push(version);
   await blobs.put(key, bytes);
+  await storage.put(indexKey, JSON.stringify(versions));
   return { stored: true };
 }

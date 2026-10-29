@@ -2,7 +2,7 @@ import { encodeJourney, encodeProject, encodeAgentCard, encodeGrant, JOURNEY, PR
 import { agentCardRule, artifactRule, grantRule, journeyRule, projectRule, taskRule, RULES, SLOTS, sameRules, sameState, scalar, cell, type Snapshot, type RulesStamp } from './rules.ts';
 import { Refused, isRelay, type Command, type ToolData } from './commands.ts';
 import { Serial, type KeyValueStorage } from './storage.ts';
-import { relay, type BlobStore } from './relay.ts';
+import { relay, deleteArtifactBlobs, type BlobStore } from './relay.ts';
 
 interface Identity { id: string; name: string }
 interface Project { id: string; name: string; purpose: string; rule: Snapshot }
@@ -106,10 +106,10 @@ export class JourneyHost {
         if (isRelay(command)) {
           if (command.input.groupId !== state.id || command.input.memberId !== undefined) throw new Refused('Invalid journey relay identity');
           if (!this.has(state, actor, 'read')) throw new Refused('A live readable member is required for relay');
-          if (command.tool === 'artifact_blob_put' || command.tool === 'artifact_blob_get') {
+          if (command.tool === 'artifact_blob_put' || command.tool === 'artifact_blob_get' || command.tool === 'artifact_blob_delete') {
             const artifact = state.artifacts.find(a => a.id === command.input.artifactId);
-            if (!artifact || scalar(artifact.rule, 'at') !== 1 || command.input.version > scalar(artifact.rule, 'version')) throw new Refused('Live artifact version required');
-            if (command.tool === 'artifact_blob_put' && !this.has(state, actor, 'write')) throw new Refused('Artifact ciphertext write refused');
+            if (!artifact || scalar(artifact.rule, 'at') !== 1 || ('version' in command.input && command.input.version > scalar(artifact.rule, 'version'))) throw new Refused('Live artifact version required');
+            if (command.tool !== 'artifact_blob_get' && !this.has(state, actor, 'write')) throw new Refused('Artifact ciphertext write refused');
           }
           const sender = command.input.actingAgent ?? personId;
           return relay(this.storage, this.blobs, sender, command);
@@ -119,6 +119,7 @@ export class JourneyHost {
           return this.view(state);
         }
         this.apply(state, actor, personId, command);
+        if (command.tool === 'artifact_delete' && this.blobs) await deleteArtifactBlobs(this.storage, this.blobs, state.id, command.input.artifactId);
       }
       await this.storage.put('journey', JSON.stringify(state));
       // Respond under the acting identity's read limit, never its owner's broader authority.

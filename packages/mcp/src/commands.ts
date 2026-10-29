@@ -57,12 +57,13 @@ export const inputs = {
   mls_message_fetch: z.object({ ...relayContext, since: nat.default(0), limit: nat.min(1).max(100).default(100) }).strict(),
   artifact_blob_put: z.object({ ...relayContext, artifactId: id, version: nat.min(1), data: opaque(10 * 1024 * 1024) }).strict(),
   artifact_blob_get: z.object({ ...relayContext, artifactId: id, version: nat.min(1) }).strict(),
+  artifact_blob_delete: z.object({ ...relayContext, artifactId: id }).strict(),
 } as const;
 
-export type RelayCommand = Extract<Command, { tool: 'mls_message_post' | 'mls_message_fetch' | 'artifact_blob_put' | 'artifact_blob_get' }>;
+export type RelayCommand = Extract<Command, { tool: 'mls_message_post' | 'mls_message_fetch' | 'artifact_blob_put' | 'artifact_blob_get' | 'artifact_blob_delete' }>;
 export type KeyPackageCommand = Extract<Command, { tool: 'mls_key_package_publish' | 'mls_key_package_fetch' }>;
 export function isRelay(command: Command): command is RelayCommand {
-  return ['mls_message_post', 'mls_message_fetch', 'artifact_blob_put', 'artifact_blob_get'].includes(command.tool);
+  return ['mls_message_post', 'mls_message_fetch', 'artifact_blob_put', 'artifact_blob_get', 'artifact_blob_delete'].includes(command.tool);
 }
 export type ToolName = keyof typeof inputs;
 export type Command = { [K in ToolName]: { tool: K; input: z.output<(typeof inputs)[K]> } }[ToolName];

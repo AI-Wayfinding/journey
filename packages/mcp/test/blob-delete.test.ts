@@ -1,0 +1,34 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { MemoryBackend } from '../src/backend.ts';
+import { parseCommand } from '../src/commands.ts';
+
+test('relay: authorized blob deletion removes all versions, not neighboring artifacts or groups', async () => {
+  const b = new MemoryBackend({ async get(s) { return {name:s,email:`${s}@example.test`}; } });
+  const call = (s:string,n:string,input:Record<string,unknown>={}) => b.execute(s,parseCommand(n,input));
+  const a = await call('alice','account_read'), bob = await call('bob','account_read');
+  const groupId = (await call('alice','journey_create',{name:'Delete',policy:'open'})).journeyId as string;
+  await call('bob','journey_join',{journeyId:groupId});
+  const view = await call('alice','artifact_create',{journeyId:groupId,name:'A',type:'text',size:1});
+  const artifactId = (view.artifacts as {artifactId:string}[])[0]!.artifactId;
+  await call('alice','artifact_blob_put',{groupId,artifactId,version:1,data:'AQ=='});
+  await call('alice','artifact_version',{journeyId:groupId,artifactId,baseVersion:1,size:2});
+  await call('alice','artifact_blob_put',{groupId,artifactId,version:2,data:'Ag=='});
+  const personal = a.personalGroupId as string;
+  await call('alice','artifact_blob_put',{groupId:personal,artifactId,version:1,data:'Aw=='});
+  const before = b.snapshot();
+  await assert.rejects(call('bob','artifact_blob_delete',{groupId,artifactId}), /write refused/);
+  await assert.rejects(call('bob','artifact_blob_delete',{groupId:personal,artifactId}), /owner/);
+  assert.equal(b.snapshot(),before);
+  await call('alice','artifact_blob_delete',{groupId,artifactId});
+  assert.equal(b.blobs.data.size,1);
+  await assert.rejects(call('alice','artifact_blob_get',{groupId,artifactId,version:1}), /not found/);
+  await assert.rejects(call('alice','artifact_blob_get',{groupId,artifactId,version:2}), /not found/);
+  await call('alice','artifact_blob_put',{groupId,artifactId,version:1,data:'BA=='});
+  await call('alice','artifact_delete',{journeyId:groupId,artifactId});
+  assert.equal(b.blobs.data.size,1,'metadata deletion physically removes ciphertext');
+  await call('alice','artifact_blob_delete',{groupId:personal,artifactId});
+  assert.equal(b.blobs.data.size,0);
+  await call('alice','journey_remove',{journeyId:groupId,memberId:bob.personId});
+  await assert.rejects(call('bob','artifact_blob_delete',{groupId,artifactId}), /live readable/);
+});
