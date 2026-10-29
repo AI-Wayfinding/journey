@@ -44,3 +44,16 @@ test('account profile lookup with a configured key still validates upstream resp
 });
 
 // This covers credential configuration, not WorkOS availability or deployed bindings.
+
+test('account profile lookup calls the default fetch without a foreign this (workerd Illegal invocation)', async (t) => {
+  const original = globalThis.fetch;
+  t.after(() => { globalThis.fetch = original; });
+  // workerd rejects fetch invoked with a `this` other than the global scope; emulate that check.
+  globalThis.fetch = async function (this: unknown, input: string | URL | Request) {
+    if (this !== undefined && this !== globalThis) throw new TypeError('Illegal invocation');
+    assert.match(String(input), /user_management\/users\/user_synthetic$/);
+    return Response.json({ id: 'user_synthetic', email: 'synthetic@test.wayfinding.support' });
+  } as typeof fetch;
+  const profile = await new WorkOSProfiles('sk_test_synthetic').get('user_synthetic');
+  assert.equal(profile.email, 'synthetic@test.wayfinding.support');
+});

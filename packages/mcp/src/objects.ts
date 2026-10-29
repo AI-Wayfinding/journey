@@ -24,6 +24,8 @@ async function respond(operation: () => Promise<unknown>): Promise<Response> {
   try { return Response.json({ value: await operation() }); }
   catch (error) {
     if (error instanceof Refused) return Response.json({ error: error.message }, { status: 409 });
+    // Log the internal cause for operators; callers only see a generic message.
+    console.error('coordination storage operation failed', error instanceof Error ? `${error.name}: ${error.message}` : String(error));
     return Response.json({ error: 'Coordination storage operation failed' }, { status: 500 });
   }
 }

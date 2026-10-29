@@ -112,7 +112,8 @@ export class AccountsHost {
 export class WorkOSProfiles implements Profiles {
   private readonly apiKey: string | undefined;
   private readonly send: typeof fetch;
-  constructor(apiKey: string | undefined, send: typeof fetch = fetch) { this.apiKey = apiKey; this.send = send; }
+  // Bind the default: workerd throws "Illegal invocation" when fetch runs with another `this`.
+  constructor(apiKey: string | undefined, send: typeof fetch = (input, init) => fetch(input, init)) { this.apiKey = apiKey; this.send = send; }
   async get(subject: string): Promise<Profile> {
     if (typeof this.apiKey !== 'string' || this.apiKey.trim().length === 0) {
       throw new Refused('Server configuration error: WORKOS_API_KEY is required for account profiles');
