@@ -3,11 +3,12 @@ import { Backend, type AccountsPort, type JourneyPort } from './backend.ts';
 import { Refused, parseCommand, type Command, type ToolData } from './commands.ts';
 import { JourneyHost } from './journey.ts';
 import type { KeyValueStorage } from './storage.ts';
+import type { BlobStore } from './relay.ts';
 
 interface ObjectState { storage: KeyValueStorage }
 interface Stub { fetch(request: Request): Promise<Response> }
 export interface ObjectNamespace { getByName(name: string): Stub }
-export interface ObjectBindings { ACCOUNTS: ObjectNamespace; JOURNEYS: ObjectNamespace; WORKOS_API_KEY: string }
+export interface ObjectBindings { ACCOUNTS: ObjectNamespace; JOURNEYS: ObjectNamespace; WORKOS_API_KEY: string; BLOBS: BlobStore }
 
 function record(value: unknown): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Refused('Invalid internal request');
@@ -30,7 +31,7 @@ async function respond(operation: () => Promise<unknown>): Promise<Response> {
 /** Fetch-only DO adapters: no rules or writes live outside the tested hosts. */
 export class Journey {
   private readonly host: JourneyHost;
-  constructor(state: ObjectState) { this.host = new JourneyHost(state.storage); }
+  constructor(state: ObjectState, env?: Pick<ObjectBindings, 'BLOBS'>) { this.host = new JourneyHost(state.storage, Date.now, env?.BLOBS); }
   async fetch(request: Request): Promise<Response> {
     return respond(async () => {
       if (request.method !== 'POST') throw new Refused('Internal requests must be POST');
@@ -43,12 +44,13 @@ export class Journey {
 }
 export class Accounts {
   private readonly host: AccountsHost;
-  constructor(state: ObjectState, env: Pick<ObjectBindings, 'WORKOS_API_KEY'>) { this.host = new AccountsHost(state.storage, new WorkOSProfiles(env.WORKOS_API_KEY)); }
+  constructor(state: ObjectState, env: Pick<ObjectBindings, 'WORKOS_API_KEY'> & Partial<Pick<ObjectBindings, 'BLOBS'>>) { this.host = new AccountsHost(state.storage, new WorkOSProfiles(env.WORKOS_API_KEY), env.BLOBS); }
   async fetch(request: Request): Promise<Response> {
     return respond(async () => {
       if (request.method !== 'POST') throw new Refused('Internal requests must be POST');
       const body = record(await request.json());
       if (body['action'] === 'provision') return this.host.provision(field(body, 'subject'));
+      if (body['action'] === 'lookup') return this.host.lookup(field(body, 'subject'));
       if (body['action'] === 'directory') return this.host.directory(typeof body['add'] === 'string' ? field(body, 'add') : undefined);
       if (body['action'] === 'group') return this.host.group(field(body, 'personId'), command(body));
       throw new Refused('Unknown accounts operation');
@@ -66,6 +68,7 @@ async function call<T>(namespace: ObjectNamespace, name: string, body: Record<st
 export function durableBackend(env: ObjectBindings): Backend {
   const accounts: AccountsPort = {
     provision: (subject) => call<Account>(env.ACCOUNTS, 'accounts', { action: 'provision', subject }),
+    lookup: (subject) => call<Account | undefined>(env.ACCOUNTS, 'accounts', { action: 'lookup', subject }),
     directory: (add) => call<string[]>(env.ACCOUNTS, 'accounts', { action: 'directory', add }),
     group: (personId, command) => call<ToolData>(env.ACCOUNTS, 'accounts', { action: 'group', personId, tool: command.tool, input: command.input }),
   };

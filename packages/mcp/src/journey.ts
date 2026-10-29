@@ -1,7 +1,8 @@
 import { encodeJourney, encodeProject, encodeAgentCard, encodeGrant, JOURNEY, PROJECT, decodeChoice, type JourneyNeed, type JourneyOp } from '../../rules/src/encode.ts';
 import { agentCardRule, artifactRule, grantRule, journeyRule, projectRule, taskRule, RULES, SLOTS, sameRules, sameState, scalar, cell, type Snapshot, type RulesStamp } from './rules.ts';
-import { Refused, type Command, type ToolData } from './commands.ts';
+import { Refused, isRelay, type Command, type ToolData } from './commands.ts';
 import { Serial, type KeyValueStorage } from './storage.ts';
+import { relay, type BlobStore } from './relay.ts';
 
 interface Identity { id: string; name: string }
 interface Project { id: string; name: string; purpose: string; rule: Snapshot }
@@ -24,7 +25,8 @@ export class JourneyHost {
   private readonly serial = new Serial();
   private readonly storage: KeyValueStorage;
   private readonly now: () => number;
-  constructor(storage: KeyValueStorage, now: () => number = Date.now) { this.storage = storage; this.now = now; }
+  private readonly blobs: BlobStore | undefined;
+  constructor(storage: KeyValueStorage, now: () => number = Date.now, blobs?: BlobStore) { this.storage = storage; this.now = now; this.blobs = blobs; }
   private async load(): Promise<JourneyState | undefined> {
     const raw = await this.storage.get('journey');
     if (raw === undefined) return undefined;
@@ -101,6 +103,17 @@ export class JourneyHost {
       } else {
         if (!state) throw new Refused('Journey not found');
         const actor = this.actor(state, personId, command);
+        if (isRelay(command)) {
+          if (command.input.groupId !== state.id || command.input.memberId !== undefined) throw new Refused('Invalid journey relay identity');
+          if (!this.has(state, actor, 'read')) throw new Refused('A live readable member is required for relay');
+          if (command.tool === 'artifact_blob_put' || command.tool === 'artifact_blob_get') {
+            const artifact = state.artifacts.find(a => a.id === command.input.artifactId);
+            if (!artifact || scalar(artifact.rule, 'at') !== 1 || command.input.version > scalar(artifact.rule, 'version')) throw new Refused('Live artifact version required');
+            if (command.tool === 'artifact_blob_put' && !this.has(state, actor, 'write')) throw new Refused('Artifact ciphertext write refused');
+          }
+          const sender = command.input.actingAgent ?? personId;
+          return relay(this.storage, this.blobs, sender, command);
+        }
         if (command.tool === 'journey_read') {
           if (!this.has(state, actor, 'read')) throw new Refused('Reading journey refused');
           return this.view(state);

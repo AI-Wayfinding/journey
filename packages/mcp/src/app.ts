@@ -65,7 +65,8 @@ export function createApp(options: AppOptions): { fetch(request: Request): Promi
     expectedResource: options.resource,
     resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(options.resource),
   });
-  const handler = createMcpHandler((ctx) => buildServer(ctx, options.backend), { legacy: 'stateless' });
+  // 10 MiB ciphertext expands to ~14 MiB base64, plus the JSON-RPC envelope.
+  const handler = createMcpHandler((ctx) => buildServer(ctx, options.backend), { legacy: 'stateless', maxRequestBodySize: 15 * 1024 * 1024 });
 
   return {
     async fetch(request: Request): Promise<Response> {

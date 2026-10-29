@@ -21,7 +21,7 @@ export function buildServer(ctx: Parameters<McpServerFactory>[0], backend?: Coor
   for (const name of TOOL_NAMES) {
     const inputSchema: z.ZodObject<z.ZodRawShape> = inputs[name];
     server.registerTool(name, {
-      description: `Wayfinding coordination: ${name.replaceAll('_', ' ')}. Artifact operations store metadata only.`,
+      description: `Wayfinding: ${name.replaceAll('_', ' ')}. Relay data is opaque base64; artifact metadata tools never accept plaintext content. Personal group IDs are personal_<personId>.`,
       inputSchema,
     }, async (args: Record<string, unknown>) => {
       try {
