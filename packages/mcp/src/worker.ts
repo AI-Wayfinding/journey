@@ -1,34 +1,25 @@
 import { localhostAllowedHostnames } from '@modelcontextprotocol/server';
 import { createVerifier } from './auth.ts';
 import { createApp } from './app.ts';
+import { durableBackend, type ObjectBindings } from './objects.ts';
+export { Journey, Accounts } from './objects.ts';
 
-/** Bindings from `wrangler.jsonc`. */
-export interface Env {
+export interface Env extends ObjectBindings {
   AUTHKIT_ISSUER: string;
   MCP_RESOURCE: string;
 }
 
-let cached: { key: string; app: ReturnType<typeof createApp> } | undefined;
-
-/** One app per isolate and configuration, so the remote JWKS cache survives between requests. */
+let cached: { env: Env; app: ReturnType<typeof createApp> } | undefined;
 function appFor(env: Env): ReturnType<typeof createApp> {
-  const key = `${env.AUTHKIT_ISSUER} ${env.MCP_RESOURCE}`;
-  if (cached?.key !== key) {
+  if (cached?.env !== env) {
     const resource = new URL(env.MCP_RESOURCE);
-    const app = createApp({
-      verifier: createVerifier({ issuer: env.AUTHKIT_ISSUER, resource }),
-      resource,
-      issuer: env.AUTHKIT_ISSUER,
-      // The public hostname, plus localhost for `wrangler dev`.
-      allowedHosts: [resource.hostname, ...localhostAllowedHostnames()],
-    });
-    cached = { key, app };
+    cached = { env, app: createApp({
+      verifier: createVerifier({ issuer: env.AUTHKIT_ISSUER, resource }), resource, issuer: env.AUTHKIT_ISSUER,
+      allowedHosts: [resource.hostname, ...localhostAllowedHostnames()], backend: durableBackend(env),
+    }) };
   }
   return cached.app;
 }
-
 export default {
-  fetch(request: Request, env: Env): Promise<Response> {
-    return appFor(env).fetch(request);
-  },
+  fetch(request: Request, env: Env): Promise<Response> { return appFor(env).fetch(request); },
 };
