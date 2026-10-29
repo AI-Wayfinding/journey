@@ -70,6 +70,8 @@ cd packages/mcp && npx wrangler deploy --dry-run --outdir /tmp/wayfinding-mcp-dr
 
 `npm run deploy -w @ai-wayfinding/mcp` deploys to Cloudflare; only the dispatching session deploys.
 
+Before deploying the MCP Worker, configure the `WORKOS_API_KEY` secret with a WorkOS User Management API key from the same environment as `AUTHKIT_ISSUER`. For the PoC, use Staging only. `Accounts` needs this server-side key to provision profiles; client OAuth credentials do not replace it. Supply it through Wrangler's hidden prompt (`cd packages/mcp && npx wrangler secret put WORKOS_API_KEY`), never a committed variable or command-line value. `npx wrangler secret list` checks names only. A missing or blank key must fail account provisioning before any profile request or account write. A secret update can publish a Worker version; the no-deploy rule also excludes secret changes.
+
 CI runs `npm ci`, `npm run check:rules`, `npm run typecheck` and `npm test` on Node 22.
 
 ## Done

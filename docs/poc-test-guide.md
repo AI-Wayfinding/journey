@@ -6,13 +6,15 @@ Wayfinding gives a team and its agents a shared journey: membership, tasks, arti
 
 ## Live check: 2026-10-29
 
-The live test is **blocked**, not passed. Two verified synthetic users were created in Staging. A completed password sign-in, consent and the loopback callback. The proxy then failed during account setup:
+The live test is **blocked**, not passed. On 2026-10-29 at 19:44 UTC, the saved synthetic user A completed password sign-in, consent and the loopback callback. The proxy then failed during account setup:
 
 ```text
 Remote account_read refused: [{"type":"text","text":"Coordination storage operation failed"}]
 ```
 
-The server emits this generic error at `packages/mcp/src/objects.ts:27`. It reaches the proxy at `packages/proxy/src/proxy.ts:183` during startup at `packages/proxy/src/cli.ts:39`. Account provisioning in `packages/mcp/src/accounts.ts:28-40` needs diagnosis; the response does not reveal the underlying cause. B's sign-in and the collaboration walkthrough below were not reached. No runtime code was changed or deployed.
+The server emits this generic error at `packages/mcp/src/objects.ts:27`. It reaches the proxy at `packages/proxy/src/proxy.ts:183` during startup at `packages/proxy/src/cli.ts:39`. `wrangler secret list` confirmed the `WORKOS_API_KEY` secret name before this retry; its value was not inspected. The remaining failure in the account provisioning path (`packages/mcp/src/accounts.ts:28-40`) needs Worker-side diagnosis. The generic response does not establish the cause. B's sign-in and all collaboration calls below were not reached. Both test browser sessions were closed and no proxy remained alive.
+
+The source now rejects a missing, empty or blank `WORKOS_API_KEY` before contacting WorkOS, with `Server configuration error: WORKOS_API_KEY is required for account profiles`. This diagnostic change needs deployment; nothing was deployed in this run. It is not evidence that the live blocker is fixed.
 
 ## Prepare
 
@@ -22,6 +24,10 @@ The server emits this generic error at `packages/mcp/src/objects.ts:27`. It reac
 - Keep passwords out of chat, shell history and Git. An operator creating accounts needs the Staging API key; MCP users do not.
 
 The current endpoint is `https://poc.wayfinding.support/mcp`. Its sign-in issuer is `https://welcoming-folk-53-staging.authkit.app`.
+
+### Server setup (deployment operator only)
+
+The Worker needs a **`WORKOS_API_KEY` secret** for account profile provisioning. It must be a Staging User Management key matching the Staging issuer, not a client token. Set it through Wrangler's hidden prompt from `packages/mcp` with `npx wrangler secret put WORKOS_API_KEY`. Never put its value in `wrangler.jsonc`, Git or a command argument. `npx wrangler secret list` shows names only. Changing a secret can publish a Worker version, so do not run the setup command during a no-deploy smoke test. An MCP client user needs no API key.
 
 ## Connect the local proxy
 

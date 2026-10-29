@@ -110,10 +110,13 @@ export class AccountsHost {
 
 /** Profile values come only from the authenticated WorkOS management API. */
 export class WorkOSProfiles implements Profiles {
-  private readonly apiKey: string;
+  private readonly apiKey: string | undefined;
   private readonly send: typeof fetch;
-  constructor(apiKey: string, send: typeof fetch = fetch) { this.apiKey = apiKey; this.send = send; }
+  constructor(apiKey: string | undefined, send: typeof fetch = fetch) { this.apiKey = apiKey; this.send = send; }
   async get(subject: string): Promise<Profile> {
+    if (typeof this.apiKey !== 'string' || this.apiKey.trim().length === 0) {
+      throw new Refused('Server configuration error: WORKOS_API_KEY is required for account profiles');
+    }
     const response = await this.send(`https://api.workos.com/user_management/users/${encodeURIComponent(subject)}`, {
       headers: { authorization: `Bearer ${this.apiKey}` }, signal: AbortSignal.timeout(10_000),
     });
