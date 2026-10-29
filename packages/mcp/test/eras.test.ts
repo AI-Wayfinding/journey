@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { app, bridge, keyPair, RESOURCE, token } from './helpers.ts';
+import { TOOL_NAMES } from '../src/commands.ts';
 
 const authkit = await keyPair('authkit-key');
 const send = bridge(app(authkit));
@@ -19,7 +20,7 @@ async function listAndCall(client: Client, sub: string, era: 'legacy' | 'modern'
   const { tools } = await client.listTools();
   assert.deepEqual(
     tools.map((t) => t.name),
-    ['whoami'],
+    ['whoami', ...TOOL_NAMES],
   );
   const result = await client.callTool({ name: 'whoami', arguments: {} });
   assert.equal(result.isError, undefined);

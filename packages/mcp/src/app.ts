@@ -8,6 +8,7 @@ import {
   type OAuthTokenVerifier,
 } from '@modelcontextprotocol/server';
 import { buildServer } from './server.ts';
+import type { CoordinationBackend } from './commands.ts';
 
 /** Inputs for {@link createApp}. Everything the Worker reads from its environment is passed in here. */
 export interface AppOptions {
@@ -19,6 +20,7 @@ export interface AppOptions {
   issuer: string;
   /** Hostnames accepted in the `Host` header of `/mcp` requests. */
   allowedHosts: string[];
+  backend?: CoordinationBackend;
 }
 
 /**
@@ -58,12 +60,12 @@ export function createApp(options: AppOptions): { fetch(request: Request): Promi
     resourceServerUrl: options.resource,
     resourceName: 'AI Wayfinding',
   };
-  const gate = requireBearerAuth({
+  const authenticate = requireBearerAuth({
     verifier: options.verifier,
     expectedResource: options.resource,
     resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(options.resource),
   });
-  const handler = createMcpHandler(buildServer, { legacy: 'stateless' });
+  const handler = createMcpHandler((ctx) => buildServer(ctx, options.backend), { legacy: 'stateless' });
 
   return {
     async fetch(request: Request): Promise<Response> {
@@ -77,7 +79,7 @@ export function createApp(options: AppOptions): { fetch(request: Request): Promi
       const rejected = hostHeaderValidationResponse(request, options.allowedHosts);
       if (rejected !== undefined) return rejected;
 
-      const auth = await gate(request);
+      const auth = await authenticate(request);
       if (auth instanceof Response) return auth;
       return handler.fetch(request, { authInfo: auth });
     },

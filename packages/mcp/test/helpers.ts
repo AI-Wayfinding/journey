@@ -1,6 +1,7 @@
 import { exportJWK, generateKeyPair, createLocalJWKSet, SignJWT, type JWTPayload } from 'jose';
 import { createVerifier } from '../src/auth.ts';
 import { createApp } from '../src/app.ts';
+import type { CoordinationBackend } from '../src/commands.ts';
 
 export const ISSUER = 'https://welcoming-folk-53-staging.authkit.app';
 export const RESOURCE = new URL('https://poc.wayfinding.support/mcp');
@@ -32,12 +33,13 @@ export async function token(signer: Signer, claims: JWTPayload = {}, kid = signe
 }
 
 /** The Worker app trusting only `signer`'s key, as the deployed Worker trusts only AuthKit's JWKS. */
-export function app(signer: Signer) {
+export function app(signer: Signer, backend?: CoordinationBackend) {
   return createApp({
     verifier: createVerifier({ issuer: ISSUER, resource: RESOURCE, getKey: createLocalJWKSet(signer.jwks) }),
     resource: RESOURCE,
     issuer: ISSUER,
     allowedHosts: ['poc.wayfinding.support', 'localhost'],
+    backend,
   });
 }
 
