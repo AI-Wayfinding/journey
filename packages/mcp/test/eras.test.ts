@@ -20,7 +20,10 @@ async function listAndCall(client: Client, sub: string, era: 'legacy' | 'modern'
   const { tools } = await client.listTools();
   assert.deepEqual(
     tools.map((t) => t.name),
-    ['whoami', ...TOOL_NAMES],
+    ['whoami', ...TOOL_NAMES,
+      'journey_view', 'project_view', 'artifact_list_view',
+      'apps_journey_refresh', 'apps_project_refresh', 'apps_artifacts_refresh',
+      'apps_journey_policy', 'apps_journey_invite', 'apps_project_update', 'apps_artifact_rename'],
   );
   const result = await client.callTool({ name: 'whoami', arguments: {} });
   assert.equal(result.isError, undefined);

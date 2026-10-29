@@ -21,6 +21,8 @@ export interface AppOptions {
   /** Hostnames accepted in the `Host` header of `/mcp` requests. */
   allowedHosts: string[];
   backend?: CoordinationBackend;
+  /** AuthKit hosted authorization/sign-in URL. Never taken from request input. */
+  signinUrl?: string;
 }
 
 /**
@@ -72,6 +74,12 @@ export function createApp(options: AppOptions): { fetch(request: Request): Promi
       const document = oauthMetadataResponse(request, metadata);
       if (document !== undefined) return document;
 
+      if (new URL(request.url).pathname === '/signin') {
+        if (request.method !== 'GET') return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET' } });
+        const destination = new URL(options.signinUrl ?? metadata.oauthMetadata.authorization_endpoint!);
+        if (destination.protocol !== 'https:') return new Response('Sign-in is not configured', { status: 503 });
+        return new Response(null, { status: 302, headers: { Location: destination.href, 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' } });
+      }
       if (new URL(request.url).pathname !== options.resource.pathname) {
         return new Response('Not found', { status: 404 });
       }

@@ -1,6 +1,7 @@
 import { McpServer, type McpServerFactory } from '@modelcontextprotocol/server';
 import * as z from 'zod';
 import { inputs, TOOL_NAMES, parseCommand, Refused, type CoordinationBackend } from './commands.ts';
+import { registerApps } from './apps.ts';
 
 function subjectOf(extra: Record<string, unknown> | undefined): string | undefined {
   const sub = extra?.['sub'];
@@ -36,5 +37,6 @@ export function buildServer(ctx: Parameters<McpServerFactory>[0], backend?: Coor
       }
     });
   }
+  registerApps(server, subjectOf(ctx.authInfo?.extra), backend);
   return server;
 }
