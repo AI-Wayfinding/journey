@@ -2,7 +2,7 @@
 
 This repository builds AI Wayfinding journeys. "Enclave" is the technical term used in code; "journey" is the word people see.
 
-The repository is being rebuilt from a clean start. The rules pipeline and the MCP server shell exist; the coordination tools, the local proxy and the MCP Apps views arrive in later stages.
+The rules pipeline, coordination tools, encrypted relay and local proxy exist. MCP Apps views arrive in later stages.
 
 ## Layout
 
@@ -12,6 +12,13 @@ The repository is being rebuilt from a clean start. The rules pipeline and the M
   - `rules.lock.json`: the gdp-wired version and integrity, and the SHA-256 of every generated file.
   - `scripts/build.ts` writes the generated files and the lock; `scripts/check.ts` regenerates them in memory and fails on any byte difference.
   - `test/*.test.ts`: `node:test` suites run with Node's built-in TypeScript type stripping.
+- `packages/proxy`: the local stdio MCP server. Run `node packages/proxy/src/cli.ts --store DIR` from the root; default store is `~/.wayfinding`, loopback port is 8717 (`--port` overrides).
+  - `src/mls`: replaceable `MlsGroup` implementation, ts-mls 1.6.4, unaudited. Synthetic data only.
+  - `src/proxy.ts`: ordered MLS synchronization, per-artifact keys, personal artifacts and copy/move. `src/crypto.ts` uses Web Crypto AES-256-GCM with group/artifact/version authenticated data.
+  - `src/oauth.ts`: SDK AuthKit DCR and PKCE; `src/cli.ts` receives the state-checked loopback callback and serves stdio. The sign-in URL and diagnostics use stderr.
+  - `src/file-store.ts`: owned 0700 directory, 0600 atomic records, exclusive lock. Use one directory per device. After a crash, confirm the old process stopped before removing its stale lock. An ambiguous MLS post fails closed; do not restore an old ratchet snapshot.
+  - Use `mls_group_create` once, `mls_group_prepare` on a joining device, then `mls_group_add` on an existing member with its authenticated person/device ids. Synchronization re-shares live history and removes departed journey leaves before sending new keys. No background daemon is required; a member proxy must synchronize after admission.
+  - Tests named `proxy` exercise multiple clients against the in-process Worker, scan all server storage and blobs, and test fake-AS PKCE plus private local persistence.
 - `packages/mcp`: the MCP server, a Cloudflare Worker built on the official `@modelcontextprotocol/server` (pinned exactly).
   - `src/worker.ts`: the Worker entry; reads `AUTHKIT_ISSUER` and `MCP_RESOURCE` from `wrangler.jsonc` vars.
   - `src/app.ts`: routing. OAuth metadata documents, then `/mcp` behind Host validation and `requireBearerAuth`, then `createMcpHandler` serving 2026-07-28 and 2025-era clients statelessly from one factory.
@@ -61,6 +68,6 @@ A change is done when `npm run typecheck` and `npm test` pass at the repository 
 
 ## Rules for code
 
-- Code that must run in Node, browsers and Cloudflare Workers uses Web Crypto only and no `node:` imports outside build scripts and tests.
+- Code that must run in Node, browsers and Cloudflare Workers uses Web Crypto only. Node imports belong only in build scripts, tests, and the proxy CLI/file-store boundary.
 - Use exact versions of official SDKs and libraries.
 - Parallelize independent work where possible.

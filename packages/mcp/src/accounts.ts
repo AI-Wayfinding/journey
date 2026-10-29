@@ -1,6 +1,7 @@
-import { Refused, type Command, type ToolData } from './commands.ts';
+import { Refused, isRelay, type Command, type KeyPackageCommand, type ToolData } from './commands.ts';
 import { personalGroupRule, RULES, sameRules, sameState, cell, SLOTS, type Snapshot, type RulesStamp } from './rules.ts';
 import { Serial, type KeyValueStorage } from './storage.ts';
+import { relay, decodeBytes, type BlobStore } from './relay.ts';
 
 export interface Profile { name: string; email: string }
 export interface Profiles { get(subject: string): Promise<Profile> }
@@ -11,7 +12,8 @@ export class AccountsHost {
   private readonly serial = new Serial();
   private readonly storage: KeyValueStorage;
   private readonly profiles: Profiles;
-  constructor(storage: KeyValueStorage, profiles: Profiles) { this.storage = storage; this.profiles = profiles; }
+  private readonly blobs: BlobStore | undefined;
+  constructor(storage: KeyValueStorage, profiles: Profiles, blobs?: BlobStore) { this.storage = storage; this.profiles = profiles; this.blobs = blobs; }
   private async load(): Promise<AccountsState> {
     const raw = await this.storage.get('accounts');
     if (raw === undefined) return { rulesHash: RULES, accounts: [], journeys: [] };
@@ -19,6 +21,9 @@ export class AccountsHost {
     const state = JSON.parse(raw) as AccountsState;
     if (!sameRules(state.rulesHash)) throw new Refused('Stored accounts use different rules');
     return state;
+  }
+  lookup(subject: string): Promise<Account | undefined> {
+    return this.serial.run(async () => (await this.load()).accounts.find(a => a.subject === subject));
   }
   provision(subject: string): Promise<Account> {
     return this.serial.run(async () => {
@@ -44,11 +49,42 @@ export class AccountsHost {
       return state.journeys;
     });
   }
+  private requireIdentity(account: Account, memberId: string): void {
+    const index = account.identities.findIndex(m => m.id === memberId);
+    const slot = memberId === account.personId ? 1 : index < 0 ? 0 : index + 2;
+    if (!slot || cell(account.group, 'Members', slot) === 0 || cell(account.group, 'Belongs', slot) !== 1) throw new Refused('Only a live owned personal group identity may relay');
+  }
+  private async keyPackage(state: AccountsState, caller: Account, command: KeyPackageCommand): Promise<ToolData> {
+    const account = command.tool === 'mls_key_package_publish' ? caller : state.accounts.find(a => a.personId === command.input.personId);
+    if (!account) throw new Refused('Key package person not found');
+    const { deviceId } = command.input;
+    if (!account.identities.some(m => m.id === deviceId)) throw new Refused('Registered device or agent required');
+    this.requireIdentity(account, deviceId);
+    const key = JSON.stringify(['keyPackage', account.personId, deviceId]);
+    const raw = await this.storage.get(key);
+    if (command.tool === 'mls_key_package_publish') {
+      decodeBytes(command.input.data, 64 * 1024);
+      if (typeof raw === 'string' && raw !== 'null') throw new Refused('Unconsumed key package already exists');
+      await this.storage.put(key, JSON.stringify(command.input.data));
+      return { published: true };
+    }
+    const data = typeof raw === 'string' ? JSON.parse(raw) as string | null : null;
+    if (data !== null) await this.storage.put(key, 'null');
+    return { personId: account.personId, deviceId, data };
+  }
   group(personId: string, command: Command): Promise<ToolData> {
     return this.serial.run(async () => {
       const state = await this.load();
       const account = state.accounts.find((a) => a.personId === personId);
       if (!account) throw new Refused('Account not found');
+      if (command.tool === 'mls_key_package_publish' || command.tool === 'mls_key_package_fetch') return this.keyPackage(state, account, command);
+      if (isRelay(command)) {
+        if (command.input.groupId !== `personal_${personId}`) throw new Refused('Only the personal group owner may relay');
+        if (command.input.actingAgent !== undefined) throw new Refused('Use memberId for personal device or agent identity');
+        const member = command.input.memberId ?? personId;
+        this.requireIdentity(account, member);
+        return relay(this.storage, this.blobs, member, command);
+      }
       const machine = personalGroupRule(1);
       if (command.tool === 'personal_group_add') {
         const slot = account.identities.length + 2;

@@ -10,8 +10,12 @@ const context = { journeyId: id, actingAgent: id.optional() };
 const target = { ...context, personId: id };
 const project = { ...context, projectId: id };
 const limits = { read: z.boolean(), write: z.boolean(), grant: z.boolean() };
+const relayContext = { groupId: id, actingAgent: id.optional(), memberId: id.optional() };
+// Canonical padded base64 only; decoded limits are checked before any storage write.
+const opaque = (bytes: number) => z.string().min(4).max(4 * Math.ceil(bytes / 3))
+  .regex(/^[A-Za-z0-9+/]*={0,2}$/);
 
-// Strict, named inputs: callers cannot supply authority flags, profile fields or content.
+// Strict, named inputs: callers cannot supply authority flags, profile fields or plaintext.
 export const inputs = {
   account_read: z.object({}).strict(),
   journey_create: z.object({ name: text, policy: policy.default('request'), defaultRole: role.default('read') }).strict(),
@@ -47,8 +51,20 @@ export const inputs = {
   personal_group_read: z.object({}).strict(),
   personal_group_add: z.object({ name: text, kind: z.enum(['device', 'agent']) }).strict(),
   personal_group_remove: z.object({ memberId: id }).strict(),
+  mls_key_package_publish: z.object({ deviceId: id, data: opaque(64 * 1024) }).strict(),
+  mls_key_package_fetch: z.object({ personId: id, deviceId: id }).strict(),
+  mls_message_post: z.object({ ...relayContext, epoch: nat, kind: z.enum(['handshake', 'application']), data: opaque(1024 * 1024) }).strict(),
+  mls_message_fetch: z.object({ ...relayContext, since: nat.default(0), limit: nat.min(1).max(100).default(100) }).strict(),
+  artifact_blob_put: z.object({ ...relayContext, artifactId: id, version: nat.min(1), data: opaque(10 * 1024 * 1024) }).strict(),
+  artifact_blob_get: z.object({ ...relayContext, artifactId: id, version: nat.min(1) }).strict(),
+  artifact_blob_delete: z.object({ ...relayContext, artifactId: id }).strict(),
 } as const;
 
+export type RelayCommand = Extract<Command, { tool: 'mls_message_post' | 'mls_message_fetch' | 'artifact_blob_put' | 'artifact_blob_get' | 'artifact_blob_delete' }>;
+export type KeyPackageCommand = Extract<Command, { tool: 'mls_key_package_publish' | 'mls_key_package_fetch' }>;
+export function isRelay(command: Command): command is RelayCommand {
+  return ['mls_message_post', 'mls_message_fetch', 'artifact_blob_put', 'artifact_blob_get', 'artifact_blob_delete'].includes(command.tool);
+}
 export type ToolName = keyof typeof inputs;
 export type Command = { [K in ToolName]: { tool: K; input: z.output<(typeof inputs)[K]> } }[ToolName];
 export const TOOL_NAMES = Object.keys(inputs) as ToolName[];
