@@ -13,7 +13,7 @@
     "build": "node scripts/build.ts",
     "check": "node scripts/check.ts",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "node --test test/*.test.ts"
+    "test": "node --test --test-reporter=tap test/*.test.ts"
   },
   "dependencies": {
     "gdp-wired": "0.31.1"
