@@ -1,0 +1,10 @@
+{
+  "name": "@ai-wayfinding/apps", "version": "0.1.0", "private": true, "type": "module",
+  "exports": { "./views": "./generated/views.ts", "./contract": "./src/contract.ts" },
+  "scripts": {
+    "build": "node scripts/build.ts", "check": "node scripts/build.ts --check",
+    "typecheck": "npm run check && tsc --noEmit -p tsconfig.json", "test": "node --test test/*.test.ts"
+  },
+  "dependencies": { "@modelcontextprotocol/ext-apps": "2.0.4", "zod": "4.6.7" },
+  "devDependencies": { "esbuild": "0.28.2", "typescript": "5.9.3", "@types/node": "22.20.5" }
+}
