@@ -50,10 +50,11 @@ work:
             test -z "$(git status --porcelain -- packages/rules)"
             node -e 'const l=require("./packages/rules/rules.lock.json");if(l.gdpWired!=="0.31.1"||!Object.keys(l.files).length)process.exit(1)'
             npm run check:rules
-            f=$(ls packages/rules/generated/*.js | head -1)
-            cp "$f" "$f.bak"; printf '\n' >> "$f"
-            if npm run check:rules; then mv "$f.bak" "$f"; exit 1; fi
-            mv "$f.bak" "$f"
+            t=$(mktemp -d)
+            cp -R packages/rules/generated packages/rules/rules.lock.json "$t"/
+            f=$(ls "$t"/generated/*.js | head -1); printf '\n' >> "$f"
+            if RULES_CHECK_ROOT="$t" npm run check:rules; then rm -rf "$t"; exit 1; fi
+            rm -rf "$t"
             echo "rules-build ok"
           expect:
             exit: 0
