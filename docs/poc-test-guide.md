@@ -4,17 +4,22 @@ Wayfinding gives a team and its agents a shared journey: membership, tasks, arti
 
 **Use synthetic data only.** The proxy uses unaudited ts-mls 1.6.4 and WorkOS AuthKit Staging. Do not upload client material, personal data or secrets. This is a proof of concept, not a production service.
 
-## Live check: 2026-10-29
+## Verified live: 2026-10-29
 
-The live test is **blocked**, not passed. On 2026-10-29 at 19:44 UTC, the saved synthetic user A completed password sign-in, consent and the loopback callback. The proxy then failed during account setup:
+The full two-person walkthrough below **passed** against `https://poc.wayfinding.support/mcp` on 2026-10-29, from 19:59:41 to 20:00:16 UTC. Both local proxies used source commit `b7a6969`, fresh stores, separate browser sessions and the official MCP client SDK. All 31 tool calls passed their data assertions; the harness exited 0.
 
-```text
-Remote account_read refused: [{"type":"text","text":"Coordination storage operation failed"}]
-```
+| Check | Observed result |
+| --- | --- |
+| Password sign-in, consent and loopback callback | Both users connected; `whoami` and `account_read` matched their Staging identities. |
+| Journey membership | A created a request-only journey and admitted B as read-only. B could read it. |
+| MLS setup | A created the group, B prepared a device package, A added it, and both synchronized. |
+| Shared artifact | B decrypted the exact marker A created. |
+| Personal artifact copy and move | B read both destination artifacts. Copy preserved the source; move removed it from the source's live list. |
+| Assigned task | B claimed A's task and progressed through a round to `done`. |
+| Agent limits | B's signed card requested read/write/grant; effective capabilities were read-only, with no grant or guide authority. |
+| Cleanup | Both proxies stopped and both browser sessions closed. |
 
-The server emits this generic error at `packages/mcp/src/objects.ts:27`. It reaches the proxy at `packages/proxy/src/proxy.ts:183` during startup at `packages/proxy/src/cli.ts:39`. `wrangler secret list` confirmed the `WORKOS_API_KEY` secret name before this retry; its value was not inspected. The remaining failure in the account provisioning path (`packages/mcp/src/accounts.ts:28-40`) needs Worker-side diagnosis. The generic response does not establish the cause. B's sign-in and all collaboration calls below were not reached. Both test browser sessions were closed and no proxy remained alive.
-
-The source now rejects a missing, empty or blank `WORKOS_API_KEY` before contacting WorkOS, with `Server configuration error: WORKOS_API_KEY is required for account profiles`. This diagnostic change needs deployment; nothing was deployed in this run. It is not evidence that the live blocker is fixed.
+The earlier account provisioning blocker no longer occurs. This run found no application defect and required no deployment. It did not test a hosted Claude/ChatGPT connector or an Apps UI.
 
 ## Prepare
 
@@ -68,7 +73,7 @@ Use the client's tool interface or ask its agent to make these calls. Save retur
 3. **Set up encryption.** Use the journey ID as `groupId`. A calls `mls_group_create` once. B calls `mls_group_prepare` and shares its returned `deviceId`. A calls `mls_group_add` with B's authenticated `personId` and that device ID. Both call `mls_group_sync`.
 4. **Share content.** A calls local `artifact_create` with that `groupId`, `name: "Shared marker"`, `type: "text/plain"`, `content: "SYNTHETIC-WAYFINDING-MARKER"`. B calls `artifact_read` with its returned `artifactId`. Check the exact marker, not just a successful response.
 5. **Copy and move personal content.** A calls `mls_group_create` with A's `personalGroupId`, then creates another marker artifact there. Call `artifact_copy` with `sourceGroupId`, `artifactId`, and `destinationGroupId` set to the journey ID. B reads the new destination ID. Confirm A can still read the source. A calls `artifact_move` on the original; B reads that new destination ID too. Confirm `artifact_list` in A's personal group no longer lists the original.
-6. **Complete a task.** A calls `task_create` with `journeyId`, `name: "Synthetic task"`, `assignee` set to B's `personId`, `maxRounds: 3`, and `deadline` set to a future Unix timestamp in **milliseconds**. Find its returned `taskId`. B calls `task_step` with that ID and actions `claim`, `startRound`, `endRound`, `finish`. Expect `claimed`, `inRound`, `claimed`, then `done`.
+6. **Complete a task.** A calls `task_create` with `journeyId`, `name: "Synthetic task"`, `assignee` set to B's `personId`, `maxRounds: 3`, and `deadline` set to a future Unix timestamp in **milliseconds**. Find its returned `taskId`. B calls `task_step` with `journeyId`, `taskId` and actions `claim`, `startRound`, `endRound`, `finish`. Expect `claimed`, `inRound`, `claimed`, then `done`.
 7. **Check agent limits.** B calls `agent_add` with `journeyId`, `name: "Synthetic agent"`, and `read`, `write`, `grant` all set to `true`. B calls `agent_capabilities` with the returned agent ID as `actingAgent`. Because B is read-only, expect `{ "read": true, "write": false, "grant": false, "guide": false }`. A requested card must not give an agent more authority than its owner.
 
 ## Limits and cleanup
