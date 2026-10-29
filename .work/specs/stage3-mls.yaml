@@ -64,7 +64,7 @@ work:
     refs:
       - path: ".work/drafts/stage3-mls.md"
         why: "Source criteria"
-    touches: ["packages/proxy", "package-lock.json", "AGENTS.md"]
+    touches: ["packages/proxy", "packages/mcp", "package-lock.json", "AGENTS.md"]
     description: !md |
       Build the proxy as a stdio MCP server (official SDK 2.4.0) exposing artifact tools to the local agent (create, read, list, update, copy, move, delete) plus pass-through coordination tools. It signs in with AuthKit OAuth 2.1 PKCE + loopback redirect (DCR), stores tokens and MLS state in a local file store (0600), encrypts content with per-artifact AES-256-GCM keys and distributes keys as MLS application messages. Test names include 'proxy': two or three proxies against an in-process server (createApp with injected verifier) cover every case in the criterion, and a scan of all server storage finds no plaintext or key bytes.
     acceptance:
