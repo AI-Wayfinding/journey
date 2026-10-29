@@ -1,6 +1,4 @@
-.worktrees/
 node_modules/
-tool/dist/
 packages/*/dist/
 **/.wrangler/
 **/test-results/
@@ -10,9 +8,6 @@ packages/*/dist/
 *.tgz
 .work/.cache/
 *.tsbuildinfo
-
-# Core copies the committed Bend runtime and declarations before compiling.
-packages/core/src/rules/
 
 # Local agent harness state.
 .pi/

@@ -1,0 +1,8 @@
+{
+  "gdpWired": "0.31.1",
+  "gdpWiredIntegrity": "sha512-1E3YIGWXldIMNn8hZwUh3xGVtPNJ+mV2V9pDfRdDygZ4NlwACM0rPZlZ1bm73r5H1RBn0AWlH4oJZ6a63BCWzg==",
+  "files": {
+    "generated/seats.d.ts": "ffbcdd1770e38d4243698925a7c5fde6ad727f59d157b80de12a853ef67f8ea0",
+    "generated/seats.js": "d41e6c0174e6a1b55cd3e538396ab08138c2173278281efc1fec3472981d39a7"
+  }
+}
