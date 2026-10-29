@@ -2,7 +2,13 @@
   "gdpWired": "0.31.1",
   "gdpWiredIntegrity": "sha512-1E3YIGWXldIMNn8hZwUh3xGVtPNJ+mV2V9pDfRdDygZ4NlwACM0rPZlZ1bm73r5H1RBn0AWlH4oJZ6a63BCWzg==",
   "files": {
+    "generated/artifact.d.ts": "79a16e376611b8e1e4a6a67efae6c6a51877ae493aaaf26c7f124e11432830b8",
+    "generated/artifact.js": "91d2e01c22241f25e4635776c9d20779270b69eb5f88eb90af91cb3ceb3285d1",
+    "generated/project.d.ts": "de815e312f50b3e937d170d351ffed55ee01b1044e772b175557c04a43e71ca2",
+    "generated/project.js": "e149c4f26bf2a9965c5e12f069784c90aa080bc16931244fdb50815acdad5032",
     "generated/seats.d.ts": "ffbcdd1770e38d4243698925a7c5fde6ad727f59d157b80de12a853ef67f8ea0",
-    "generated/seats.js": "d41e6c0174e6a1b55cd3e538396ab08138c2173278281efc1fec3472981d39a7"
+    "generated/seats.js": "d41e6c0174e6a1b55cd3e538396ab08138c2173278281efc1fec3472981d39a7",
+    "generated/task.d.ts": "1073c3f517b2a57268a14e9a37e52951df7f6f3a4b70bc9a5a43295419ccbe49",
+    "generated/task.js": "b020cd94b4abf759ce8274d4a5b51c37b21309917e1a8e47bc3326901c08b70a"
   }
 }
