@@ -1,6 +1,7 @@
 import * as z from 'zod';
 import { capabilities } from '../../rules/src/capabilities.ts';
 import { libraryInputs, libraryDescriptions } from './library-inputs.ts';
+import { forumInputs, forumDescriptions } from './forum-inputs.ts';
 const capability = z.enum(capabilities.map(c => c.name));
 
 const id = z.string().min(1).max(200);
@@ -44,7 +45,6 @@ export const inputs = {
   agent_narrow: z.object({ agentId: id, remove: z.array(capability).max(capabilities.length), ...acting }).strict(),
   agent_remove: z.object({ agentId: id, ...acting }).strict(),
   client_list: z.object(acting).strict(),
-  conversation_post: z.object({ ...context, target: z.union([z.object({ projectId: id }).strict(), z.object({ itemId: id }).strict()]), body: text }).strict(),
   project_create: z.object({ ...context, name: text, purpose: text }).strict(),
   project_join: z.object(project).strict(),
   project_leave: z.object(project).strict(),
@@ -71,6 +71,7 @@ export const inputs = {
   artifact_blob_delete: z.object({ ...relayContext, artifactId: id }).strict(),
   account_update: z.object({ ...acting, nickname: z.string().trim().min(1).max(80) }).strict(),
   ...libraryInputs,
+  ...forumInputs,
 } as const;
 
 export type RelayCommand = Extract<Command, { tool: 'mls_message_post' | 'mls_message_fetch' | 'artifact_blob_put' | 'artifact_blob_get' | 'artifact_blob_delete' }>;
@@ -80,6 +81,7 @@ export function isRelay(command: Command): command is RelayCommand {
 }
 export const descriptions: Record<ToolName, string> = {
   ...libraryDescriptions,
+  ...forumDescriptions,
   account_read: 'Read your account, WorkOS profile, nickname, personId and personalGroupId.',
   account_update: 'Set your display nickname using a trimmed nickname of 1 to 80 characters.',
   journey_create: 'Create a journey with a name, joining policy and default member role; you become its guide.',
@@ -104,7 +106,6 @@ export const descriptions: Record<ToolName, string> = {
   agent_narrow: 'Remove named capabilities from an owned account agent card; this operation can never widen it.',
   agent_remove: 'Remove an owned account agent and immediately revoke all of its bound client connections.',
   client_list: 'Show this authenticated client id and your connected client bindings without permitting binding changes.',
-  conversation_post: 'Post attributed text in the single conversation attached to a journey project or artifact.',
   project_create: 'Create a project in a journey using journeyId, name and purpose.',
   project_join: 'Join a project using journeyId and projectId.',
   project_leave: 'Leave a project using journeyId and projectId.',

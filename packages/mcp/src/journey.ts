@@ -1,23 +1,23 @@
 import { encodeJourney, encodeProject, encodeGrant, JOURNEY, PROJECT, decodeChoice, type JourneyNeed, type JourneyOp } from '../../rules/src/encode.ts';
-import { artifactRule, grantRule, journeyRule, projectRule, taskRule, topicRule, postRule, RULES, SLOTS, sameRules, sameState, scalar, cell, type Snapshot, type RulesStamp } from './rules.ts';
+import { artifactRule, grantRule, journeyRule, projectRule, taskRule, topicRule, RULES, SLOTS, sameRules, sameState, scalar, cell, type Snapshot, type RulesStamp } from './rules.ts';
 import { capabilities, type Capability } from '../../rules/src/capabilities.ts';
 import { allows, type Actor } from './agents.ts';
 import { Refused, isRelay, type Command, type TaskMethod, type ToolData } from './commands.ts';
 import { Serial, type KeyValueStorage } from './storage.ts';
 import { relay, deleteArtifactBlobs, type BlobStore } from './relay.ts';
 import { library, isLibraryCommand, isLibraryArtifact, requireItem, visibleItem, type LibraryArtifact, type LibraryAccess, type LibraryCommand } from './library.ts';
+import { forum, isForumCommand, defaultBoard, type Board, type Topic, type Post } from './forum.ts';
 
 interface Identity { id: string; name: string }
 interface Project { id: string; name: string; purpose: string; rule: Snapshot }
 interface Agent { id: string; owner: string }
 interface Grant { id: string; need: JourneyNeed; resource: string; expiresAt: number; rule: Snapshot }
-interface Post { id: string; topic: number; body: string; rule: Snapshot }
 interface Artifact { id: string; name: string; type: string; size: number; rule: Snapshot; storage?: never }
 interface Task { id: string; name: string; assignee?: string; deadline: number; createdAt: number; updatedAt: number; rule: Snapshot }
 export interface JourneyState {
   id: string; name: string; rulesHash: RulesStamp; identities: Identity[]; membership: Snapshot;
   projects: Project[]; agents: Agent[]; grants: Grant[]; artifacts: (Artifact | LibraryArtifact)[]; tasks: Task[];
-  topics: Snapshot; posts: Post[];
+  topics: Snapshot; boards: Board[]; topicRecords: Topic[]; targets: import("./forum-inputs.ts").ForumTarget[]; posts: Post[];
 }
 
 function requireChange(before: Snapshot, after: Snapshot, what: string, ignore: string[] = []): Snapshot {
@@ -102,7 +102,6 @@ export class JourneyHost {
       case 'mls_message_post': return 'read';
       case 'artifact_blob_put': return 'artifact.write';
       case 'artifact_blob_delete': return 'artifact.write';
-      case 'conversation_post': return 'post';
       default: return undefined;
     }
   }
@@ -234,9 +233,10 @@ export class JourneyHost {
       if (command.tool === 'journey_create') {
         if (state) throw new Refused('Journey already exists');
         if (!journeyId) throw new Refused('Journey identity missing');
-        state = { id: journeyId, name: command.input.name, rulesHash: RULES, identities: [], membership: journeyRule.init(), projects: [], agents: [], grants: [], artifacts: [], tasks: [], topics: topicRule.init(), posts: [] };
+        state = { id: journeyId, name: command.input.name, rulesHash: RULES, identities: [], membership: journeyRule.init(), projects: [], agents: [], grants: [], artifacts: [], tasks: [], topics: topicRule.init(), posts: [], boards: [], topicRecords: [], targets: [] };
         const actor = this.slot(state, personId, true);
         state.membership = requireChange(state.membership, journeyRule.step(state.membership, encodeJourney({ op: 'found', actor, newPolicy: command.input.policy, role: command.input.defaultRole })), 'Founding');
+        defaultBoard(state, actor);
         // The live person is always the guide; a delegated creator also joins as
         // their account agent so later calls never need to fall back to the person.
         if (resolved?.agent) {
@@ -250,6 +250,13 @@ export class JourneyHost {
         const actor = command.tool === 'agent_add' ? this.slot(state, personId) : this.actor(state, personId, command, resolved);
         const identity = resolved ?? { personId };
         if (isLibraryCommand(command)) return this.executeLibrary(state, command, this.libraryAccess(state, actor, resolved ?? { personId }));
+        if (isForumCommand(command)) {
+          const result = await forum(state, command, { actor, person: this.slot(state, personId), agent: identity.agent !== undefined,
+            read: this.can(state, actor, identity, 'read'), post: this.can(state, actor, identity, 'post'),
+            topic: this.can(state, actor, identity, 'topic.create'), manage: this.can(state, actor, identity, 'board.manage') }, this.storage, this.now());
+          if (result.changed) await this.commit(state, result.writes);
+          return result.data;
+        }
         if (isRelay(command) && !this.has(state, actor, 'read')) throw new Refused('A live readable member is required for relay');
         const libraryBlobDelete = command.tool === 'artifact_blob_delete' && state.artifacts.some(a => a.id === command.input.artifactId && isLibraryArtifact(a));
         const cap = libraryBlobDelete ? 'artifact.delete' : this.commandCapability(command);
@@ -260,21 +267,6 @@ export class JourneyHost {
           if (!allows(identity, 'agent.remove', this.has(state, actor, 'read'))) throw new Refused('Agent removal refused');
         }
         if (cap && !ownRemoval) this.requireCapability(state, actor, identity, cap);
-        if (command.tool === 'conversation_post') {
-          const target = 'projectId' in command.input.target ? command.input.target.projectId : command.input.target.itemId;
-          this.checkResource(state, target);
-          const targetArtifact = state.artifacts.find(a => a.id === target);
-          if (targetArtifact && isLibraryArtifact(targetArtifact)) requireItem(targetArtifact, this.slot(state, personId), this.can(state, actor, identity, 'read'));
-          const targetSlot = this.resourceSlot(state, target);
-          const next = topicRule.step(state.topics, { op: 1, slot: state.posts.length, target: targetSlot, actor, canTopic: 1, boardOpen: 1, guide: +this.has(state, actor, 'guide'), locked: 0 });
-          const topic = scalar(next, 'selected') - 1;
-          if (topic < 0) throw new Refused('Conversation creation refused');
-          const rule = postRule.step(postRule.init(), { op: 0, actor, actorKind: +(identity.agent !== undefined), canPost: 1, topicOpen: +(cell(next, 'Locked', topic) === 0), guide: 0, newHidden: 0, newReplyTo: 0 });
-          if (scalar(rule, 'exists') !== 1) throw new Refused('Posting refused');
-          const post = { id: `post_${crypto.randomUUID()}`, topic, body: command.input.body, rule };
-          state.topics = next; state.posts.push(post); await this.commit(state);
-          return { postId: post.id, topicId: topic, author: identity.agent?.id ?? personId, authorKind: identity.agent ? 'agent' : 'person', body: post.body };
-        }
         if (isRelay(command)) {
           if (command.input.groupId !== state.id || command.input.memberId !== undefined) throw new Refused('Invalid journey relay identity');
           if (!this.has(state, actor, 'read')) throw new Refused('A live readable member is required for relay');

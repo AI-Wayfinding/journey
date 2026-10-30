@@ -5,6 +5,7 @@ import { allows, requireAccountCapability, type Actor, type ClientIdentity, type
 import type { AuthenticationResponseJSON } from '@simplewebauthn/server';
 import { JourneyHost } from './journey.ts';
 import { itemJourney } from './library.ts';
+import { isForumCommand, forumCommandJourney } from './forum.ts';
 import { MemoryStorage } from './storage.ts';
 import { MemoryBlobs, encodeBytes } from './relay.ts';
 
@@ -47,6 +48,22 @@ export class Backend implements CoordinationBackend {
   passkey(identity: ClientIdentity, operation: PasskeyOperation) { return this.accounts.passkey(identity, operation); }
   beginAuthorization(identity: ClientIdentity, change: CardChange) { return this.accounts.beginAuthorization(identity, change); }
   completeAuthorization(identity: ClientIdentity, change: CardChange, assertion: AuthenticationResponseJSON | undefined) { return this.accounts.completeAuthorization(identity, change, assertion); }
+  private async namedForum(data: ToolData): Promise<ToolData> {
+    const row = z.object({ author: z.string(), authorKind: z.enum(['person', 'agent']) }).passthrough();
+    const posts = data.posts === undefined ? [] : z.array(row).parse(data.posts);
+    const topics = data.topics === undefined ? [] : z.array(row).parse(data.topics);
+    const topic = data.topic == null ? undefined : row.parse(data.topic);
+    const own = row.safeParse(data);
+    const people = [...new Set([...posts, ...topics, ...(topic ? [topic] : []), ...(own.success ? [own.data] : [])].filter(r => r.authorKind === 'person').map(r => r.author))];
+    const names: Record<string, string> = {};
+    for (let i = 0; i < people.length; i += 128) Object.assign(names, await this.accounts.names(people.slice(i, i + 128)));
+    const name = (r: z.output<typeof row>): ToolData => ({ ...r, authorName: r.authorKind === 'person' ? names[r.author] ?? 'Wayfinding member' : r.authorName });
+    const result = own.success ? name(own.data) : { ...data };
+    if (data.posts !== undefined) result.posts = posts.map(name);
+    if (data.topics !== undefined) result.topics = topics.map(name);
+    if (topic) result.topic = name(topic);
+    return result;
+  }
   private async named(data: ToolData): Promise<ToolData> {
     if (!('members' in data) || !('pending' in data)) return data;
     const { members, pending } = namedState.parse(data);
@@ -100,6 +117,11 @@ export class Backend implements CoordinationBackend {
         const updated = await this.accounts.update(account.personId, command.input.nickname);
         return actor.agent ? { nickname: updated.nickname, actingAgent: actor.agent.id } : this.accountView(updated);
       }
+      // Route opaque forum ids only after resolving the authenticated actor.
+      case 'forum_boards': case 'board_create': case 'board_update': case 'topic_create': case 'topic_list': case 'topic_read':
+      case 'post_create': case 'post_edit': case 'post_hide': case 'post_unhide': case 'topic_lock': case 'topic_unlock': case 'conversation_read': case 'conversation_post':
+        if (!isForumCommand(command)) throw new Refused('Invalid forum command');
+        return this.namedForum(await this.journey(forumCommandJourney(command)).execute(account.personId, command, undefined, actor));
       case 'library_get': case 'library_version': case 'library_update': case 'library_delete':
         return this.journey(itemJourney(command.input.itemId)).execute(account.personId, command, undefined, actor);
       case 'agent_create': case 'agent_list': case 'agent_narrow': case 'agent_remove': case 'agent_card': case 'client_list':

@@ -4,6 +4,7 @@ import * as journeyModule from '../../rules/generated/journey.js';
 import * as projectModule from '../../rules/generated/project.js';
 import * as cardModule from '../../rules/generated/card.js';
 import * as bindingModule from '../../rules/generated/binding.js';
+import * as boardModule from '../../rules/generated/board.js';
 import * as topicModule from '../../rules/generated/topic.js';
 import * as postModule from '../../rules/generated/post.js';
 import * as grantModule from '../../rules/generated/grant.js';
@@ -35,6 +36,7 @@ export interface RulesStamp {
   personalGroup: string;
   card: string;
   binding: string;
+  board: string;
   topic: string;
   post: string;
   item: string;
@@ -50,6 +52,7 @@ export const RULES: RulesStamp = Object.freeze({
   personalGroup: lock.files['generated/personalGroup.js'],
   card: lock.files['generated/card.js'],
   binding: lock.files['generated/binding.js'],
+  board: lock.files['generated/board.js'],
   topic: lock.files['generated/topic.js'],
   post: lock.files['generated/post.js'],
   item: lock.files['generated/item.js'],
@@ -121,6 +124,7 @@ export const journeyRule = rule(journeyModule, { slots: SLOTS });
 export const projectRule = rule(projectModule, {});
 export const cardRule = rule(cardModule, {});
 export const bindingRule = rule(bindingModule, { person: 1 });
+export const boardRule = rule(boardModule, {});
 export const topicRule = rule(topicModule, {});
 export const postRule = rule(postModule, {});
 export const grantRule = rule(grantModule, {});
