@@ -6,7 +6,7 @@ import {all, bool, forall, nat, no, oneOf, rule, when, yes} from 'gdp-wired'
 // assertion. Revoked is a tombstone: clearing Bound on removal must not turn a
 // removed agent's client into an unbound person client. Only asserted binding
 // clears that tombstone. The host also rechecks agent/person liveness on act.
-export type BindingBug = 'assertion' | 'ownership' | 'remove' | 'person escape' | 'refuse bind' | 'refuse unbind' | 'other client'
+export type BindingBug = 'assertion' | 'ownership' | 'remove' | 'person escape' | 'refuse bind' | 'refuse unbind' | 'other client' | 'unasserted unbind' | 'dead act'
 export const bindingRule = (bug?: BindingBug) => rule('binding')
   .params({person: nat})
   .inputs({op: oneOf('bind', 'unbind', 'removeAgent', 'act'), client: nat, agent: nat,
@@ -16,7 +16,7 @@ export const bindingRule = (bug?: BindingBug) => rule('binding')
   .flags(({op, personAsserted, agentIsOwnLive, person, agent}) => ({
     binds: bug === 'refuse bind' ? no : all(op.is('bind'), bug === 'assertion' ? yes : personAsserted,
       bug === 'ownership' ? yes : agentIsOwnLive.and(agent.ne(person))),
-    unbinds: bug === 'refuse unbind' ? no : all(op.is('unbind'), personAsserted, agentIsOwnLive, agent.ne(person)),
+    unbinds: bug === 'refuse unbind' ? no : all(op.is('unbind'), bug === 'unasserted unbind' ? yes : personAsserted, agentIsOwnLive, agent.ne(person)),
     removes: op.is('removeAgent'),
   }))
   .step(({op, client, agent, person, personLive, boundAgentLive, Bound, Agents, Revoked, binds, unbinds, removes}) => {
@@ -25,7 +25,7 @@ export const bindingRule = (bug?: BindingBug) => rule('binding')
     return {
       actsAs: when(isAgent, Agents.at(client), person),
       asAgent: isAgent,
-      allowed: all(op.is('act'), personLive, Revoked.at(client).not(), Bound.at(client).not().or(boundAgentLive)),
+      allowed: all(op.is('act'), bug === 'dead act' ? yes : personLive, bug === 'dead act' ? yes : Revoked.at(client).not(), bug === 'dead act' ? yes : Bound.at(client).not().or(boundAgentLive)),
       Bound: Bound.each(k => when(removes.and(Agents.at(k).eq(agent)), bug === 'remove' ? Bound.at(k) : no,
         when(k.eq(client), when(binds, yes, when(drops, no, Bound.at(k))), bug === 'other client' ? no : Bound.at(k)))),
       Agents: Agents.set(client, when(binds, agent, Agents.at(client))),
@@ -58,6 +58,12 @@ export const bindingStepLaws = (r: Binding = binding) => [
   // Ordinary binding changes never alter a different client's binding.
   r.stepLaw('binding edits only the named client', ({client, Bound}, after) => forall(k => k.ne(client).implies(after.Bound.at(k).iff(Bound.at(k)))),
     ({op}) => op.is('removeAgent').not()),
+  // Apart from removal, releasing a binding needs an asserted live-owner action.
+  r.stepLaw('unbinding requires assertion and live ownership', ({Bound, personAsserted, agentIsOwnLive}, a) =>
+    forall(k => Bound.at(k).and(a.Bound.at(k).not()).implies(personAsserted.and(agentIsOwnLive))), ({op}) => op.is('removeAgent').not()),
+  // Revoked clients fail closed rather than falling back to person authority.
+  r.stepLaw('acting requires live authority and no removal tombstone', ({client, personLive, boundAgentLive, Bound, Revoked}, a) =>
+    a.allowed.iff(all(personLive, Revoked.at(client).not(), Bound.at(client).not().or(boundAgentLive))), ({op}) => op.is('act')),
 ]
 export const laws = bindingLaws()
 export const stepLaws = bindingStepLaws()
@@ -69,4 +75,6 @@ export const brokenVariants: {bug: BindingBug, breaks: string[]}[] = [
   {bug: 'remove', breaks: ['removal unbinds and revokes every client of the agent']},
   {bug: 'person escape', breaks: ['a bound client acts only as its agent']},
   {bug: 'other client', breaks: ['binding edits only the named client']},
+  {bug: 'unasserted unbind', breaks: ['unbinding requires assertion and live ownership']},
+  {bug: 'dead act', breaks: ['acting requires live authority and no removal tombstone']},
 ]
