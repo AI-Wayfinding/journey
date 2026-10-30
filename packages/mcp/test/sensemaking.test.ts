@@ -195,3 +195,87 @@ test('sensemaking: console renders escaped read-only round summaries without pri
   assert.match(html, /&lt;script&gt;round&lt;\/script&gt;/); assert.match(html, /&lt;b&gt;goal&lt;\/b&gt;/); assert.match(html, /planned/);
   assert.ok(!html.includes('Never render private notes')); assert.ok(!html.includes('action="/console/round'));
 });
+
+
+test('sensemaking: released forum App reads round-attached topics and threads', async t => {
+  const f = await fixture(t), round = await f.create();
+  const list = await f.call(f.alice, 'topic_list', { journeyId: f.journeyId });
+  const topic = rows(list, 'topics').find(topic => topic.topicId === round.conversationId)!;
+  assert.deepEqual(topic.attachedTo, { roundId: round.roundId });
+  const thread = await f.call(f.bob, 'forum_view', { journeyId: f.journeyId, topicId: round.conversationId });
+  assert.equal((thread.topic as Data).title, 'First position');
+  assert.deepEqual((thread.topic as Data).posts, []);
+});
+
+test('sensemaking: create-only agents cannot borrow run, post or library authority', async t => {
+  const f = await fixture(t);
+  const agentId = (await f.call(f.alice, 'agent_create', { name: 'Facilitator helper' })).agentId as string;
+  await f.call(f.alice, 'agent_add', { journeyId: f.journeyId, agentId });
+  await setAgentCard(f.backend, 'alice', agentId, ['round.create']);
+  const round = await f.call(f.alice, 'round_create', { journeyId: f.journeyId, actingAgent: agentId, title: 'Agent created', goal: 'Listen' });
+  assert.equal(round.facilitator, f.a);
+  const roundId = round.roundId;
+  await f.refused(f.alice, 'round_status', { roundId, actingAgent: agentId, to: 'open' });
+  await f.refused(f.alice, 'library_add', { journeyId: f.journeyId, actingAgent: agentId, name: 'Not delegated', text: 'No' });
+  await f.refused(f.alice, 'conversation_post', { journeyId: f.journeyId, actingAgent: agentId, target: { roundId }, body: 'Not delegated' });
+  await setAgentCard(f.backend, 'alice', agentId, ['round.run']);
+  await f.call(f.alice, 'round_status', { roundId, actingAgent: agentId, to: 'open' });
+  await f.refused(f.alice, 'round_contribute', { roundId, actingAgent: agentId, text: 'Missing contribute' });
+  await f.call(f.alice, 'agent_narrow', { agentId, remove: ['round.run'] });
+  await f.refused(f.alice, 'round_status', { roundId, actingAgent: agentId, to: 'synthesising' });
+  const read = await f.call(f.alice, 'round_read', { roundId });
+  assert.equal(read.status, 'open');
+  assert.deepEqual(rows(read, 'participants').map(p => p.personId).sort(), [f.a, f.b].sort());
+});
+
+test('sensemaking: bundled default matches its guidance source with fifteen questions', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const { firstPosition } = await import('../src/guidance/first-position.ts');
+  const source = await readFile(new URL('../src/guidance/first-position.md', import.meta.url), 'utf8');
+  assert.equal(firstPosition, source);
+  assert.equal(source.match(/^\d+\. /gm)!.length, 15);
+});
+
+test('sensemaking: MCP round tools persist through durable adapters and member removal stops access', async t => {
+  const { Accounts, durableBackend } = await import('../src/objects.ts');
+  const { AccountsHost } = await import('../src/accounts.ts');
+  const { MemoryStorage } = await import('../src/storage.ts');
+  const { MemoryBlobs } = await import('../src/relay.ts');
+  const storage = new MemoryStorage(), stores = new Map<string, InstanceType<typeof MemoryStorage>>(), hosts = new Map<string, Journey>(), blobs = new MemoryBlobs();
+  const accounts = new AccountsHost(storage, { async get(subject) { return { name: subject, email: `${subject}@example.test` }; } });
+  await accounts.provision('alice'); await accounts.provision('bob');
+  const backend = durableBackend({ WORKOS_API_KEY: 'unused', BLOBS: blobs,
+    ACCOUNTS: { getByName() { return { fetch: request => new Accounts({ storage }, { WORKOS_API_KEY: 'unused', BLOBS: blobs }, testPasskeys).fetch(request) }; } },
+    JOURNEYS: { getByName(id) {
+      let store = stores.get(id); if (!store) { store = new MemoryStorage(); stores.set(id, store); }
+      let host = hosts.get(id); if (!host) { host = new Journey({ storage: store }, { BLOBS: blobs }); hosts.set(id, host); }
+      const current = host; return { fetch: request => current.fetch(request) };
+    } },
+  });
+  async function connect(subject: string) {
+    const client = new Client({ name: 'durable-sensemaking', version: '1' });
+    await client.connect(new StreamableHTTPClientTransport(RESOURCE, { fetch: bridge(app(signer, backend)), requestInit: { headers: { authorization: `Bearer ${await token(signer, { sub: subject })}` } } }));
+    t.after(() => client.close()); return client;
+  }
+  async function call(client: Client, name: string, input: Data = {}) {
+    const response = await client.callTool({ name, arguments: input });
+    assert.notEqual(response.isError, true, JSON.stringify(response)); return response.structuredContent as Data;
+  }
+  const alice = await connect('alice'), bob = await connect('bob');
+  const personId = (await call(bob, 'account_read')).personId;
+  const journeyId = (await call(alice, 'journey_create', { name: 'Persistent rounds', policy: 'open' })).journeyId;
+  await call(bob, 'journey_join', { journeyId });
+  const roundId = (await call(alice, 'round_create', { journeyId, title: 'Persistent', goal: 'Keep findings' })).roundId;
+  await call(alice, 'round_status', { roundId, to: 'open' });
+  await call(bob, 'interview_write', { roundId, text: 'Private persistent notes' });
+  await Promise.all(['Persistent first', 'Persistent second'].map(text => call(bob, 'round_contribute', { roundId, text })));
+  hosts.clear();
+  const read = await call(alice, 'round_read', { roundId }), doc = read.document as Data;
+  assert.equal(read.contributions, 2); assert.equal(doc.version, 3);
+  assert.match(String(doc.text), /Persistent first/); assert.match(String(doc.text), /Persistent second/);
+  assert.equal((await call(bob, 'interview_read', { roundId })).text, 'Private persistent notes');
+  assert.equal((await alice.callTool({ name: 'interview_read', arguments: { roundId, personId } })).isError, true);
+  await call(alice, 'journey_remove', { journeyId, memberId: personId });
+  assert.equal((await bob.callTool({ name: 'interview_read', arguments: { roundId } })).isError, true);
+  assert.equal((await bob.callTool({ name: 'round_contribute', arguments: { roundId, text: 'Removed' } })).isError, true);
+});

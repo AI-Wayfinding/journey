@@ -47,7 +47,7 @@ The person who starts a round is its **facilitator**. A round has:
 - a **status**: planned, open, synthesising or closed;
 - its own conversation.
 
-Each participant has an **interview** in the round. An interview is private to that participant (and their agents) unless they choose to share it. Their agent usually runs the interview using the guidance, then helps them write a **contribution** to the sensemaking document. A contribution is always attributed to the person, even when their agent drafted it. The facilitator can assign a library artifact as someone's interview document.
+Each participant has an **interview** in the round. An interview is private to that participant (and their agents) unless they choose to share it. Their agent usually runs the interview using the guidance, then helps them write a **contribution** to the sensemaking document while the round is open or synthesising. A contribution is always attributed to the person, even when their agent drafted it. The facilitator can assign a library artifact to seed someone's interview document. Later interview edits stay separate from that source artifact.
 
 When a round closes, the facilitator can start the next one from it.
 
@@ -74,7 +74,7 @@ Wayfinding checks every change against written rules before it saves anything. T
 - only an artifact's owner (or a guide) deletes it, and versions never overwrite each other;
 - a post's author is never changed, and only its author edits it;
 - an interview stays private until its own participant shares it;
-- only participants contribute to a round, and only while it is open;
+- only participants contribute to a round, and only while it is open or synthesising;
 - a task always ends, at its round cap or its deadline.
 
 ## What this proof of concept does not do yet

@@ -29,7 +29,7 @@ export const forumDescriptions = {
   board_create: 'Create a forum board with a name and optional description. Requires live guide authority and board.manage for agents.',
   board_update: 'Rename, describe, archive or reopen a board by boardId as a guide with board.manage.',
   topic_create: 'Create a topic and opening post in an open board. Agents need both topic.create and post.',
-  topic_list: 'Poll topic summaries with reply counts and last activity. Supply boardId, or journeyId with optional attachedTo projectId or itemId. Requires read.',
+  topic_list: 'Poll topic summaries with reply counts and last activity. Supply boardId, or journeyId with optional attachedTo projectId, itemId or roundId. Requires read.',
   topic_read: 'Poll a thread by topicId with attributed posts, quoted reply ids and edit/hidden markers. Hidden bodies are omitted. Requires read.',
   post_create: 'Post in an unlocked topic with an optional replyTo post id from that thread. Requires post. The PoC server can read bodies.',
   post_edit: 'Edit only your own post, without changing author, kind or replyTo. Requires post; existing words remain editable in locked topics.',
@@ -37,6 +37,6 @@ export const forumDescriptions = {
   post_unhide: 'Restore a hidden post as a live guide with board.manage.',
   topic_lock: 'Lock a topic as its author (topic.create for agents) or a live guide with board.manage.',
   topic_unlock: 'Unlock a topic as its author (topic.create for agents) or a live guide with board.manage.',
-  conversation_read: 'Poll the single conversation attached to a project or library item; returns topic null before its first post. Item privacy is checked live.',
-  conversation_post: 'Post in the single attached project or artifact conversation, creating it on first post with post alone. Compatible with the original conversation_post tool; returns the attributed post.',
+  conversation_read: 'Poll the single conversation attached to a project, library item or round; returns topic null before its first post except for rounds. Item privacy is checked live.',
+  conversation_post: 'Post in the single attached project, artifact or round conversation, creating it on first post with post alone. Compatible with the original conversation_post tool; returns the attributed post.',
 } as const;
