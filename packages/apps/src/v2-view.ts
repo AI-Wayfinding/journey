@@ -30,7 +30,7 @@ function render(data: V2View) {
   current = data.view; journeyId = data.journeyId;
   itemId = undefined; roundId = undefined; topicId = undefined; documentId = undefined;
   overview.replaceChildren(); field('interview', 'text').value = '';
-  for (const id of ['filters', 'item', 'board', 'thread', 'newtopic', 'reply', 'round', 'interview', 'contribute', 'my-interview', 'share', 'document']) node(id).hidden = true;
+  for (const id of ['filters', 'item', 'board', 'thread', 'newtopic', 'reply', 'round', 'interview', 'contribute', 'my-interview', 'share', 'share-note', 'document']) node(id).hidden = true;
   node('title').textContent = data.view === 'agents' ? 'Agent capabilities' : `Journey ${data.view === 'round' ? 'sensemaking' : data.view}`;
   if (data.view === 'library') {
     node('filters').hidden = false; node('item').hidden = false;
@@ -65,7 +65,7 @@ function render(data: V2View) {
       thread(data.conversation?.topic);
       if (data.interview) {
         const interview = data.interview; section('My interview', [interview.label, interview.shared ? 'Shared with the round. Future edits are shared too.' : 'Private to you and your agents.', interview.text]);
-        field('interview', 'text').value = interview.text; node('interview').hidden = false; node('share').hidden = interview.shared;
+        field('interview', 'text').value = interview.text; node('interview').hidden = false; node('share').hidden = interview.shared; node('share-note').hidden = interview.shared;
       }
     }
   } else {
@@ -107,7 +107,7 @@ app.ontoolresult = result;
 node('refresh').addEventListener('click', refresh);
 node('signin').addEventListener('click', () => { if (ready) void app.openLink({ url: CONSOLE_URL }).catch(() => { status.textContent = 'Could not open the console.'; }); });
 for (const kind of ['library', 'forum', 'round', 'agents'] as const) node(`nav-${kind}`).addEventListener('click', () => {
-  if (kind === 'agents' || journeyId) { boardId = undefined; filters = {}; void call(`apps_v2_${kind}`, kind === 'agents' ? { journeyId } : { journeyId }); }
+  if (kind === 'agents' || journeyId) { boardId = undefined; filters = {}; void call(`apps_v2_${kind}`, { journeyId }); }
 });
 node('my-interview').addEventListener('click', () => { if (roundId) void call('apps_v2_interview_read', { journeyId, roundId }); });
 node('share').addEventListener('click', () => { if (roundId) void call('apps_v2_interview_share', { journeyId, roundId }); });

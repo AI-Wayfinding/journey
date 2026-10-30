@@ -9,7 +9,7 @@
 <form id="round"><h2>Choose a round</h2><label>Round <select id="round-options" name="roundId" required></select></label><button disabled>Open round</button></form>
 <button id="document" disabled>Open sensemaking document details</button><button id="my-interview" disabled>Read my interview</button>
 <form id="interview"><h2>My interview notes</h2><label>Notes <textarea name="text" maxlength="262144" rows="8"></textarea></label><button disabled>Save my interview</button></form>
-<p>Sharing your interview is permanent. Later edits are shared too.</p><button id="share" disabled>Share my interview with the round permanently</button>
+<p id="share-note" hidden>Sharing your interview is permanent. Later edits are shared too.</p><button id="share" disabled>Share my interview with the round permanently</button>
 <form id="contribute"><h2>Contribute to the sensemaking document</h2><label>Contribution <textarea name="text" maxlength="262144" rows="5" required></textarea></label><button disabled>Add contribution as my person</button></form>
 <form id="reply"><h2>Reply to this conversation</h2><label>Post <textarea name="body" maxlength="4096" rows="4" required></textarea></label><label>Quote post ID (optional) <input name="replyTo" maxlength="200"></label><button disabled>Post reply</button></form>
 </main>

@@ -80,7 +80,7 @@ test('views: round host shows lifecycle, own interview, sharing, contribution at
   assert.equal((await f.call(f.alice, 'interview_read', { roundId: round.roundId })).text, 'My private words');
   h.click('share'); await h.until(() => h.text.includes('Shared with the round'));
   h.submit('contribute', { text: 'A considered contribution' }); await h.until(() => h.text.includes('1 contribution'));
-  assert.match(String((await f.call(f.alice, 'round_read', { roundId: round.roundId })).contributionSummary && h.text), new RegExp(String(f.a)));
+  assert.match(h.text, new RegExp(String(f.a)));
   h.click('document'); await h.until(() => h.text.includes('sensemaking') && h.text.includes('Library artifact'));
   assert.doesNotMatch(h.text, /My private words|BOB-PRIVATE/);
   h.click('nav-forum'); await h.until(() => h.text.includes('General'));
@@ -123,4 +123,43 @@ test('views: read-only capability card groups scopes and opens a fixed console l
   const before = f.backend.snapshot(); h.click('signin'); await h.until(() => h.opened.length === 1);
   assert.deepEqual(h.opened, ['https://poc.wayfinding.support/console']); assert.equal(f.backend.snapshot(), before);
   assert.equal((await f.bob.callTool({ name: 'apps_v2_agents', arguments: { agentId } })).isError, true);
+});
+
+
+test('views: boundary strips content, locations and hidden posts; refused refresh clears private DOM text', async t => {
+  const f = await fixture(t), item = await f.call(f.alice, 'library_add', { journeyId: f.journeyId, name: 'Source', text: 'SECRET-ARTIFACT' });
+  const projected = await f.call(f.alice, 'apps_v2_library', { journeyId: f.journeyId, itemId: item.itemId });
+  assert.doesNotMatch(JSON.stringify(projected), /SECRET-ARTIFACT/);
+  const h = await f.host('library', 'library_view', { journeyId: f.journeyId });
+  h.notify('ui/notifications/tool-result', { structuredContent: { ...projected, text: 'SECRET', url: 'https://evil.test', item: { ...(projected.item as Data), text: 'SECRET', url: 'https://evil.test' }, conversation: { topic: { topicId: 't', title: 'Hidden', author: 'p', authorName: 'Person', authorKind: 'person', locked: false, postCount: 1, replyCount: 0, createdAt: 1, lastActivity: 1, posts: [{ postId: 'p', topicId: 't', author: 'p', authorName: 'Person', authorKind: 'person', hidden: true, edited: false, createdAt: 1, updatedAt: 1, body: 'HIDDEN-SECRET' }] } } } });
+  await h.until(() => h.text.includes('[Hidden by a guide]'));
+  assert.doesNotMatch(h.text, /SECRET|evil.test/);
+  const roundId = (await f.call(f.alice, 'round_create', { journeyId: f.journeyId, title: 'Own notes', goal: 'Protect' })).roundId;
+  await f.call(f.alice, 'interview_write', { roundId, text: 'MY-PRIVATE-NOTES' });
+  h.notify('ui/notifications/tool-result', await f.alice.callTool({ name: 'apps_v2_interview_read', arguments: { journeyId: f.journeyId, roundId } }));
+  await h.until(() => h.text.includes('MY-PRIVATE-NOTES'));
+  h.notify('ui/notifications/tool-result', { isError: true, content: [{ type: 'text', text: 'unsafe error' }] });
+  await h.until(() => h.nodes.get('status')!.textContent.includes('refused'));
+  assert.doesNotMatch(h.text, /MY-PRIVATE-NOTES|unsafe error/); assert.equal(h.fields.get('interview:text')!.value, '');
+});
+
+test('views: own agents retain actor attribution; revoked cards and mismatched journeys cannot mutate', async t => {
+  const f = await fixture(t), agentId = (await f.call(f.alice, 'agent_create', { name: 'Interviewer' })).agentId as string;
+  await f.call(f.alice, 'agent_add', { journeyId: f.journeyId, agentId }); await setAgentCard(f.backend, 'alice', agentId, ['read', 'round.contribute', 'post']);
+  const roundId = (await f.call(f.alice, 'round_create', { journeyId: f.journeyId, title: 'Interview', goal: 'Listen' })).roundId;
+  await f.call(f.alice, 'round_status', { roundId, to: 'open' });
+  const h = await f.host('round', 'round_view', { journeyId: f.journeyId, roundId, actingAgent: agentId });
+  h.submit('contribute', { text: 'Agent helped me' }); await h.until(() => h.text.includes('1 contributions'));
+  assert.match(h.text, new RegExp(String(f.a)));
+  assert.equal((h.messages.find(m => m.method === 'tools/call')!.params!.arguments as Data).actingAgent, agentId);
+  const own = await f.call(f.alice, 'apps_v2_interview_write', { journeyId: f.journeyId, roundId, text: 'Owner private', actingAgent: agentId });
+  assert.equal((own.interview as Data).personId, f.a); assert.equal((own.interview as Data).text, 'Owner private');
+  const other = (await f.call(f.alice, 'journey_create', { name: 'Other' })).journeyId;
+  const before = f.backend.snapshot();
+  assert.equal((await f.alice.callTool({ name: 'apps_v2_contribute', arguments: { journeyId: other, roundId, text: 'Wrong journey' } })).isError, true);
+  assert.equal(f.backend.snapshot(), before);
+  await f.call(f.alice, 'agent_narrow', { agentId, remove: ['round.contribute'] });
+  const revoked = f.backend.snapshot();
+  h.submit('contribute', { text: 'No longer allowed' }); await h.until(() => h.nodes.get('status')!.textContent.includes('refused'));
+  assert.equal(f.backend.snapshot(), revoked);
 });

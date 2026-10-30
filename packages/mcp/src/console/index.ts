@@ -4,6 +4,7 @@ import { Refused } from '../commands.ts';
 import type { ConsoleConfig } from './contract.ts';
 import { ConsoleSessions, SESSION_COOKIE, OAUTH_COOKIE, random, cookie } from './session.ts';
 
+import { workspacePage } from './workspace.ts';
 import { home, agentPage, passkeysPage, confirmation, journeyPage, routeId } from './pages.ts';
 import { style, webauthn } from './assets.ts';
 import { parseCommand } from '../commands.ts';
@@ -105,6 +106,8 @@ export function createConsole(config: ConsoleConfig) {
       if (path === '/console' || path === '/console/') return html(await home(config.backend, identity, session.csrf));
       if (path === '/console/passkeys') return html(await passkeysPage(config.backend, identity, session.csrf));
       if (path.startsWith('/console/agents/')) return html(await agentPage(config.backend, identity, routeId(path, '/console/agents/'), session.csrf));
+      const workspace = await workspacePage(config.backend, identity, url, session.csrf);
+      if (workspace !== undefined) return html(workspace);
       if (path.startsWith('/console/journeys/')) return html(await journeyPage(config.backend, identity, routeId(path, '/console/journeys/'), session.csrf));
       return new Response('Not found', { status: 404, headers });
     } catch { return new Response('<!doctype html><html lang="en"><meta charset="utf-8"><title>Console request refused</title><main><h1>Console request refused</h1><p>Check the form or <a href="/console/login">sign in to your console</a>.</p></main></html>', { status: 403, headers: { ...headers, 'Content-Type': 'text/html; charset=utf-8' } }); }

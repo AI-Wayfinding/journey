@@ -42,12 +42,16 @@ export async function passkeysPage(backend: ConsoleBackend, identity: ClientIden
 export function confirmation(change: CardChange, csrf: string): string {
   return page('Confirm permissions', `<p>Use your passkey to confirm this exact change.</p><dl><dt>Action</dt><dd>${escape(change.kind)}</dd><dt>Agent</dt><dd>${escape(change.agentId)}</dd>${change.kind === 'card' ? `<dt>Capabilities</dt><dd>${escape(change.capabilities.join(', ') || 'None')}</dd>` : `<dt>Client</dt><dd>${escape(change.clientId)}</dd>`}</dl><form method="post" action="/console/authorize/complete" data-ceremony="assert" data-options="/console/authorize/options">${hidden('csrf', csrf)}${hidden('change', JSON.stringify(change))}<button type="submit">Confirm with passkey</button></form><p><a href="/console">Cancel</a></p>`, csrf);
 }
+export function journeyNav(journeyId: string): string {
+  const root = `/console/journeys/${segment(journeyId)}`;
+  return `<nav aria-label="Journey"><a href="${root}">Overview</a><a href="${root}/library">Library</a><a href="${root}/forum">Forum</a><a href="${root}/rounds">Sensemaking</a></nav>`;
+}
 export async function journeyPage(backend: ConsoleBackend, identity: ClientIdentity, journeyId: string, csrf: string): Promise<string> {
   const journey = await backend.execute(identity.subject, parseCommand('journey_read', { journeyId }), identity.clientId);
   const forum = await backend.execute(identity.subject, parseCommand('topic_list', { journeyId }), identity.clientId);
   const rounds = await backend.execute(identity.subject, parseCommand('round_list', { journeyId }), identity.clientId);
   const list = (heading: string, value: unknown, render: (row: ToolData) => string) => `<section><h2>${heading}</h2><ul>${rows(value).map(row => `<li>${render(row)}</li>`).join('') || '<li>Nothing to show in this build.</li>'}</ul></section>`;
-  return page(String(journey.name), list('Members', journey.members, m => `${escape(m.name)} · ${escape(m.kind)} · ${escape(m.role)}${m.guide ? ' · guide' : ''}`)
+  return page(String(journey.name), journeyNav(journeyId) + list('Members', journey.members, m => `${escape(m.name)} · ${escape(m.kind)} · ${escape(m.role)}${m.guide ? ' · guide' : ''}`)
     + list('Library', journey.items ?? journey.artifacts, a => `${escape(a.name)} · ${escape(a.kind ?? a.type)} · version ${escape(a.version)}`)
     + list('Forum topics', forum.topics, t => `${escape(t.title)} · ${escape(t.replyCount)} replies${t.locked ? ' · locked' : ''}`)
     + list('Sensemaking rounds', rounds.rounds, r => `${escape(r.title)} · ${escape(r.goal)} · ${escape(r.status)}`), csrf);

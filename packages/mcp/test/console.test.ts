@@ -301,3 +301,50 @@ test('console: served browser script completes registration and assertion throug
   assert.equal(await browser('assert', { kind: 'card', agentId, capabilities: ['post'] }), `/console/agents/${agentId}`);
   assert.deepEqual((await f.backend.execute('alice', parseCommand('agent_capabilities', { agentId }), clientId)).capabilities, ['post']);
 });
+
+
+test('views console: linked journey library, forum and round routes read live work and escape text', async () => {
+  const f = await fixture(), login = await f.login();
+  const call = (tool: string, input: Record<string, unknown> = {}) => f.backend.execute('alice', parseCommand(tool, input), clientId);
+  const journeyId = (await call('journey_create', { name: 'Workspace' })).journeyId;
+  const itemId = (await call('library_add', { journeyId, name: '<b>Source</b>', kind: 'prompt', labels: ['research'], description: '<script>unsafe</script>', text: 'ARTIFACT-CONTENT' })).itemId;
+  const roundId = (await call('round_create', { journeyId, title: 'First position', goal: 'Find a heading' })).roundId;
+  await call('interview_write', { roundId, text: '<img src=x onerror=alert(1)> PRIVATE-NOTES' });
+  const topicId = (await call('conversation_post', { journeyId, target: { itemId }, body: '<script>Forum words</script>' })).topicId;
+  const root = `/console/journeys/${journeyId}`;
+  const read = async (path: string) => { const response = await f.send(path, { headers: { cookie: login.cookie } }); assert.equal(response.status, 200, path); return response.text(); };
+  const home = await read(root);
+  for (const suffix of ['/library', '/forum', '/rounds']) assert.ok(home.includes(`${root}${suffix}`));
+  const library = await read(`${root}/library?kind=prompt&label=research&query=Source`);
+  assert.ok(library.includes(`${root}/library/${itemId}`)); assert.match(library, /&lt;b&gt;Source&lt;\/b&gt;/);
+  assert.doesNotMatch(library, /ARTIFACT-CONTENT|PRIVATE-NOTES/);
+  const detail = await read(`${root}/library/${itemId}`);
+  assert.match(detail, /&lt;script&gt;unsafe&lt;\/script&gt;/); assert.match(detail, /&lt;script&gt;Forum words&lt;\/script&gt;/);
+  assert.doesNotMatch(detail, /<script>unsafe|ARTIFACT-CONTENT/);
+  const forum = await read(`${root}/forum`); assert.ok(forum.includes(`${root}/forum/${topicId}`));
+  assert.match(await read(`${root}/forum/${topicId}`), /alice.*person.*Forum words/s);
+  assert.ok((await read(`${root}/rounds`)).includes(`${root}/rounds/${roundId}`));
+  const round = await read(`${root}/rounds/${roundId}`);
+  assert.match(round, /Find a heading.*planned.*open.*synthesising.*closed/s); assert.doesNotMatch(round, /PRIVATE-NOTES/);
+  const mine = await read(`${root}/rounds/${roundId}?interview=mine`);
+  assert.match(mine, /My interview.*&lt;img src=x onerror=alert\(1\)&gt; PRIVATE-NOTES/s);
+});
+
+test('views console: private interview selectors, mismatched journeys and outsider reads fail closed', async () => {
+  const f = await fixture(), login = await f.login();
+  const alice = (tool: string, input: Record<string, unknown> = {}) => f.backend.execute('alice', parseCommand(tool, input), clientId);
+  const journeyId = (await alice('journey_create', { name: 'Shared', policy: 'open', defaultRole: 'write' })).journeyId;
+  const bob = (await f.backend.execute('bob', parseCommand('account_read', {}))).personId;
+  await f.backend.execute('bob', parseCommand('journey_join', { journeyId }));
+  const roundId = (await alice('round_create', { journeyId, title: 'Private', goal: 'Protect notes' })).roundId;
+  await f.backend.execute('bob', parseCommand('interview_write', { roundId, text: 'BOB-PRIVATE' }));
+  const hiddenId = (await f.backend.execute('bob', parseCommand('library_add', { journeyId, name: 'Bob private', visibility: 'private', text: 'BOB-PRIVATE' }))).itemId;
+  const otherJourney = (await alice('journey_create', { name: 'Other' })).journeyId;
+  const outsiderJourney = (await f.backend.execute('bob', parseCommand('journey_create', { name: 'Bob only' }))).journeyId;
+  for (const path of [`/console/journeys/${journeyId}/rounds/${roundId}?personId=${bob}`, `/console/journeys/${journeyId}/rounds/${roundId}?interview=${bob}`, `/console/journeys/${otherJourney}/rounds/${roundId}`, `/console/journeys/${journeyId}/library/${hiddenId}`, `/console/journeys/${outsiderJourney}/library`]) {
+    const response = await f.send(path, { headers: { cookie: login.cookie } });
+    assert.equal(response.status, 403, path); assert.doesNotMatch(await response.text(), /BOB-PRIVATE/);
+  }
+  const response = await f.send(`/console/journeys/${journeyId}/rounds/${roundId}?interview=mine`, { headers: { cookie: login.cookie } });
+  assert.equal(response.status, 200); assert.doesNotMatch(await response.text(), /BOB-PRIVATE/);
+});
