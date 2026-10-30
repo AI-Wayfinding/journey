@@ -6,6 +6,7 @@ import type { AuthenticationResponseJSON } from '@simplewebauthn/server';
 import { JourneyHost } from './journey.ts';
 import { itemJourney } from './library.ts';
 import { isForumCommand, forumCommandJourney } from './forum.ts';
+import { isRoundCommand, roundJourney } from './rounds.ts';
 import { MemoryStorage } from './storage.ts';
 import { MemoryBlobs, encodeBytes } from './relay.ts';
 
@@ -107,6 +108,11 @@ export class Backend implements CoordinationBackend {
         return this.accounts.group(account.personId, command);
       }
       return this.journey(command.input.groupId).execute(account.personId, command, undefined, actor);
+    }
+
+    if (isRoundCommand(command)) {
+      const journeyId = 'journeyId' in command.input ? command.input.journeyId : roundJourney(command.input.roundId);
+      return this.journey(journeyId).execute(account.personId, command, undefined, actor);
     }
     switch (command.tool) {
       case 'account_read':

@@ -7,6 +7,7 @@ import { Serial, type KeyValueStorage } from './storage.ts';
 import { relay, deleteArtifactBlobs, type BlobStore } from './relay.ts';
 import { library, isLibraryCommand, isLibraryArtifact, requireItem, visibleItem, type LibraryArtifact, type LibraryAccess, type LibraryCommand } from './library.ts';
 import { forum, isForumCommand, defaultBoard, type Board, type Topic, type Post } from './forum.ts';
+import { rounds, isRoundCommand, type SensemakingRound } from './rounds.ts';
 
 interface Identity { id: string; name: string }
 interface Project { id: string; name: string; purpose: string; rule: Snapshot }
@@ -18,6 +19,7 @@ export interface JourneyState {
   id: string; name: string; rulesHash: RulesStamp; identities: Identity[]; membership: Snapshot;
   projects: Project[]; agents: Agent[]; grants: Grant[]; artifacts: (Artifact | LibraryArtifact)[]; tasks: Task[];
   topics: Snapshot; boards: Board[]; topicRecords: Topic[]; targets: import("./forum-inputs.ts").ForumTarget[]; posts: Post[];
+  rounds: SensemakingRound[];
 }
 
 function requireChange(before: Snapshot, after: Snapshot, what: string, ignore: string[] = []): Snapshot {
@@ -233,7 +235,7 @@ export class JourneyHost {
       if (command.tool === 'journey_create') {
         if (state) throw new Refused('Journey already exists');
         if (!journeyId) throw new Refused('Journey identity missing');
-        state = { id: journeyId, name: command.input.name, rulesHash: RULES, identities: [], membership: journeyRule.init(), projects: [], agents: [], grants: [], artifacts: [], tasks: [], topics: topicRule.init(), posts: [], boards: [], topicRecords: [], targets: [] };
+        state = { id: journeyId, name: command.input.name, rulesHash: RULES, identities: [], membership: journeyRule.init(), projects: [], agents: [], grants: [], artifacts: [], tasks: [], rounds: [], topics: topicRule.init(), posts: [], boards: [], topicRecords: [], targets: [] };
         const actor = this.slot(state, personId, true);
         state.membership = requireChange(state.membership, journeyRule.step(state.membership, encodeJourney({ op: 'found', actor, newPolicy: command.input.policy, role: command.input.defaultRole })), 'Founding');
         defaultBoard(state, actor);
@@ -254,6 +256,13 @@ export class JourneyHost {
           const result = await forum(state, command, { actor, person: this.slot(state, personId), agent: identity.agent !== undefined,
             read: this.can(state, actor, identity, 'read'), post: this.can(state, actor, identity, 'post'),
             topic: this.can(state, actor, identity, 'topic.create'), manage: this.can(state, actor, identity, 'board.manage') }, this.storage, this.now());
+          if (result.changed) await this.commit(state, result.writes);
+          return result.data;
+        }
+        if (isRoundCommand(command)) {
+          const result = await rounds(state, command, { actor, person: this.slot(state, personId), agent: identity.agent !== undefined,
+            read: this.can(state, actor, identity, 'read'), create: this.can(state, actor, identity, 'round.create'),
+            run: this.can(state, actor, identity, 'round.run'), contribute: this.can(state, actor, identity, 'round.contribute') }, this.storage, this.now());
           if (result.changed) await this.commit(state, result.writes);
           return result.data;
         }

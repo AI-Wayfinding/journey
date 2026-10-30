@@ -11,7 +11,7 @@ export interface Topic { id: string; slot: number; title: string; boardId?: stri
 export interface Post { id: string; topic: number; rule: Snapshot; createdAt: number; updatedAt: number }
 export interface ForumState {
   id: string; identities: { id: string; name: string }[]; boards: Board[]; topics: Snapshot; topicRecords: Topic[]; posts: Post[];
-  targets: ForumTarget[]; projects: { id: string; name: string }[];
+  targets: ForumTarget[]; projects: { id: string; name: string }[]; rounds: { id: string; title: string }[];
   artifacts: ({ id: string; name: string; type: string; size: number; rule: Snapshot; storage?: never } | LibraryArtifact)[];
 }
 export interface ForumAccess { actor: number; person: number; agent: boolean; read: boolean; post: boolean; topic: boolean; manage: boolean }
@@ -45,8 +45,13 @@ export function defaultBoard(state: ForumState, guide: number): void {
   if (scalar(rule, 'exists') !== 1) throw new Refused('Default board creation refused');
   state.boards.push({ id: id(state, 'board'), name: 'General', description: '', rule });
 }
-function targetKey(target: ForumTarget): string { return 'projectId' in target ? `project:${target.projectId}` : `item:${target.itemId}`; }
+function targetKey(target: ForumTarget): string { return 'projectId' in target ? `project:${target.projectId}` : 'itemId' in target ? `item:${target.itemId}` : `round:${target.roundId}`; }
 function targetName(state: ForumState, target: ForumTarget, access: ForumAccess): string {
+  if ('roundId' in target) {
+    const round = state.rounds.find(r => r.id === target.roundId);
+    if (!round) throw new Refused('Forum round not found');
+    return round.title;
+  }
   if ('projectId' in target) {
     const project = state.projects.find(p => p.id === target.projectId);
     if (!project) throw new Refused('Forum project not found');
@@ -130,8 +135,14 @@ function makeTopic(state: ForumState, access: ForumAccess, now: number, title: s
   if (board) topic.boardId = board.id;
   if (target) topic.target = target;
   state.topicRecords.push(topic); return topic;
+
 }
 
+
+/** Round creation owns this one attached topic, not general forum posting authority. */
+export function attachRoundConversation(state: ForumState, roundId: string, title: string, person: number, now: number): Topic {
+  return makeTopic(state, { actor: person, person, agent: false, read: false, post: true, topic: false, manage: false }, now, title, undefined, { roundId });
+}
 /** Runs inside the journey's serial turn; body writes commit atomically with rule state. */
 export async function forum(state: ForumState, command: ForumCommand, access: ForumAccess, storage: KeyValueStorage, now: number): Promise<ForumResult> {
   const writes: [string, string][] = [];

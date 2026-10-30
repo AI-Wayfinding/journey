@@ -6,7 +6,7 @@ const journey = { journeyId: id, ...acting };
 const board = { boardId: id, ...acting };
 const topic = { topicId: id, ...acting };
 const post = { postId: id, ...acting };
-export const forumTarget = z.union([z.object({ projectId: id }).strict(), z.object({ itemId: id }).strict()]);
+export const forumTarget = z.union([z.object({ projectId: id }).strict(), z.object({ itemId: id }).strict(), z.object({ roundId: id }).strict()]);
 export type ForumTarget = z.infer<typeof forumTarget>;
 export const forumInputs = {
   forum_boards: z.object(journey).strict(),

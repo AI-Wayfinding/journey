@@ -12,6 +12,7 @@ import * as artifactModule from '../../rules/generated/artifact.js';
 import * as taskModule from '../../rules/generated/task.js';
 import * as itemModule from '../../rules/generated/item.js';
 import * as groupModule from '../../rules/generated/personalGroup.js';
+import * as roundModule from '../../rules/generated/round.js';
 import lock from '../../rules/rules.lock.json' with { type: 'json' };
 
 type State = ReturnType<typeof journeyModule.init>;
@@ -40,6 +41,7 @@ export interface RulesStamp {
   topic: string;
   post: string;
   item: string;
+  round: string;
 }
 
 export const RULES: RulesStamp = Object.freeze({
@@ -56,6 +58,7 @@ export const RULES: RulesStamp = Object.freeze({
   topic: lock.files['generated/topic.js'],
   post: lock.files['generated/post.js'],
   item: lock.files['generated/item.js'],
+  round: lock.files['generated/round.js'],
 });
 
 /** Whether `stamp` names exactly the rule modules this build runs. */
@@ -131,6 +134,7 @@ export const grantRule = rule(grantModule, {});
 export const artifactRule = rule(artifactModule, {});
 export const itemRule = rule(itemModule, {});
 export const taskRule = rule(taskModule, {});
+export const roundRule = rule(roundModule, {});
 export const personalGroupRule = (owner: number) => rule(groupModule, { owner, slots: SLOTS });
 
 /** The value of a scalar. */
