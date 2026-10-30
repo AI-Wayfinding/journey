@@ -15,9 +15,12 @@
   "r2_buckets": [{ "binding": "BLOBS", "bucket_name": "wayfinding-ciphertext" }],
   "durable_objects": {
     "bindings": [
-      { "name": "JOURNEYS", "class_name": "Journey" },
-      { "name": "ACCOUNTS", "class_name": "Accounts" }
+      { "name": "JOURNEYS", "class_name": "JourneyV2" },
+      { "name": "ACCOUNTS", "class_name": "AccountsV2" }
     ]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Journey", "Accounts"] }]
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Journey", "Accounts"] },
+    { "tag": "v2", "new_sqlite_classes": ["JourneyV2", "AccountsV2"] }
+  ]
 }
