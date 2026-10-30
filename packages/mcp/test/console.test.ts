@@ -187,8 +187,14 @@ test('console: semantic pages escape names and preserve membership and card limi
   assert.match(detail.headers.get('content-security-policy')!, /frame-ancestors 'none'/);
   const csrf = csrfOf(home);
   assert.equal((await f.send('/console/authorize/start', { method: 'POST', headers: { ...headers, origin, 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ csrf, kind: 'card', agentId }).toString() })).status, 200);
+  const boards = await f.backend.execute('alice', parseCommand('forum_boards', { journeyId }), clientId);
+  const boardId = (boards.boards as { boardId: string }[])[0]!.boardId;
+  await f.backend.execute('alice', parseCommand('topic_create', { boardId, title: '<script>Forum title</script>', body: 'Synthetic post' }), clientId);
   const journey = await f.send(`/console/journeys/${journeyId}`, { headers }); assert.equal(journey.status, 200);
-  assert.match(await journey.text(), /Members.*Library.*Forum topics.*Sensemaking rounds/s);
+  const journeyHtml = await journey.text();
+  assert.match(journeyHtml, /Members.*Library.*Forum topics.*Sensemaking rounds/s);
+  assert.equal(journeyHtml.includes('&lt;script&gt;Forum title&lt;/script&gt; · 0 replies'), true);
+  assert.doesNotMatch(journeyHtml, /<script>Forum title/);
   const other = String((await f.backend.execute('bob', parseCommand('journey_create', { name: 'Bob private' }), 'other')).journeyId);
   assert.equal((await f.send(`/console/journeys/${other}`, { headers })).status, 403);
   assert.equal((await f.send('/console', { headers: { ...headers, host: 'evil.example' } })).status, 403);

@@ -5,7 +5,8 @@ import { releasedViews } from '@ai-wayfinding/apps/views';
 import { journeyView, projectView, artifactsView, type ViewKind } from '@ai-wayfinding/apps/contract';
 import { inputs, parseCommand, Refused, type CoordinationBackend, type ToolData, type ToolName } from './commands.ts';
 
-export interface ReleasedView { uri: string; kind: ViewKind; html: string }
+import { registerForumApps } from './forum-apps.ts';
+export interface ReleasedView { uri: string; kind: ViewKind | 'forum'; html: string }
 // Add releases; never replace or remove a released URI when shipping a successor.
 export function registerViewResources(server: McpServer, releases: readonly ReleasedView[] = releasedViews) {
   for (const release of releases) registerAppResource(server, release.uri, release.uri,
@@ -45,6 +46,7 @@ const viewTools: ViewTool[] = [
 ];
 export function registerApps(server: McpServer, subject: string | undefined, backend?: CoordinationBackend, clientId?: string) {
   registerViewResources(server);
+  registerForumApps(server, subject, backend, clientId);
   for (const tool of viewTools) {
     // Reuse the strict project-selector input, but never join on view/refresh.
     const inputSchema: z.ZodObject<z.ZodRawShape> = tool.projectSelector ? inputs.project_join : inputs[tool.command];

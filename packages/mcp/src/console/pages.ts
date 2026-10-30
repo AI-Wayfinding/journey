@@ -44,10 +44,11 @@ export function confirmation(change: CardChange, csrf: string): string {
 }
 export async function journeyPage(backend: ConsoleBackend, identity: ClientIdentity, journeyId: string, csrf: string): Promise<string> {
   const journey = await backend.execute(identity.subject, parseCommand('journey_read', { journeyId }), identity.clientId);
+  const forum = await backend.execute(identity.subject, parseCommand('topic_list', { journeyId }), identity.clientId);
   const list = (heading: string, value: unknown, render: (row: ToolData) => string) => `<section><h2>${heading}</h2><ul>${rows(value).map(row => `<li>${render(row)}</li>`).join('') || '<li>Nothing to show in this build.</li>'}</ul></section>`;
   return page(String(journey.name), list('Members', journey.members, m => `${escape(m.name)} · ${escape(m.kind)} · ${escape(m.role)}${m.guide ? ' · guide' : ''}`)
     + list('Library', journey.items ?? journey.artifacts, a => `${escape(a.name)} · ${escape(a.kind ?? a.type)} · version ${escape(a.version)}`)
-    + list('Forum topics', journey.topics, t => escape(t.title ?? t.name))
+    + list('Forum topics', forum.topics, t => `${escape(t.title)} · ${escape(t.replyCount)} replies${t.locked ? ' · locked' : ''}`)
     + list('Sensemaking rounds', journey.rounds, r => `${escape(r.goal)} · ${escape(r.status)}`), csrf);
 }
 export function routeId(path: string, prefix: string): string {
