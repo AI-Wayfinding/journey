@@ -1,6 +1,6 @@
 import { McpServer, ProtocolError, ResourceTemplate, type McpServerFactory, type ServerContext } from '@modelcontextprotocol/server';
 import * as z from 'zod';
-import { inputs, TOOL_NAMES, parseCommand, Refused, type CoordinationBackend } from './commands.ts';
+import { inputs, descriptions, relayNote, TOOL_NAMES, parseCommand, Refused, type CoordinationBackend } from './commands.ts';
 import { registerApps } from './apps.ts';
 import { inboxJourney } from './inbox.ts';
 
@@ -33,7 +33,7 @@ export function buildServer(ctx: Parameters<McpServerFactory>[0], backend?: Coor
   for (const name of TOOL_NAMES) {
     const inputSchema: z.ZodObject<z.ZodRawShape> = inputs[name];
     server.registerTool(name, {
-      description: `Wayfinding: ${name.replaceAll('_', ' ')}. Relay data is opaque base64; artifact metadata tools never accept plaintext content. Personal group IDs are personal_<personId>.`,
+      description: `${descriptions[name]}${/^(artifact_|mls_|personal_group_)/.test(name) ? ` ${relayNote}` : ''}`,
       inputSchema,
     }, async (args: Record<string, unknown>) => {
       try {

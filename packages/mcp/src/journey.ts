@@ -81,15 +81,26 @@ export class JourneyHost {
         const slot = i + 1, kind = cell(state.membership, 'Members', slot);
         if (kind === 0) return [];
         const person = kind === 2 ? cell(state.membership, 'AddedBy', slot) : slot;
-        return [{ memberId: m.id, kind: kind === 1 ? 'person' : 'agent', role: decodeChoice(JOURNEY.role, cell(state.membership, 'Roles', person), 'role'), guide: kind === 1 && cell(state.membership, 'Guides', slot) === 1, owner: kind === 2 ? state.identities[person - 1]?.id : undefined }];
+        return [{ memberId: m.id, name: m.name, kind: kind === 1 ? 'person' : 'agent', role: decodeChoice(JOURNEY.role, cell(state.membership, 'Roles', person), 'role'), guide: kind === 1 && cell(state.membership, 'Guides', slot) === 1, owner: kind === 2 ? state.identities[person - 1]?.id : undefined }];
       }),
-      pending: state.identities.flatMap((m, i) => { const p = cell(state.membership, 'Pending', i + 1); return p ? [{ personId: m.id, status: decodeChoice(JOURNEY.pending, p, 'pending') }] : []; }),
+      pending: state.identities.flatMap((m, i) => { const p = cell(state.membership, 'Pending', i + 1); return p ? [{ personId: m.id, name: m.name, status: decodeChoice(JOURNEY.pending, p, 'pending') }] : []; }),
       projects: state.projects.map((p) => ({ projectId: p.id, name: p.name, purpose: p.purpose, status: decodeChoice(PROJECT.status, scalar(p.rule, 'status'), 'project status'), members: state.identities.filter((_, i) => cell(p.rule, 'Members', i + 1) === 1).map((m) => m.id) })),
       agents: state.agents.map((a) => ({ agentId: a.id, owner: a.owner, signed: scalar(a.card, 'signed') === 1, read: scalar(a.card, 'mayRead') === 1, write: scalar(a.card, 'mayWrite') === 1, grant: scalar(a.card, 'mayGrant') === 1 })),
       grants: state.grants.map((g) => ({ grantId: g.id, need: g.need, resource: g.resource, expiresAt: g.expiresAt, status: ['unissued', 'live', 'revoked', 'ended'][scalar(g.rule, 'status')], usesLeft: scalar(g.rule, 'usesLeft') })),
       artifacts: state.artifacts.map((a) => ({ artifactId: a.id, name: a.name, type: a.type, size: a.size, version: scalar(a.rule, 'version'), deleted: scalar(a.rule, 'at') === 2 })),
       tasks: state.tasks.map((t) => this.taskView(state, t)),
     };
+  }
+  /** A read-free authority probe; final invitation still runs the unchanged rule. */
+  requireGuide(personId: string, command: Command): Promise<void> {
+    return this.serial.run(async () => {
+      const state = await this.load();
+      if (!state) throw new Refused('Only guides may invite');
+      let actor: number;
+      try { actor = this.actor(state, personId, command); }
+      catch (error) { if (error instanceof Refused) throw new Refused('Only guides may invite'); throw error; }
+      if (!this.has(state, actor, 'guide')) throw new Refused('Only guides may invite');
+    });
   }
   /** Used by the account directory, without leaking private journeys to nonmembers. */
   summary(personId: string): Promise<ToolData | undefined> {
@@ -220,7 +231,8 @@ export class JourneyHost {
     const op = membershipOps[command.tool];
     if (op !== undefined) {
       let subject = actor;
-      if ('personId' in command.input) subject = this.slot(state, command.input.personId, true);
+      if ('personId' in command.input && command.input.personId !== undefined) subject = this.slot(state, command.input.personId, true);
+      if (command.tool === 'journey_invite' && command.input.personId === undefined) throw new Refused('Resolve email before inviting');
       if (command.tool === 'journey_remove') subject = this.slot(state, command.input.memberId);
       const ownAgentRemoval = op === 'remove' && cell(state.membership, 'Members', subject) === 2
         && cell(state.membership, 'AddedBy', subject) === cell(state.membership, 'AddedBy', actor);

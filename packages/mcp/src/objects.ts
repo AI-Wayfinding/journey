@@ -1,3 +1,4 @@
+import * as z from 'zod';
 import { AccountsHost, WorkOSProfiles, type Account } from './accounts.ts';
 import { Backend, type AccountsPort, type JourneyPort } from './backend.ts';
 import { Refused, parseCommand, type Command, type ToolData } from './commands.ts';
@@ -42,6 +43,7 @@ export class Journey {
       const personId = field(body, 'personId');
       if (body['action'] === 'watchInbox') return new Response(await this.host.watchInbox(personId), { headers: { 'content-type': 'application/x-ndjson' } });
       return respond(async () => {
+        if (body['action'] === 'requireGuide') return this.host.requireGuide(personId, command(body));
         if (body['action'] === 'summary') return this.host.summary(personId);
         if (body['action'] === 'inbox') return this.host.inbox(personId);
         if (body['action'] === 'task') {
@@ -65,6 +67,13 @@ export class Accounts {
       const body = record(await request.json());
       if (body['action'] === 'provision') return this.host.provision(field(body, 'subject'));
       if (body['action'] === 'lookup') return this.host.lookup(field(body, 'subject'));
+      if (body['action'] === 'update') {
+        const parsed = command(body);
+        if (parsed.tool !== 'account_update') throw new Refused('Account update required');
+        return this.host.update(field(body, 'personId'), parsed.input.nickname);
+      }
+      if (body['action'] === 'names') return this.host.names(z.array(z.string().min(1).max(200)).max(128).parse(body['personIds']));
+      if (body['action'] === 'personIdByEmail') return this.host.personIdByEmail(z.email().max(320).parse(body['email']));
       if (body['action'] === 'directory') return this.host.directory(typeof body['add'] === 'string' ? field(body, 'add') : undefined);
       if (body['action'] === 'group') return this.host.group(field(body, 'personId'), command(body));
       throw new Refused('Unknown accounts operation');
@@ -88,10 +97,14 @@ export function durableBackend(env: ObjectBindings): Backend {
   const accounts: AccountsPort = {
     provision: (subject) => call<Account>(env.ACCOUNTS, 'accounts', { action: 'provision', subject }),
     lookup: (subject) => call<Account | undefined>(env.ACCOUNTS, 'accounts', { action: 'lookup', subject }),
+    update: (personId, nickname) => call<Account>(env.ACCOUNTS, 'accounts', { action: 'update', personId, tool: 'account_update', input: { nickname } }),
+    names: (personIds) => call<Record<string, string>>(env.ACCOUNTS, 'accounts', { action: 'names', personIds }),
+    personIdByEmail: (email) => call<string | undefined>(env.ACCOUNTS, 'accounts', { action: 'personIdByEmail', email }),
     directory: (add) => call<string[]>(env.ACCOUNTS, 'accounts', { action: 'directory', add }),
     group: (personId, command) => call<ToolData>(env.ACCOUNTS, 'accounts', { action: 'group', personId, tool: command.tool, input: command.input }),
   };
   return new Backend(accounts, (id): JourneyPort => ({
+    requireGuide: (personId, command) => call<void>(env.JOURNEYS, id, { action: 'requireGuide', personId, tool: command.tool, input: command.input }),
     execute: (personId, command, journeyId) => call<ToolData>(env.JOURNEYS, id, { personId, journeyId, tool: command.tool, input: command.input }),
     summary: (personId) => call<ToolData | undefined>(env.JOURNEYS, id, { action: 'summary', personId }),
     inbox: (personId) => call<ToolData>(env.JOURNEYS, id, { action: 'inbox', personId }),

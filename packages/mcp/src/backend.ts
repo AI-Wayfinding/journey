@@ -1,16 +1,26 @@
+import * as z from 'zod';
 import { AccountsHost, type Account, type Profiles } from './accounts.ts';
 import { Refused, parseCommand, isRelay, type Command, type CoordinationBackend, type TaskMethod, type ToolData } from './commands.ts';
 import { JourneyHost } from './journey.ts';
 import { MemoryStorage } from './storage.ts';
 import { MemoryBlobs, encodeBytes } from './relay.ts';
 
+const namedState = z.object({
+  members: z.array(z.object({ memberId: z.string(), name: z.string(), kind: z.enum(['person', 'agent']), role: z.enum(['read', 'write']), guide: z.boolean(), owner: z.string().optional() }).strict()),
+  pending: z.array(z.object({ personId: z.string(), name: z.string(), status: z.string() }).strict()),
+});
+
 export interface AccountsPort {
   provision(subject: string): Promise<Account>;
   lookup(subject: string): Promise<Account | undefined>;
+  update(personId: string, nickname: string): Promise<Account>;
+  names(personIds: string[]): Promise<Record<string, string>>;
+  personIdByEmail(email: string): Promise<string | undefined>;
   directory(add?: string): Promise<string[]>;
   group(personId: string, command: Command): Promise<ToolData>;
 }
 export interface JourneyPort {
+  requireGuide(personId: string, command: Command): Promise<void>;
   execute(personId: string, command: Command, journeyId?: string): Promise<ToolData>;
   summary(personId: string): Promise<ToolData | undefined>;
   inbox(personId: string): Promise<ToolData>;
@@ -23,25 +33,39 @@ export class Backend implements CoordinationBackend {
   private readonly accounts: AccountsPort;
   private readonly journey: (id: string) => JourneyPort;
   constructor(accounts: AccountsPort, journey: (id: string) => JourneyPort) { this.accounts = accounts; this.journey = journey; }
+  private async named(data: ToolData): Promise<ToolData> {
+    if (!('members' in data) || !('pending' in data)) return data;
+    const { members, pending } = namedState.parse(data);
+    const ids = [...members.filter(m => m.kind === 'person').map(m => m.memberId), ...pending.map(p => p.personId)];
+    const names = await this.accounts.names(ids);
+    return { ...data,
+      members: members.map(m => ({ ...m, name: m.kind === 'person' ? names[m.memberId] ?? 'Wayfinding member' : m.name })),
+      pending: pending.map(p => ({ ...p, name: names[p.personId] ?? 'Wayfinding member' })),
+    };
+  }
+  private accountView(account: Account): ToolData {
+    return { personId: account.personId, personalGroupId: `personal_${account.personId}`, subject: account.subject, name: account.name, nickname: account.nickname, email: account.email };
+  }
   async execute(subject: string, supplied: Command): Promise<ToolData> {
     const command = parseCommand(supplied.tool, supplied.input);
     // Relay refusals must not provision an account or otherwise write storage.
     const relayCommand = isRelay(command) || command.tool === 'mls_key_package_publish' || command.tool === 'mls_key_package_fetch';
-    const account = relayCommand ? await this.accounts.lookup(subject) : await this.accounts.provision(subject);
-    if (!account) throw new Refused('Account not provisioned; call account_read first');
+    const account = relayCommand || command.tool === 'journey_invite' ? await this.accounts.lookup(subject) : await this.accounts.provision(subject);
+    if (!account) throw new Refused(command.tool === 'journey_invite' ? 'Only guides may invite' : 'Account not provisioned; call account_read first');
     if (command.tool === 'mls_key_package_publish' || command.tool === 'mls_key_package_fetch') return this.accounts.group(account.personId, command);
     if (isRelay(command)) {
       if (command.input.groupId.startsWith('personal_')) return this.accounts.group(account.personId, command);
       return this.journey(command.input.groupId).execute(account.personId, command);
     }
     switch (command.tool) {
-      case 'account_read': return { personId: account.personId, personalGroupId: `personal_${account.personId}`, subject: account.subject, name: account.name, email: account.email };
+      case 'account_read': return this.accountView(account);
+      case 'account_update': return this.accountView(await this.accounts.update(account.personId, command.input.nickname));
       case 'journey_create': {
         const id = `journey_${crypto.randomUUID()}`;
         // Reserve in the durable directory first. An interrupted create leaves
         // an empty entry, not an unreachable journey; summaries skip empty entries.
         await this.accounts.directory(id);
-        return this.journey(id).execute(account.personId, command, id);
+        return this.named(await this.journey(id).execute(account.personId, command, id));
       }
       case 'journey_list': {
         const ids = await this.accounts.directory();
@@ -50,9 +74,19 @@ export class Backend implements CoordinationBackend {
       }
       case 'personal_group_add': case 'personal_group_read': case 'personal_group_remove':
         return this.accounts.group(account.personId, command);
+      case 'journey_invite': {
+        const journey = this.journey(command.input.journeyId);
+        if (command.input.email === undefined) return this.named(await journey.execute(account.personId, command));
+        // Use the compiled rule (and agent card) before exposing any lookup result.
+        await journey.requireGuide(account.personId, command);
+        const personId = await this.accounts.personIdByEmail(command.input.email);
+        if (!personId) throw new Refused('No Wayfinding account uses that email yet; ask them to sign in once, then invite again');
+        const resolved = parseCommand('journey_invite', { journeyId: command.input.journeyId, actingAgent: command.input.actingAgent, personId });
+        return this.named(await journey.execute(account.personId, resolved));
+      }
       default:
         if (!('journeyId' in command.input)) throw new Refused('Journey id required');
-        return this.journey(command.input.journeyId).execute(account.personId, command);
+        return this.named(await this.journey(command.input.journeyId).execute(account.personId, command));
     }
   }
   async inbox(subject: string, journeyId: string): Promise<ToolData> {

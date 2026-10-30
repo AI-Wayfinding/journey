@@ -22,7 +22,8 @@ export const inputs = {
   journey_list: z.object({}).strict(),
   journey_read: z.object(context).strict(),
   journey_policy: z.object({ ...context, policy, defaultRole: role }).strict(),
-  journey_invite: z.object(target).strict(),
+  journey_invite: z.object({ ...context, personId: id.optional(), email: z.email().max(320).optional() }).strict()
+    .refine(v => (v.personId !== undefined) !== (v.email !== undefined), 'Supply exactly one of personId or email'),
   journey_request: z.object(context).strict(),
   journey_join: z.object(context).strict(),
   journey_admit: z.object(target).strict(),
@@ -59,6 +60,7 @@ export const inputs = {
   artifact_blob_put: z.object({ ...relayContext, artifactId: id, version: nat.min(1), data: opaque(10 * 1024 * 1024) }).strict(),
   artifact_blob_get: z.object({ ...relayContext, artifactId: id, version: nat.min(1) }).strict(),
   artifact_blob_delete: z.object({ ...relayContext, artifactId: id }).strict(),
+  account_update: z.object({ nickname: z.string().trim().min(1).max(80) }).strict(),
 } as const;
 
 export type RelayCommand = Extract<Command, { tool: 'mls_message_post' | 'mls_message_fetch' | 'artifact_blob_put' | 'artifact_blob_get' | 'artifact_blob_delete' }>;
@@ -66,6 +68,51 @@ export type KeyPackageCommand = Extract<Command, { tool: 'mls_key_package_publis
 export function isRelay(command: Command): command is RelayCommand {
   return ['mls_message_post', 'mls_message_fetch', 'artifact_blob_put', 'artifact_blob_get', 'artifact_blob_delete'].includes(command.tool);
 }
+export const descriptions: Record<ToolName, string> = {
+  account_read: 'Read your account, WorkOS profile, nickname, personId and personalGroupId.',
+  account_update: 'Set your display nickname using a trimmed nickname of 1 to 80 characters.',
+  journey_create: 'Create a journey with a name, joining policy and default member role; you become its guide.',
+  journey_list: 'List the journeys you can currently read.',
+  journey_read: 'Read a journey by journeyId, including its members, pending people, projects, artifacts and tasks.',
+  journey_policy: 'Set a journey joining policy and defaultRole as a guide using journeyId.',
+  journey_invite: 'Invite a person as a journey guide using journeyId and exactly one of personId or email; they must already have an account.',
+  journey_request: 'Ask to join a journey whose policy is request; a guide must admit you.',
+  journey_join: 'Join an open journey or accept an invitation using journeyId.',
+  journey_admit: 'Admit a pending person as a journey guide using journeyId and personId.',
+  journey_refuse: 'Refuse a pending person as a journey guide using journeyId and personId.',
+  journey_role: 'Set a person role to read or write as a guide using journeyId and personId.',
+  journey_guide: 'Make a journey person a guide using journeyId and personId.',
+  journey_unguide: 'Remove guide authority from a person using journeyId and personId, keeping at least one guide.',
+  journey_remove: 'Remove a journey member using journeyId and memberId, subject to current guide or agent-owner authority.',
+  journey_leave: 'Leave a journey using journeyId, provided at least one guide remains.',
+  agent_add: 'Add your named journey agent with a signed card specifying read, write and grant limits.',
+  agent_card: 'Edit, withdraw or sign your agent card using journeyId, agentId, action and permission limits.',
+  agent_capabilities: 'Read effective agent permissions using journeyId and actingAgent, intersecting its card with your live authority.',
+  project_create: 'Create a project in a journey using journeyId, name and purpose.',
+  project_join: 'Join a project using journeyId and projectId.',
+  project_leave: 'Leave a project using journeyId and projectId.',
+  project_update: 'Update a project purpose or status using journeyId and projectId.',
+  grant_issue: 'Issue a bounded grant using journeyId, grantee, need, resource, uses and expiresAt in milliseconds.',
+  grant_use: 'Use one grant allowance using journeyId, grantId, need and resource.',
+  grant_revoke: 'Revoke your grant using journeyId and grantId.',
+  artifact_create: 'Create artifact metadata in a journey using name, type and size, without uploading content.',
+  artifact_version: 'Add artifact version metadata using journeyId, artifactId, size and the current baseVersion.',
+  artifact_rename: 'Rename artifact metadata using journeyId, artifactId and name.',
+  artifact_delete: 'Delete an artifact and its stored ciphertext using journeyId and artifactId.',
+  task_create: 'Create a bounded task using journeyId, name, optional assignee, maxRounds and a deadline in Unix milliseconds.',
+  task_step: 'Advance a task using journeyId, taskId and a claim, round, finish, cancel or expire action.',
+  personal_group_read: 'Read your personal encryption group and its registered identities.',
+  personal_group_add: 'Register a named device or agent in your personal encryption group using name and kind.',
+  personal_group_remove: 'Remove one of your personal encryption group identities using memberId.',
+  mls_key_package_publish: 'Publish an opaque MLS key package for your registered deviceId using base64 data.',
+  mls_key_package_fetch: 'Consume an available MLS key package using its authenticated personId and deviceId.',
+  mls_message_post: 'Post an opaque MLS handshake or application message using groupId, epoch, kind and base64 data.',
+  mls_message_fetch: 'Fetch opaque MLS messages using groupId, a since cursor and a bounded limit.',
+  artifact_blob_put: 'Store encrypted artifact bytes using groupId, artifactId, version and base64 data.',
+  artifact_blob_get: 'Fetch encrypted artifact bytes using groupId, artifactId and version.',
+  artifact_blob_delete: 'Delete encrypted artifact bytes using groupId and artifactId.',
+};
+export const relayNote = 'Relay data is opaque base64; artifact metadata tools never accept plaintext content. Personal group IDs are personal_<personId>.';
 export type ToolName = keyof typeof inputs;
 export type Command = { [K in ToolName]: { tool: K; input: z.output<(typeof inputs)[K]> } }[ToolName];
 export const TOOL_NAMES = Object.keys(inputs) as ToolName[];
