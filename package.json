@@ -11,6 +11,8 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm test --workspaces --if-present",
     "build:rules": "npm run build -w @ai-wayfinding/rules",
+    "build:apps": "npm run build -w @ai-wayfinding/apps",
+    "check:apps": "npm run check -w @ai-wayfinding/apps",
     "check:rules": "npm run check -w @ai-wayfinding/rules"
   }
 }

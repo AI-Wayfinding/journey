@@ -5,7 +5,7 @@ import { relay, decodeBytes, type BlobStore } from './relay.ts';
 
 export interface Profile { name: string; email: string }
 export interface Profiles { get(subject: string): Promise<Profile> }
-export interface Account extends Profile { subject: string; personId: string; group: Snapshot; identities: { id: string; name: string; kind: 'device' | 'agent' }[] }
+export interface Account extends Profile { subject: string; personId: string; nickname?: string; group: Snapshot; identities: { id: string; name: string; kind: 'device' | 'agent' }[] }
 interface AccountsState { rulesHash: RulesStamp; accounts: Account[]; journeys: string[] }
 
 export class AccountsHost {
@@ -48,6 +48,30 @@ export class AccountsHost {
       }
       return state.journeys;
     });
+  }
+  update(personId: string, nickname: string): Promise<Account> {
+    return this.serial.run(async () => {
+      const state = await this.load();
+      const account = state.accounts.find(a => a.personId === personId);
+      if (!account) throw new Refused('Account not found');
+      account.nickname = nickname;
+      await this.storage.put('accounts', JSON.stringify(state));
+      return account;
+    });
+  }
+  names(personIds: string[]): Promise<Record<string, string>> {
+    return this.serial.run(async () => {
+      const state = await this.load();
+      return Object.fromEntries(state.accounts.filter(a => personIds.includes(a.personId)).map(a => {
+        const name = a.nickname ?? a.name;
+        // WorkOS uses email as its fallback name; never relay it to other people.
+        const safe = a.email && name.toLowerCase().includes(a.email.toLowerCase()) ? 'Wayfinding member' : name;
+        return [a.personId, safe];
+      }));
+    });
+  }
+  personIdByEmail(email: string): Promise<string | undefined> {
+    return this.serial.run(async () => (await this.load()).accounts.find(a => a.email.toLowerCase() === email.toLowerCase())?.personId);
   }
   private requireIdentity(account: Account, memberId: string): void {
     const index = account.identities.findIndex(m => m.id === memberId);
@@ -110,10 +134,14 @@ export class AccountsHost {
 
 /** Profile values come only from the authenticated WorkOS management API. */
 export class WorkOSProfiles implements Profiles {
-  private readonly apiKey: string;
+  private readonly apiKey: string | undefined;
   private readonly send: typeof fetch;
-  constructor(apiKey: string, send: typeof fetch = fetch) { this.apiKey = apiKey; this.send = send; }
+  // Bind the default: workerd throws "Illegal invocation" when fetch runs with another `this`.
+  constructor(apiKey: string | undefined, send: typeof fetch = (input, init) => fetch(input, init)) { this.apiKey = apiKey; this.send = send; }
   async get(subject: string): Promise<Profile> {
+    if (typeof this.apiKey !== 'string' || this.apiKey.trim().length === 0) {
+      throw new Refused('Server configuration error: WORKOS_API_KEY is required for account profiles');
+    }
     const response = await this.send(`https://api.workos.com/user_management/users/${encodeURIComponent(subject)}`, {
       headers: { authorization: `Bearer ${this.apiKey}` }, signal: AbortSignal.timeout(10_000),
     });

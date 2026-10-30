@@ -2,7 +2,7 @@
 
 This repository builds AI Wayfinding journeys. "Enclave" is the technical term used in code; "journey" is the word people see.
 
-The rules pipeline, coordination tools, encrypted relay and local proxy exist. MCP Apps views arrive in later stages.
+The repository is being rebuilt from a clean start. The rules pipeline, coordination tools, MCP server, MCP Apps views, encrypted relay, task inboxes and local proxy exist.
 
 ## Layout
 
@@ -12,6 +12,14 @@ The rules pipeline, coordination tools, encrypted relay and local proxy exist. M
   - `rules.lock.json`: the gdp-wired version and integrity, and the SHA-256 of every generated file.
   - `scripts/build.ts` writes the generated files and the lock; `scripts/check.ts` regenerates them in memory and fails on any byte difference.
   - `test/*.test.ts`: `node:test` suites run with Node's built-in TypeScript type stripping.
+- `packages/apps`: self-contained MCP Apps views using `@modelcontextprotocol/ext-apps` 2.0.4.
+  - `src/contract.ts` defines the allowlisted metadata boundary; artifact content and access URLs never enter a view.
+  - `src/*.html`, `src/view.ts` and `src/style.css` build into `generated/views.ts`, imported by the Worker. No runtime filesystem or external view fetches.
+  - Run `npm run build:apps` after editing a view, and commit the generated module. `npm run check:apps` checks bytes without writing; matching builds leave the file untouched. Root typecheck includes this check.
+  - Keep every released versioned `ui://` URI in the resource registry when adding a successor.
+  - MCP registration lives in `packages/mcp/src/apps.ts`. `apps_*` tools have visibility `["app"]`; visibility is a host hint, not authorization. All tools recheck backend authority.
+  - Tests named `apps` load bundled HTML through the official SDK and execute its App with a spec postMessage host and DOM stand-in.
+  - `/signin` redirects to the configured `AUTHKIT_AUTHORIZE_URL`; no redirect target comes from caller input.
 - `packages/proxy`: the local stdio MCP server. Run `node packages/proxy/src/cli.ts --store DIR` from the root; default store is `~/.wayfinding`, loopback port is 8717 (`--port` overrides).
   - `src/mls`: replaceable `MlsGroup` implementation, ts-mls 1.6.4, unaudited. Synthetic data only.
   - `src/proxy.ts`: ordered MLS synchronization, per-artifact keys, personal artifacts and copy/move. `src/crypto.ts` uses Web Crypto AES-256-GCM with group/artifact/version authenticated data.
@@ -20,11 +28,13 @@ The rules pipeline, coordination tools, encrypted relay and local proxy exist. M
   - Use `mls_group_create` once, `mls_group_prepare` on a joining device, then `mls_group_add` on an existing member with its authenticated person/device ids. Synchronization re-shares live history and removes departed journey leaves before sending new keys. No background daemon is required; a member proxy must synchronize after admission.
   - Tests named `proxy` exercise multiple clients against the in-process Worker, scan all server storage and blobs, and test fake-AS PKCE plus private local persistence.
 - `packages/mcp`: the MCP server, a Cloudflare Worker built on the official `@modelcontextprotocol/server` (pinned exactly).
-  - `src/worker.ts`: the Worker entry; reads `AUTHKIT_ISSUER` and `MCP_RESOURCE` from `wrangler.jsonc` vars.
-  - `src/app.ts`: routing. OAuth metadata documents, then `/mcp` behind Host validation and `requireBearerAuth`, then `createMcpHandler` serving 2026-07-28 and 2025-era clients statelessly from one factory.
+  - `src/worker.ts`: the Worker entry; reads `AUTHKIT_ISSUER`, `AUTHKIT_AUTHORIZE_URL` and `MCP_RESOURCE` from `wrangler.jsonc` vars.
+  - `src/app.ts`: OAuth metadata and `/signin`, then `/mcp` behind Host validation and `requireBearerAuth`, then `createMcpHandler` serving 2026-07-28 and 2025-era clients statelessly from one factory. Modern inbox subscriptions stay open only while the authenticated member may read them.
   - `src/auth.ts`: verifies WorkOS AuthKit access tokens with jose (issuer, `aud` equal to the resource, RS256, `exp`). The key lookup is injectable; tests sign with a local key pair.
-  - `src/server.ts`: the per-request `McpServer` factory and its tools.
-  - `test/*.test.ts`: drive the Worker's `fetch` in-process with the official `@modelcontextprotocol/client`. Name tests so `--test-name-pattern=auth` and `--test-name-pattern=era` select the auth and protocol-era cases.
+  - `src/backend.ts`, `src/journey.ts` and `src/objects.ts`: coordination, relay and Durable Object adapters. Task creation commits the task and next deadline alarm atomically; alarms expire overdue tasks after eviction. Agent capabilities are the intersection of the live person's authority and current card, and agents never receive grant authority.
+  - `src/inbox.ts`: authenticated `wayfinding://journey/{id}/inbox` resources for assigned task polling and modern update subscriptions. Removal closes the subscription and prevents later reads.
+  - `src/server.ts`: the per-request `McpServer` factory. `tasks/get`, `tasks/update` and `tasks/cancel` require the `io.modelcontextprotocol/tasks` extension metadata on every request and return `-32021` when it is absent. MCP Apps resources and tools are registered in the same server.
+  - `test/*.test.ts`: drive the Worker's `fetch` in-process with the official `@modelcontextprotocol/client`. Name tests so `--test-name-pattern=auth`, `era`, `tasks`, `apps` and `relay` select the relevant cases.
 
 ## gdp-wired rules
 
@@ -59,6 +69,8 @@ cd packages/mcp && npx wrangler deploy --dry-run --outdir /tmp/wayfinding-mcp-dr
 ```
 
 `npm run deploy -w @ai-wayfinding/mcp` deploys to Cloudflare; only the dispatching session deploys.
+
+Before deploying the MCP Worker, configure the `WORKOS_API_KEY` secret with a WorkOS User Management API key from the same environment as `AUTHKIT_ISSUER`. For the PoC, use Staging only. `Accounts` needs this server-side key to provision profiles; client OAuth credentials do not replace it. Supply it through Wrangler's hidden prompt (`cd packages/mcp && npx wrangler secret put WORKOS_API_KEY`), never a committed variable or command-line value. `npx wrangler secret list` checks names only. A missing or blank key must fail account provisioning before any profile request or account write. A secret update can publish a Worker version; the no-deploy rule also excludes secret changes.
 
 CI runs `npm ci`, `npm run check:rules`, `npm run typecheck` and `npm test` on Node 22.
 

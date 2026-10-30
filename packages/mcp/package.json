@@ -9,6 +9,8 @@
     "deploy": "wrangler deploy"
   },
   "dependencies": {
+    "@ai-wayfinding/apps": "0.1.0",
+    "@modelcontextprotocol/ext-apps": "2.0.4",
     "@modelcontextprotocol/server": "2.4.0",
     "jose": "6.2.14",
     "zod": "4.6.7"

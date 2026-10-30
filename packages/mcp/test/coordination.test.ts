@@ -1,6 +1,7 @@
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
+import * as z from 'zod';
 import { app, bridge, keyPair, RESOURCE, token } from './helpers.ts';
 import { MemoryBackend } from '../src/backend.ts';
 import type { JourneyState } from '../src/journey.ts';
@@ -25,9 +26,21 @@ async function fixture(t: TestContext) {
   let now = 1000;
   let lookups = 0;
   const backend = new MemoryBackend({ async get(subject) { lookups++; return { name: subject.toUpperCase(), email: `${subject}@example.test` }; } }, () => now);
-  const send = bridge(app(signer, backend));
+  const wire: { method: string; result?: Data; error?: Data }[] = [];
+  const target = bridge(app(signer, backend));
+  const send: typeof target = async (url, init) => {
+    const response = await target(url, init);
+    const request = typeof init?.body === 'string' ? JSON.parse(init.body) as { method: string } : undefined;
+    if (request?.method.startsWith('tasks/')) {
+      const text = await response.clone().text();
+      const json = text.startsWith('event:') || text.startsWith('data:') ? text.split('\n').find((line) => line.startsWith('data:'))!.slice(5) : text;
+      const body = JSON.parse(json) as { result?: Data; error?: Data };
+      wire.push({ method: request.method, result: body.result, error: body.error });
+    }
+    return response;
+  };
   async function connect(sub: string, mode: 'auto' | 'legacy' = 'auto') {
-    const client = new Client({ name: 'coordination-test', version: '1.0.0' }, { versionNegotiation: { mode } });
+    const client = new Client({ name: 'coordination-test', version: '1.0.0' }, { versionNegotiation: { mode }, capabilities: { extensions: { 'io.modelcontextprotocol/tasks': {} } } });
     await client.connect(new StreamableHTTPClientTransport(RESOURCE, { fetch: send, requestInit: { headers: { authorization: `Bearer ${await token(signer, { sub })}` } } }));
     t.after(() => client.close());
     return client;
@@ -49,7 +62,7 @@ async function fixture(t: TestContext) {
   }
   const alice = await connect('alice'), bob = await connect('bob', 'legacy'), eve = await connect('eve');
   const a = await call(alice, 'account_read'), b = await call(bob, 'account_read'), e = await call(eve, 'account_read');
-  return { backend, alice, bob, eve, a: a.personId as string, b: b.personId as string, e: e.personId as string, call, refused, connect, advance: (time: number) => { now = time; }, lookups: () => lookups };
+  return { wire, backend, alice, bob, eve, a: a.personId as string, b: b.personId as string, e: e.personId as string, call, refused, connect, advance: (time: number) => { now = time; }, lookups: () => lookups };
 }
 
 test('coordination: SDK tools provision stable accounts from verified token subjects', async (t) => {
@@ -229,12 +242,11 @@ test('coordination: task rounds, claimant and deadline are checked from stored s
   await f.refused(f.alice, 'task_step', { journeyId, taskId, action: 'startRound' });
   const started = list<Task>(await f.call(f.bob, 'task_step', { journeyId, taskId, action: 'startRound' }), 'tasks')[0]!;
   assert.equal(started.status, 'inRound'); assert.equal(started.roundsUsed, 1);
-  await f.call(f.bob, 'task_step', { journeyId, taskId, action: 'endRound' });
+  assert.equal(list<Task>(await f.call(f.bob, 'task_step', { journeyId, taskId, action: 'endRound' }), 'tasks')[0]!.status, 'expired');
   await f.refused(f.bob, 'task_step', { journeyId, taskId, action: 'startRound' });
   f.advance(2000);
   await f.refused(f.bob, 'task_step', { journeyId, taskId, action: 'finish' });
-  const expired = list<Task>(await f.call(f.alice, 'task_step', { journeyId, taskId, action: 'expire' }), 'tasks')[0]!;
-  assert.equal(expired.status, 'expired');
+  await f.refused(f.alice, 'task_step', { journeyId, taskId, action: 'expire' });
   await f.refused(f.alice, 'task_step', { journeyId, taskId, action: 'cancel' });
 });
 
@@ -289,6 +301,47 @@ test('coordination: an agent may leave without guide authority and loses access'
   await f.refused(f.bob, 'journey_read', { journeyId, actingAgent: agentId });
 });
 
+
+test('tasks: member inbox resources isolate assignments and support offline polling', async (t) => {
+  const f = await fixture(t);
+  const journeyId = (await f.call(f.alice, 'journey_create', { name: 'Inbox', policy: 'open' })).journeyId as string;
+  await f.call(f.bob, 'journey_join', { journeyId });
+  const agentId = list<Agent>(await f.call(f.bob, 'agent_add', { journeyId, name: 'Worker', read: true, write: true, grant: false }), 'agents')[0]!.agentId;
+  const addressed = list<Task>(await f.call(f.alice, 'task_create', { journeyId, name: 'For worker', assignee: agentId, maxRounds: 2, deadline: 5000 }), 'tasks')[0]!.taskId;
+  await f.call(f.alice, 'task_create', { journeyId, name: 'Private assignment', assignee: f.a, maxRounds: 2, deadline: 5000 });
+  const uri = `wayfinding://journey/${journeyId}/inbox`;
+  const content = (await f.bob.readResource({ uri })).contents[0]!;
+  assert.ok('text' in content);
+  const inbox = JSON.parse(content.text) as { tasks: Task[] };
+  assert.deepEqual(inbox.tasks.map((task) => task.taskId), [addressed]);
+  await assert.rejects(f.eve.readResource({ uri }));
+  await f.call(f.alice, 'journey_remove', { journeyId, memberId: f.b });
+  await assert.rejects(f.bob.readResource({ uri }));
+});
+
+test('tasks: modern inbox subscriptions receive committed updates and stop after removal', async (t) => {
+  const f = await fixture(t);
+  const journeyId = (await f.call(f.alice, 'journey_create', { name: 'Watch', policy: 'open' })).journeyId as string;
+  await f.call(f.bob, 'journey_join', { journeyId });
+  const bob = await f.connect('bob');
+  const uri = `wayfinding://journey/${journeyId}/inbox`;
+  const updates: string[] = [];
+  let arrived!: () => void;
+  const next = new Promise<void>((resolve) => { arrived = resolve; });
+  bob.setNotificationHandler('notifications/resources/updated', (notification) => { updates.push(notification.params.uri); arrived(); });
+  const subscription = await bob.listen({ resourceSubscriptions: [uri] });
+  t.after(() => subscription.close());
+  await f.call(f.alice, 'task_create', { journeyId, name: 'New work', assignee: f.b, maxRounds: 2, deadline: 5000 });
+  await Promise.race([next, new Promise<never>((_, reject) => { const timer = setTimeout(() => reject(new Error('Missing inbox update')), 1500); timer.unref(); })]);
+  assert.deepEqual(updates, [uri]);
+  await f.call(f.alice, 'journey_remove', { journeyId, memberId: f.b });
+  assert.equal(await Promise.race([subscription.closed, new Promise<never>((_, reject) => { const timer = setTimeout(() => reject(new Error('Subscription remained open after removal')), 1500); timer.unref(); })]), 'graceful');
+  await f.call(f.alice, 'task_create', { journeyId, name: 'No leak', maxRounds: 2, deadline: 5000 });
+  assert.deepEqual(updates, [uri]);
+  await assert.rejects(f.eve.listen({ resourceSubscriptions: [uri] }));
+  await assert.rejects(f.bob.listen({ resourceSubscriptions: [uri] }));
+});
+
 test('coordination: a guide agent without read permission never receives private state from a mutation', async (t) => {
   const f = await fixture(t);
   const journeyId = (await f.call(f.alice, 'journey_create', { name: 'Private guide' })).journeyId as string;
@@ -308,6 +361,10 @@ test('coordination: Durable Object adapter reloads stored rules and members afte
     // Recreate the actual DO adapter on every call, as if it had been evicted.
     const object = new Journey({ storage: store });
     return {
+      async requireGuide(personId, command) {
+        const response = await object.fetch(new Request('https://internal/', { method: 'POST', body: JSON.stringify({ action: 'requireGuide', personId, tool: command.tool, input: command.input }) }));
+        assert.equal(response.status, 200);
+      },
       async execute(personId, command, journeyId) {
         const response = await object.fetch(new Request('https://internal/', { method: 'POST', body: JSON.stringify({ personId, journeyId, tool: command.tool, input: command.input }) }));
         assert.equal(response.status, 200);
@@ -317,6 +374,21 @@ test('coordination: Durable Object adapter reloads stored rules and members afte
         const response = await object.fetch(new Request('https://internal/', { method: 'POST', body: JSON.stringify({ action: 'summary', personId }) }));
         assert.equal(response.status, 200);
         return (await response.json() as { value?: Data }).value;
+      },
+      async inbox(personId) {
+        const response = await object.fetch(new Request('https://internal/', { method: 'POST', body: JSON.stringify({ action: 'inbox', personId }) }));
+        assert.equal(response.status, 200);
+        return (await response.json() as { value: Data }).value;
+      },
+      async watchInbox(personId) {
+        const response = await object.fetch(new Request('https://internal/', { method: 'POST', body: JSON.stringify({ action: 'watchInbox', personId }) }));
+        assert.equal(response.status, 200);
+        return response.body!;
+      },
+      async task(personId, method, taskId) {
+        const response = await object.fetch(new Request('https://internal/', { method: 'POST', body: JSON.stringify({ action: 'task', personId, method, taskId }) }));
+        assert.equal(response.status, 200);
+        return (await response.json() as { value: Data }).value;
       },
     };
   });
@@ -330,4 +402,130 @@ test('coordination: Durable Object adapter reloads stored rules and members afte
   assert.deepEqual(read.structuredContent, created.structuredContent);
   const listed = await client.callTool({ name: 'journey_list', arguments: {} });
   assert.deepEqual(listed.structuredContent, { journeys: [{ journeyId, name: 'Persistent' }] });
+});
+
+
+test('tasks: assigned agents claim rounds and expire automatically at the cap', async (t) => {
+  const f = await fixture(t);
+  const journeyId = (await f.call(f.alice, 'journey_create', { name: 'Assigned tasks', policy: 'open' })).journeyId as string;
+  await f.call(f.bob, 'journey_join', { journeyId });
+  const agentId = list<Agent>(await f.call(f.bob, 'agent_add', { journeyId, name: 'Worker', read: true, write: false, grant: false }), 'agents')[0]!.agentId;
+  const taskId = list<Task>(await f.call(f.alice, 'task_create', { journeyId, assignee: agentId, name: 'Assigned', maxRounds: 1, deadline: 3000 }), 'tasks')[0]!.taskId;
+  await f.refused(f.alice, 'task_step', { journeyId, taskId, action: 'claim' });
+  await f.refused(f.bob, 'task_step', { journeyId, taskId, action: 'claim' });
+  await f.refused(f.alice, 'task_step', { journeyId, taskId, actingAgent: agentId, action: 'claim' });
+  await f.call(f.bob, 'task_step', { journeyId, taskId, actingAgent: agentId, action: 'claim' });
+  await f.call(f.bob, 'task_step', { journeyId, taskId, actingAgent: agentId, action: 'startRound' });
+  const ended = list<Task>(await f.call(f.bob, 'task_step', { journeyId, taskId, actingAgent: agentId, action: 'endRound' }), 'tasks')[0]!;
+  assert.equal(ended.status, 'expired');
+  assert.equal(ended.roundsUsed, 1);
+  await f.refused(f.bob, 'task_step', { journeyId, taskId, actingAgent: agentId, action: 'finish' });
+});
+
+
+test('tasks: atomic task creation rolls back when alarm persistence fails', async (t) => {
+  const f = await fixture(t);
+  const journeyId = (await f.call(f.alice, 'journey_create', { name: 'Atomic deadline' })).journeyId as string;
+  const store = f.backend.journeyStores.get(journeyId)!;
+  const before = f.backend.snapshot(), writes = store.writes;
+  const setAlarm = store.setAlarm.bind(store);
+  store.setAlarm = async () => { throw new Error('Storage unavailable'); };
+  const refused = await f.alice.callTool({ name: 'task_create', arguments: { journeyId, name: 'Not committed', maxRounds: 2, deadline: 4000 } });
+  assert.equal(refused.isError, true);
+  assert.equal(f.backend.snapshot(), before);
+  assert.equal(store.writes, writes);
+  assert.equal(store.alarmAt, undefined);
+  store.setAlarm = setAlarm;
+  const tasks = list<Task>(await f.call(f.alice, 'task_create', { journeyId, name: 'Committed', maxRounds: 2, deadline: 4000 }), 'tasks');
+  assert.deepEqual(tasks.map((task) => task.status), ['open']);
+  assert.equal(store.alarmAt, 4000);
+});
+
+test('tasks: Durable Object alarm expires an in-round task after eviction using the server clock', async (t) => {
+  const f = await fixture(t);
+  const journeyId = (await f.call(f.alice, 'journey_create', { name: 'Deadline', policy: 'open' })).journeyId as string;
+  await f.call(f.bob, 'journey_join', { journeyId });
+  const agentId = list<Agent>(await f.call(f.bob, 'agent_add', { journeyId, name: 'Worker', read: true, write: false, grant: false }), 'agents')[0]!.agentId;
+  const taskId = list<Task>(await f.call(f.alice, 'task_create', { journeyId, assignee: agentId, name: 'Timed', maxRounds: 3, deadline: 2000 }), 'tasks')[0]!.taskId;
+  const later = list<Task>(await f.call(f.alice, 'task_create', { journeyId, name: 'Later', maxRounds: 2, deadline: 4000 }), 'tasks')[1]!.taskId;
+  const store = f.backend.journeyStores.get(journeyId)!;
+  assert.equal(store.alarmAt, 2000);
+  await f.call(f.bob, 'task_step', { journeyId, taskId, actingAgent: agentId, action: 'claim' });
+  await f.call(f.bob, 'task_step', { journeyId, taskId, actingAgent: agentId, action: 'startRound' });
+  f.advance(2000);
+  await f.refused(f.bob, 'task_step', { journeyId, taskId, actingAgent: agentId, action: 'endRound' });
+  await new Journey({ storage: store }, undefined, () => 2000).alarm();
+  assert.equal(store.alarmAt, 4000);
+  const tasks = list<Task>(await f.call(f.alice, 'journey_read', { journeyId }), 'tasks');
+  assert.equal(tasks.find((task) => task.taskId === taskId)!.status, 'expired');
+  assert.equal(tasks.find((task) => task.taskId === later)!.status, 'open');
+  const writes = store.writes;
+  await new Journey({ storage: store }, undefined, () => 2000).alarm();
+  assert.equal(store.writes, writes);
+  await new Journey({ storage: store }, undefined, () => 4000).alarm();
+  assert.equal(store.alarmAt, undefined);
+  const expired = await f.alice.request({ method: 'tasks/get', params: { taskId } }, z.record(z.string(), z.unknown()));
+  assert.equal(expired.status, 'completed'); assert.equal((expired.result as Data).isError, true);
+});
+
+test('tasks: capabilities reflect live person and card limits without allowing agent grants', async (t) => {
+  const f = await fixture(t);
+  const journeyId = (await f.call(f.alice, 'journey_create', { name: 'Capabilities', policy: 'open' })).journeyId as string;
+  await f.call(f.bob, 'journey_join', { journeyId });
+  const agentId = list<Agent>(await f.call(f.bob, 'agent_add', { journeyId, name: 'Agent', read: true, write: true, grant: true }), 'agents')[0]!.agentId;
+  const caps = () => f.call(f.bob, 'agent_capabilities', { journeyId, actingAgent: agentId });
+  assert.deepEqual((await caps()).capabilities, { read: true, write: false, grant: false, guide: false });
+  await f.call(f.alice, 'journey_role', { journeyId, personId: f.b, role: 'write' });
+  assert.equal(((await caps()).capabilities as Data).write, true);
+  await f.call(f.alice, 'journey_guide', { journeyId, personId: f.b });
+  assert.equal(((await caps()).capabilities as Data).guide, true);
+  await f.refused(f.bob, 'grant_issue', { journeyId, actingAgent: agentId, grantee: f.a, need: 'read', resource: journeyId, uses: 1, expiresAt: 5000 });
+  await f.call(f.alice, 'journey_role', { journeyId, personId: f.b, role: 'read' });
+  assert.equal(((await caps()).capabilities as Data).write, false);
+  await f.call(f.bob, 'agent_card', { journeyId, agentId, action: 'edit', read: false, write: false, grant: false });
+  assert.deepEqual((await caps()).capabilities, { read: false, write: false, grant: false, guide: false });
+  await f.refused(f.alice, 'agent_capabilities', { journeyId, actingAgent: agentId });
+  await f.refused(f.bob, 'task_create', { journeyId, actingAgent: agentId, name: 'Denied', deadline: 5000, maxRounds: 1 });
+  await f.call(f.bob, 'journey_remove', { journeyId, memberId: agentId });
+  await f.refused(f.bob, 'agent_capabilities', { journeyId, actingAgent: agentId });
+});
+
+
+test('tasks: SEP methods require the extension on every request in both eras', async (t) => {
+  const f = await fixture(t);
+  const journeyId = (await f.call(f.alice, 'journey_create', { name: 'Protocol', policy: 'open' })).journeyId as string;
+  await f.call(f.bob, 'journey_join', { journeyId });
+  const taskId = list<Task>(await f.call(f.alice, 'task_create', { journeyId, name: 'Handle', maxRounds: 3, deadline: 5000 }), 'tasks')[0]!.taskId;
+  const meta = { 'io.modelcontextprotocol/clientCapabilities': { extensions: { 'io.modelcontextprotocol/tasks': {} } } };
+  const request = (client: Client, method: string, params: Data) => client.request({ method, params }, z.record(z.string(), z.unknown()));
+  assert.ok(f.alice.getServerCapabilities()?.extensions?.['io.modelcontextprotocol/tasks']);
+  for (const client of [f.alice, f.bob]) {
+    const get = await request(client, 'tasks/get', { taskId, _meta: meta });
+    assert.equal(f.wire.at(-1)!.result?.resultType, 'complete'); assert.equal(get.taskId, taskId); assert.equal(get.status, 'working');
+    assert.equal(get.createdAt, new Date(1000).toISOString()); assert.equal(get.ttlMs, null);
+    const before = f.backend.snapshot();
+    await assert.rejects(request(client, 'tasks/update', { taskId, _meta: meta }), (error: unknown) => error instanceof Error && 'code' in error && error.code === -32602);
+    await request(client, 'tasks/update', { taskId, inputResponses: { unknown: { ignored: true } }, _meta: meta });
+    assert.equal(f.wire.at(-1)!.result?.resultType, 'complete');
+    assert.equal(f.backend.snapshot(), before);
+    for (const method of ['tasks/get', 'tasks/update', 'tasks/cancel']) {
+      await assert.rejects(request(client, method, { taskId, ...(method === 'tasks/update' ? { inputResponses: {} } : {}), _meta: { 'io.modelcontextprotocol/clientCapabilities': {} } }), (error: unknown) => error instanceof Error && 'code' in error && error.code === -32021);
+      assert.equal(f.backend.snapshot(), before);
+    }
+  }
+  const before = f.backend.snapshot();
+  await assert.rejects(request(f.eve, 'tasks/get', { taskId, _meta: meta }));
+  await assert.rejects(request(f.bob, 'tasks/cancel', { taskId, _meta: meta }));
+  assert.equal(f.backend.snapshot(), before);
+  await request(f.alice, 'tasks/cancel', { taskId, _meta: meta });
+  assert.equal(f.wire.at(-1)!.result?.resultType, 'complete');
+  assert.equal(list<Task>(await f.call(f.alice, 'journey_read', { journeyId }), 'tasks')[0]!.status, 'cancelled');
+  assert.equal((await request(f.bob, 'tasks/get', { taskId, _meta: meta })).status, 'cancelled');
+  const completed = list<Task>(await f.call(f.alice, 'task_create', { journeyId, name: 'Finished', maxRounds: 2, deadline: 5000 }), 'tasks')[1]!.taskId;
+  await f.call(f.bob, 'task_step', { journeyId, taskId: completed, action: 'claim' });
+  await f.call(f.bob, 'task_step', { journeyId, taskId: completed, action: 'startRound' });
+  await f.call(f.bob, 'task_step', { journeyId, taskId: completed, action: 'endRound' });
+  await f.call(f.bob, 'task_step', { journeyId, taskId: completed, action: 'finish' });
+  const done = await request(f.alice, 'tasks/get', { taskId: completed, _meta: meta });
+  assert.equal(done.status, 'completed'); assert.equal((done.result as Data).isError, false);
 });
