@@ -7,6 +7,7 @@ import { actorSchema, assertionSchema, changeSchema, type Actor } from './agents
 import type { KeyValueStorage } from './storage.ts';
 import type { BlobStore } from './relay.ts';
 
+import { passkeyOperation, recordOperation, type ConsoleRecord } from './console/contract.ts';
 interface ObjectState { storage: KeyValueStorage }
 interface Stub { fetch(request: Request): Promise<Response> }
 export interface ObjectNamespace { getByName(name: string): Stub }
@@ -67,6 +68,8 @@ export class Accounts {
     return respond(async () => {
       if (request.method !== 'POST') throw new Refused('Internal requests must be POST');
       const body = record(await request.json());
+      if (body['action'] === 'consoleRecord') return this.host.consoleRecord(recordOperation.parse(body['operation']));
+      if (body['action'] === 'passkey') return this.host.passkey({ subject: field(body, 'subject'), clientId: field(body, 'clientId') }, passkeyOperation.parse(body['operation']));
       if (body['action'] === 'observeClient') return this.host.observeClient(field(body, 'personId'), field(body, 'clientId'));
       if (body['action'] === 'resolveActor') return this.host.resolveActor(field(body, 'personId'), field(body, 'clientId'), typeof body['actingAgent'] === 'string' ? field(body, 'actingAgent') : undefined);
       if (body['action'] === 'agentCommand') return this.host.agentCommand(field(body, 'personId'), field(body, 'clientId'), command(body));
@@ -105,6 +108,8 @@ async function watch(namespace: ObjectNamespace, id: string, personId: string, a
 }
 export function durableBackend(env: ObjectBindings): Backend {
   const accounts: AccountsPort = {
+    consoleRecord: (operation) => call<ConsoleRecord | undefined>(env.ACCOUNTS, 'accounts', { action: 'consoleRecord', operation }),
+    passkey: (identity, operation) => call(env.ACCOUNTS, 'accounts', { action: 'passkey', subject: identity.subject, clientId: identity.clientId, operation }),
     provision: (subject) => call<Account>(env.ACCOUNTS, 'accounts', { action: 'provision', subject }),
     lookup: (subject) => call<Account | undefined>(env.ACCOUNTS, 'accounts', { action: 'lookup', subject }),
     update: (personId, nickname) => call<Account>(env.ACCOUNTS, 'accounts', { action: 'update', personId, tool: 'account_update', input: { nickname } }),

@@ -11,6 +11,8 @@ import { buildServer } from './server.ts';
 import type { CoordinationBackend } from './commands.ts';
 import { inboxJourney, InboxBus, subscriptionBody } from './inbox.ts';
 
+import { createConsole } from './console/index.ts';
+import type { ConsoleOptions } from './console/contract.ts';
 /** Inputs for {@link createApp}. Everything the Worker reads from its environment is passed in here. */
 export interface AppOptions {
   /** Verifies AuthKit access tokens; tests inject one backed by a local key pair. */
@@ -24,6 +26,7 @@ export interface AppOptions {
   backend?: CoordinationBackend;
   /** AuthKit hosted authorization/sign-in URL. Never taken from request input. */
   signinUrl?: string;
+  console?: ConsoleOptions;
 }
 
 /**
@@ -58,6 +61,7 @@ export function authkitMetadata(issuer: string): OAuthMetadata {
  *    statelessly from the same factory.
  */
 export function createApp(options: AppOptions): { fetch(request: Request): Promise<Response> } {
+  const console = options.console ? createConsole({ ...options.console, verifier: options.verifier, resource: options.resource, issuer: options.issuer }) : undefined;
   const metadata = {
     oauthMetadata: authkitMetadata(options.issuer),
     resourceServerUrl: options.resource,
@@ -73,6 +77,13 @@ export function createApp(options: AppOptions): { fetch(request: Request): Promi
 
   return {
     async fetch(request: Request): Promise<Response> {
+      const path = new URL(request.url).pathname;
+      if (path === '/console' || path.startsWith('/console/')) {
+        const rejected = hostHeaderValidationResponse(request, options.allowedHosts);
+        if (rejected) return rejected;
+        if (new URL(request.url).origin !== options.resource.origin) return new Response('Console origin refused', { status: 403 });
+        return console ? console.fetch(request) : new Response('Console is not configured', { status: 503 });
+      }
       const document = oauthMetadataResponse(request, metadata);
       if (document !== undefined) return document;
 
