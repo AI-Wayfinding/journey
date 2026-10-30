@@ -13,6 +13,7 @@ const signer = await keyPair('console');
 const origin = RESOURCE.origin;
 const clientId = `${origin}/console/client.json`;
 const csrfOf = (html: string) => /name="csrf" value="([^"]+)"/.exec(html)![1]!;
+const signedOut = (r: Response) => { assert.equal(r.status, 303); assert.equal(new URL(r.headers.get('location')!, origin).pathname, '/console/login'); };
 async function fixture() {
   let now = Date.now();
   let accessToken = await token(signer, { sub: 'alice', client_id: clientId });
@@ -141,7 +142,7 @@ test('console: bound and foreign client tokens cannot create sessions or authent
   for (const claims of [{ sub: 'alice', client_id: 'assistant' }, { sub: 'alice', client_id: clientId, aud: 'https://evil.example/mcp' }, { sub: 'alice', client_id: clientId, iss: 'https://evil.example' }]) {
     const bearer = await token(signer, claims); f.access(bearer);
     assert.equal((await f.login()).finish.status, 403);
-    assert.equal((await f.send('/console', { headers: { authorization: `Bearer ${bearer}` } })).status, 403);
+    signedOut(await f.send('/console', { redirect: 'manual', headers: { authorization: `Bearer ${bearer}` } }));
   }
   f.access(await token(signer, { sub: 'alice', client_id: clientId }));
   const login = await f.login(); assert.equal(login.finish.status, 303);
@@ -165,13 +166,13 @@ test('console: tampered, expired and logged-out session cookies are refused; log
   const html = await (await f.send('/console', { headers: { cookie: login.cookie } })).text(), csrf = csrfOf(html);
   const [name, value] = login.cookie.split('=');
   const altered = `${name}=${value!.slice(0, -8)}AAAAAAAA`;
-  assert.equal((await f.send('/console', { headers: { cookie: altered } })).status, 403);
+  signedOut(await f.send('/console', { redirect: 'manual', headers: { cookie: altered } }));
   assert.equal((await f.send('/console/logout', { method: 'POST', headers: { cookie: login.cookie, origin, 'content-type': 'application/x-www-form-urlencoded' }, body: '' })).status, 403);
   const loggedOut = await f.send('/console/logout', { method: 'POST', headers: { cookie: login.cookie, origin, 'content-type': 'application/x-www-form-urlencoded' }, body: `csrf=${csrf}` });
   assert.equal(loggedOut.status, 303); assert.match(loggedOut.headers.get('set-cookie')!, /Max-Age=0/);
-  assert.equal((await f.send('/console', { headers: { cookie: login.cookie } })).status, 403);
+  signedOut(await f.send('/console', { redirect: 'manual', headers: { cookie: login.cookie } }));
   const expired = await f.login(); f.advance(28_800_001);
-  assert.equal((await f.send('/console', { headers: { cookie: expired.cookie } })).status, 403);
+  signedOut(await f.send('/console', { redirect: 'manual', headers: { cookie: expired.cookie } }));
 });
 
 test('console: semantic pages escape names and preserve membership and card limits', async () => {
@@ -257,7 +258,7 @@ test('console: real Durable Object adapters persist one-shot sessions, registrat
   assert.equal((await post('/console/passkeys/register', { credential: key.register(options.challenge) })).status, 303);
   assert.match(await (await send('/console/passkeys', { headers: { cookie } })).text(), new RegExp(key.id));
   assert.equal((await post('/console/logout', {})).status, 303);
-  assert.equal((await send('/console', { headers: { cookie } })).status, 403);
+  signedOut(await send('/console', { redirect: 'manual', headers: { cookie } }));
 });
 
 
@@ -347,4 +348,13 @@ test('views console: private interview selectors, mismatched journeys and outsid
   }
   const response = await f.send(`/console/journeys/${journeyId}/rounds/${roundId}?interview=mine`, { headers: { cookie: login.cookie } });
   assert.equal(response.status, 200); assert.doesNotMatch(await response.text(), /BOB-PRIVATE/);
+});
+
+test('console: a signed-out page visit redirects to sign-in while signed-out POSTs stay refused', async () => {
+  const f = await fixture();
+  const page = await f.send('/console', { redirect: 'manual' });
+  assert.equal(page.status, 303);
+  assert.equal(new URL(page.headers.get('location')!, origin).pathname, '/console/login');
+  const forged = await f.send('/console/agents/create', { method: 'POST', redirect: 'manual', headers: { origin, 'content-type': 'application/x-www-form-urlencoded' }, body: 'csrf=x&name=Forged' });
+  assert.equal(forged.status, 403);
 });

@@ -58,6 +58,8 @@ export function createConsole(config: ConsoleConfig) {
         await config.backend.execute(subject, { tool: 'account_read', input: {} }, clientId);
         return redirect('/console', [await sessions.create(SESSION_COOKIE, { kind: 'session', subject, clientId, csrf: random(), expiresAt: now() + 28_800_000 }), cookie(OAUTH_COOKIE, '', 0)]);
       }
+      // A page visit without a valid session goes to sign-in; POSTs stay refused.
+      if (request.method === 'GET' && (await sessions.read(request, SESSION_COOKIE))?.kind !== 'session') return redirect('/console/login');
       const session = await sessions.require(request);
       if (request.method === 'POST') {
         const body = await formBody(request, session.csrf, origin), identity = { subject: session.subject, clientId: session.clientId };
