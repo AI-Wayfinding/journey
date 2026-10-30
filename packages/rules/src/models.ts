@@ -3,6 +3,8 @@
 // per line, so parallel additions merge cleanly.
 import {agentCard} from './agentCard.ts'
 import {artifact} from './artifact.ts'
+import {binding} from './binding.ts'
+import {card} from './card.ts'
 import {grant} from './grant.ts'
 import {journey} from './journey.ts'
 import {personalGroup} from './personalGroup.ts'
@@ -14,6 +16,8 @@ import {transfer} from './transfer.ts'
 export const models = {
   agentCard,
   artifact,
+  binding,
+  card,
   grant,
   journey,
   personalGroup,
