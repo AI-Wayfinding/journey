@@ -6,9 +6,11 @@ import { ConsoleSessions, SESSION_COOKIE, OAUTH_COOKIE, random, cookie } from '.
 
 import { workspacePage } from './workspace.ts';
 import { home, agentPage, passkeysPage, confirmation, journeyPage, routeId } from './pages.ts';
-import { style, webauthn } from './assets.ts';
+import { style as baseStyle, webauthn, landingStyle } from './assets.ts';
+const style = baseStyle + landingStyle;
 import { parseCommand } from '../commands.ts';
 import { formBody } from './forms.ts';
+import { landingPage } from './landing.ts';
 import { changeSchema, assertionSchema } from '../agents.ts';
 import { registration } from './contract.ts';
 export function createConsole(config: ConsoleConfig) {
@@ -29,6 +31,16 @@ export function createConsole(config: ConsoleConfig) {
     try {
       const url = new URL(request.url), path = url.pathname;
       if (!['GET', 'POST'].includes(request.method)) return new Response('Method not allowed', { status: 405, headers: { ...headers, Allow: 'GET, POST' } });
+      if (request.method === 'GET' && path === '/') {
+        const html = (text: string) => new Response(text, { headers: { ...headers, 'Content-Type': 'text/html; charset=utf-8' } });
+        const record = await sessions.read(request, SESSION_COOKIE);
+        if (record?.kind !== 'session') return html(landingPage({ signedIn: false }, config.resource.href));
+        try {
+          const account = await config.backend.execute(record.subject, { tool: 'account_read', input: {} }, record.clientId);
+          const name = String(account.nickname ?? account.name ?? account.email ?? 'Your account');
+          return html(landingPage({ signedIn: true, name, csrf: record.csrf }, config.resource.href));
+        } catch { return html(landingPage({ signedIn: false }, config.resource.href)); }
+      }
       if (request.method === 'GET' && path === '/console/style.css') return new Response(style, { headers: { ...headers, 'Content-Type': 'text/css; charset=utf-8' } });
       if (request.method === 'GET' && path === '/console/webauthn.js') return new Response(webauthn, { headers: { ...headers, 'Content-Type': 'text/javascript; charset=utf-8' } });
       if (request.method === 'GET' && path === '/console/client.json') return Response.json({ client_id: clientId, client_name: 'Wayfinding console',
@@ -112,6 +124,10 @@ export function createConsole(config: ConsoleConfig) {
       if (workspace !== undefined) return html(workspace);
       if (path.startsWith('/console/journeys/')) return html(await journeyPage(config.backend, identity, routeId(path, '/console/journeys/'), session.csrf));
       return new Response('Not found', { status: 404, headers });
-    } catch { return new Response('<!doctype html><html lang="en"><meta charset="utf-8"><title>Console request refused</title><main><h1>Console request refused</h1><p>Check the form or <a href="/console/login">sign in to your console</a>.</p></main></html>', { status: 403, headers: { ...headers, 'Content-Type': 'text/html; charset=utf-8' } }); }
+    } catch (error) {
+      // Log the refusal reason only (no tokens or cookies) so live sign-in failures can be diagnosed.
+      console.warn('console refused', new URL(request.url).pathname, error instanceof Error ? `${error.name}: ${error.message}`.slice(0, 300) : 'unknown');
+      return new Response('<!doctype html><html lang="en"><meta charset="utf-8"><title>Console request refused</title><main><h1>Console request refused</h1><p>Check the form or <a href="/console/login">sign in to your console</a>.</p></main></html>', { status: 403, headers: { ...headers, 'Content-Type': 'text/html; charset=utf-8' } });
+    }
   } };
 }

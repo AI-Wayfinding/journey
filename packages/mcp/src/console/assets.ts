@@ -33,3 +33,6 @@ for (const form of document.querySelectorAll('form[data-ceremony]')) form.addEve
   } catch (error) { status.textContent = error instanceof Error ? error.message : 'Passkey confirmation failed.'; }
   finally { button.disabled = false; }
 });`;
+
+// Landing page: top bar with an account menu on the right.
+export const landingStyle = '.top{display:flex;justify-content:space-between;align-items:center;gap:1rem;padding:.5rem 0;border-bottom:1px solid currentColor}.brand{font-weight:600;text-decoration:none}.account{position:relative}details.account summary{cursor:pointer;list-style:none;border:1px solid currentColor;border-radius:999px;padding:.25rem .75rem}details.account>div{position:absolute;right:0;top:2.2rem;display:flex;flex-direction:column;gap:.5rem;min-width:11rem;padding:.75rem;border:1px solid currentColor;background:Canvas;z-index:1}details.account form{margin:0}a.account{border:1px solid currentColor;border-radius:999px;padding:.25rem .75rem;text-decoration:none}a.button{display:inline-block;border:1px solid currentColor;border-radius:.4rem;padding:.45rem .9rem;text-decoration:none;font-weight:600}code{overflow-wrap:anywhere}';

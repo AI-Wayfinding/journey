@@ -358,3 +358,18 @@ test('console: a signed-out page visit redirects to sign-in while signed-out POS
   const forged = await f.send('/console/agents/create', { method: 'POST', redirect: 'manual', headers: { origin, 'content-type': 'application/x-www-form-urlencoded' }, body: 'csrf=x&name=Forged' });
   assert.equal(forged.status, 403);
 });
+
+test('landing: signed-out visitors get setup steps; signed-in visitors get an account menu', async () => {
+  const f = await fixture();
+  const out = await f.send('/');
+  assert.equal(out.status, 200);
+  const outHtml = await out.text();
+  assert.match(outHtml, /Connect your assistant/); assert.match(outHtml, /href="\/console\/login"/);
+  assert.ok(outHtml.includes(RESOURCE.href)); assert.doesNotMatch(outHtml, /Account menu/);
+  const login = await f.login();
+  await f.backend.execute('alice', parseCommand('account_update', { nickname: '<b>Alice</b>' }), clientId);
+  const inHtml = await (await f.send('/', { headers: { cookie: login.cookie } })).text();
+  assert.match(inHtml, /aria-label="Account menu">&lt;b&gt;Alice&lt;\/b&gt;/); assert.match(inHtml, /href="\/console">Open console/);
+  assert.match(inHtml, /action="\/console\/logout"/);
+  assert.equal((await f.send('/', { method: 'POST' })).status, 405);
+});

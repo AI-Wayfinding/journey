@@ -78,7 +78,9 @@ export function createApp(options: AppOptions): { fetch(request: Request): Promi
   return {
     async fetch(request: Request): Promise<Response> {
       const path = new URL(request.url).pathname;
-      if (path === '/console' || path.startsWith('/console/')) {
+      // The bare origin is the public landing page, served by the console so it can see the session.
+      if (path === '/' || path === '/console' || path.startsWith('/console/')) {
+        if (path === '/' && request.method !== 'GET') return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET' } });
         const rejected = hostHeaderValidationResponse(request, options.allowedHosts);
         if (rejected) return rejected;
         if (new URL(request.url).origin !== options.resource.origin) return new Response('Console origin refused', { status: 403 });
