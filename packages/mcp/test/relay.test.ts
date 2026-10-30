@@ -2,7 +2,7 @@ import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { MemoryBackend } from '../src/backend.ts';
-import { app, bridge, keyPair, RESOURCE, token } from './helpers.ts';
+import { app, bridge, keyPair, RESOURCE, token, addAgent, setAgentCard, testPasskeys } from './helpers.ts';
 import { AccountsHost } from '../src/accounts.ts';
 import { Accounts, Journey, durableBackend, type ObjectNamespace } from '../src/objects.ts';
 import { MemoryStorage } from '../src/storage.ts';
@@ -12,7 +12,7 @@ import { parseCommand } from '../src/commands.ts';
 const signer = await keyPair('relay');
 type Data = Record<string, unknown>;
 async function fixture(t: TestContext) {
-  const backend = new MemoryBackend({ async get(subject) { return { name: subject, email: `${subject}@example.test` }; } });
+  const backend = new MemoryBackend({ async get(subject) { return { name: subject, email: `${subject}@example.test` }; } }, Date.now, testPasskeys);
   async function connect(sub: string) {
     const client = new Client({ name: 'relay-test', version: '1' });
     await client.connect(new StreamableHTTPClientTransport(RESOURCE, { fetch: bridge(app(signer, backend)), requestInit: { headers: { authorization: `Bearer ${await token(signer, { sub })}` } } }));
@@ -58,7 +58,7 @@ test('relay: outsiders, removed members and restricted agents cannot read or wri
   await f.call(f.alice, 'mls_message_post', { groupId, epoch: 0, kind: 'handshake', data: 'AA==' });
   await f.refused(f.eve, 'mls_message_fetch', { groupId });
   await f.refused(f.eve, 'mls_message_post', { groupId, epoch: 0, kind: 'application', data: 'AA==' });
-  const agent = ((await f.call(f.bob, 'agent_add', { journeyId: groupId, name: 'limited', read: false, write: false, grant: false })).agents as Data[])[0]!.agentId;
+  const agent = ((await addAgent(f.backend, 'bob', groupId, 'limited', [])).agents as Data[])[0]!.agentId;
   await f.refused(f.bob, 'mls_message_fetch', { groupId, actingAgent: agent });
   await f.refused(f.eve, 'mls_message_fetch', { groupId, actingAgent: agent });
   await f.call(f.alice, 'journey_remove', { journeyId: groupId, memberId: f.b });
@@ -180,13 +180,13 @@ test('relay: removed members cannot fetch ciphertext and writable agents interse
   await f.call(f.alice, 'journey_remove', { journeyId: groupId, memberId: f.b });
   await f.refused(f.bob, 'artifact_blob_get', { groupId, artifactId, version: 1 });
   await f.refused(f.bob, 'artifact_blob_put', { groupId, artifactId, version: 1, data: 'AQ==' });
-  const agentId = ((await f.call(f.alice, 'agent_add', { journeyId: groupId, name: 'Reader', read: true, write: false, grant: false })).agents as Data[])[0]!.agentId;
+  const agentId = ((await addAgent(f.backend, 'alice', groupId, 'Reader', ["read","task.manage"])).agents as Data[])[0]!.agentId;
   await f.call(f.alice, 'mls_message_post', { groupId, actingAgent: agentId, epoch: 0, kind: 'application', data: 'AA==' });
   const messages = (await f.call(f.alice, 'mls_message_fetch', { groupId })).messages as Data[];
   assert.equal(messages[0]!.sender, agentId);
   await f.call(f.alice, 'artifact_version', { journeyId: groupId, artifactId, baseVersion: 1, size: 1 });
   await f.refused(f.alice, 'artifact_blob_put', { groupId, actingAgent: agentId, artifactId, version: 2, data: 'AQ==' });
-  await f.call(f.alice, 'agent_card', { journeyId: groupId, agentId, action: 'withdraw', read: true, write: false, grant: false });
+  await f.call(f.alice, 'agent_card', { agentId, action: 'withdraw' });
   await f.refused(f.alice, 'mls_message_fetch', { groupId, actingAgent: agentId });
 });
 

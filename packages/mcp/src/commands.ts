@@ -1,4 +1,6 @@
 import * as z from 'zod';
+import { capabilities } from '../../rules/src/capabilities.ts';
+const capability = z.enum(capabilities.map(c => c.name));
 
 const id = z.string().min(1).max(200);
 const text = z.string().min(1).max(4096);
@@ -9,7 +11,7 @@ const status = z.enum(['gettingStarted', 'active', 'lookingForOthers', 'archived
 const context = { journeyId: id, actingAgent: id.optional() };
 const target = { ...context, personId: id };
 const project = { ...context, projectId: id };
-const limits = { read: z.boolean(), write: z.boolean(), grant: z.boolean() };
+const acting = { actingAgent: id.optional() };
 const relayContext = { groupId: id, actingAgent: id.optional(), memberId: id.optional() };
 // Canonical padded base64 only; decoded limits are checked before any storage write.
 const opaque = (bytes: number) => z.string().min(4).max(4 * Math.ceil(bytes / 3))
@@ -18,7 +20,7 @@ const opaque = (bytes: number) => z.string().min(4).max(4 * Math.ceil(bytes / 3)
 // Strict, named inputs: callers cannot supply authority flags, profile fields or plaintext.
 export const inputs = {
   account_read: z.object({}).strict(),
-  journey_create: z.object({ name: text, policy: policy.default('request'), defaultRole: role.default('read') }).strict(),
+  journey_create: z.object({ ...acting, name: text, policy: policy.default('request'), defaultRole: role.default('read') }).strict(),
   journey_list: z.object({}).strict(),
   journey_read: z.object(context).strict(),
   journey_policy: z.object({ ...context, policy, defaultRole: role }).strict(),
@@ -33,9 +35,15 @@ export const inputs = {
   journey_unguide: z.object(target).strict(),
   journey_remove: z.object({ ...context, memberId: id }).strict(),
   journey_leave: z.object(context).strict(),
-  agent_add: z.object({ journeyId: id, name: text, ...limits }).strict(),
-  agent_card: z.object({ journeyId: id, agentId: id, action: z.enum(['edit', 'withdraw', 'sign']), ...limits }).strict(),
-  agent_capabilities: z.object({ journeyId: id, actingAgent: id }).strict(),
+  agent_add: z.object({ journeyId: id, agentId: id }).strict(),
+  agent_card: z.object({ agentId: id, action: z.literal('withdraw'), ...acting }).strict(),
+  agent_create: z.object({ name: text, ...acting }).strict(),
+  agent_list: z.object(acting).strict(),
+  agent_capabilities: z.object({ agentId: id, journeyId: id.optional(), ...acting }).strict(),
+  agent_narrow: z.object({ agentId: id, remove: z.array(capability).max(capabilities.length), ...acting }).strict(),
+  agent_remove: z.object({ agentId: id, ...acting }).strict(),
+  client_list: z.object(acting).strict(),
+  conversation_post: z.object({ ...context, target: z.union([z.object({ projectId: id }).strict(), z.object({ itemId: id }).strict()]), body: text }).strict(),
   project_create: z.object({ ...context, name: text, purpose: text }).strict(),
   project_join: z.object(project).strict(),
   project_leave: z.object(project).strict(),
@@ -60,7 +68,7 @@ export const inputs = {
   artifact_blob_put: z.object({ ...relayContext, artifactId: id, version: nat.min(1), data: opaque(10 * 1024 * 1024) }).strict(),
   artifact_blob_get: z.object({ ...relayContext, artifactId: id, version: nat.min(1) }).strict(),
   artifact_blob_delete: z.object({ ...relayContext, artifactId: id }).strict(),
-  account_update: z.object({ nickname: z.string().trim().min(1).max(80) }).strict(),
+  account_update: z.object({ ...acting, nickname: z.string().trim().min(1).max(80) }).strict(),
 } as const;
 
 export type RelayCommand = Extract<Command, { tool: 'mls_message_post' | 'mls_message_fetch' | 'artifact_blob_put' | 'artifact_blob_get' | 'artifact_blob_delete' }>;
@@ -85,9 +93,15 @@ export const descriptions: Record<ToolName, string> = {
   journey_unguide: 'Remove guide authority from a person using journeyId and personId, keeping at least one guide.',
   journey_remove: 'Remove a journey member using journeyId and memberId, subject to current guide or agent-owner authority.',
   journey_leave: 'Leave a journey using journeyId, provided at least one guide remains.',
-  agent_add: 'Add your named journey agent with a signed card specifying read, write and grant limits.',
-  agent_card: 'Edit, withdraw or sign your agent card using journeyId, agentId, action and permission limits.',
-  agent_capabilities: 'Read effective agent permissions using journeyId and actingAgent, intersecting its card with your live authority.',
+  agent_add: 'Add one of your existing account agents to a journey using journeyId and agentId.',
+  agent_card: 'Withdraw all capabilities from your account agent; signing and widening require the passkey console.',
+  agent_create: 'Create a named account agent with an empty capability card; only a person may add agents.',
+  agent_list: 'List your account agents and their assigned capability cards without granting any authority.',
+  agent_capabilities: 'Read an owned agent card and, optionally, its effective capabilities in a particular journey.',
+  agent_narrow: 'Remove named capabilities from an owned account agent card; this operation can never widen it.',
+  agent_remove: 'Remove an owned account agent and immediately revoke all of its bound client connections.',
+  client_list: 'Show this authenticated client id and your connected client bindings without permitting binding changes.',
+  conversation_post: 'Post attributed text in the single conversation attached to a journey project or artifact.',
   project_create: 'Create a project in a journey using journeyId, name and purpose.',
   project_join: 'Join a project using journeyId and projectId.',
   project_leave: 'Leave a project using journeyId and projectId.',
@@ -126,8 +140,8 @@ export class Refused extends Error {}
 export type ToolData = Record<string, unknown>;
 export type TaskMethod = 'get' | 'update' | 'cancel';
 export interface CoordinationBackend {
-  execute(subject: string, command: Command): Promise<ToolData>;
-  inbox?(subject: string, journeyId: string): Promise<ToolData>;
-  watchInbox?(subject: string, journeyId: string): Promise<ReadableStream<Uint8Array>>;
-  task?(subject: string, method: TaskMethod, taskId: string): Promise<ToolData>;
+  execute(subject: string, command: Command, clientId?: string): Promise<ToolData>;
+  inbox?(subject: string, journeyId: string, clientId?: string): Promise<ToolData>;
+  watchInbox?(subject: string, journeyId: string, clientId?: string): Promise<ReadableStream<Uint8Array>>;
+  task?(subject: string, method: TaskMethod, taskId: string, clientId?: string): Promise<ToolData>;
 }

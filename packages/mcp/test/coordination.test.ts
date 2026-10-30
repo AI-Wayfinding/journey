@@ -2,7 +2,7 @@ import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import * as z from 'zod';
-import { app, bridge, keyPair, RESOURCE, token } from './helpers.ts';
+import { app, bridge, keyPair, RESOURCE, token, addAgent, setAgentCard, testPasskeys } from './helpers.ts';
 import { MemoryBackend } from '../src/backend.ts';
 import type { JourneyState } from '../src/journey.ts';
 import { RULES } from '../src/rules.ts';
@@ -25,7 +25,7 @@ const list = <T>(data: Data, key: string): T[] => data[key] as T[];
 async function fixture(t: TestContext) {
   let now = 1000;
   let lookups = 0;
-  const backend = new MemoryBackend({ async get(subject) { lookups++; return { name: subject.toUpperCase(), email: `${subject}@example.test` }; } }, () => now);
+  const backend = new MemoryBackend({ async get(subject) { lookups++; return { name: subject.toUpperCase(), email: `${subject}@example.test` }; } }, () => now, testPasskeys);
   const wire: { method: string; result?: Data; error?: Data }[] = [];
   const target = bridge(app(signer, backend));
   const send: typeof target = async (url, init) => {
@@ -154,20 +154,21 @@ test('coordination: agent cards intersect current person authority and only owne
   const f = await fixture(t);
   const journeyId = (await f.call(f.alice, 'journey_create', { name: 'Agents', policy: 'open' })).journeyId as string;
   await f.call(f.bob, 'journey_join', { journeyId });
-  let added = await f.call(f.bob, 'agent_add', { journeyId, name: 'Bob agent', read: true, write: true, grant: true });
+  let added = await addAgent(f.backend, 'bob', journeyId, 'Bob agent', ["read","task.manage","artifact.write","project.create","journey.policy","member.invite","member.admit","agent.remove"]);
   const agentId = list<Agent>(added, 'agents')[0]!.agentId;
   await f.refused(f.bob, 'artifact_create', { journeyId, actingAgent: agentId, name: 'Forbidden', type: 'note', size: 1 });
   await f.refused(f.alice, 'artifact_create', { journeyId, actingAgent: agentId, name: 'Stolen agent', type: 'note', size: 1 });
-  await f.refused(f.alice, 'agent_card', { journeyId, agentId, action: 'edit', read: true, write: false, grant: false });
+  await f.refused(f.alice, 'agent_narrow', { agentId, remove: ['artifact.write'] });
   await f.call(f.alice, 'journey_role', { journeyId, personId: f.b, role: 'write' });
   await f.call(f.bob, 'artifact_create', { journeyId, actingAgent: agentId, name: 'Allowed', type: 'note', size: 1 });
-  await f.call(f.bob, 'agent_card', { journeyId, agentId, action: 'edit', read: true, write: false, grant: false });
+  await f.call(f.bob, 'agent_narrow', { agentId, remove: ['artifact.write'] });
   await f.refused(f.bob, 'artifact_create', { journeyId, actingAgent: agentId, name: 'Card limited', type: 'note', size: 1 });
   await f.refused(f.bob, 'journey_role', { journeyId, actingAgent: agentId, personId: f.b, role: 'write' });
-  await f.call(f.bob, 'agent_card', { journeyId, agentId, action: 'withdraw', read: false, write: false, grant: false });
+  await f.call(f.bob, 'agent_card', { agentId, action: 'withdraw' });
   await f.refused(f.bob, 'journey_read', { journeyId, actingAgent: agentId });
-  added = await f.call(f.bob, 'agent_card', { journeyId, agentId, action: 'sign', read: true, write: false, grant: false });
-  assert.equal(list<Agent>(added, 'agents')[0]!.signed, true);
+  await setAgentCard(f.backend, 'bob', agentId, ['read']);
+  added = await f.call(f.bob, 'journey_read', { journeyId });
+  assert.equal((await f.call(f.bob, 'agent_capabilities', { agentId })).signed, true);
   await f.call(f.bob, 'journey_remove', { journeyId, memberId: agentId });
   await f.refused(f.bob, 'journey_read', { journeyId, actingAgent: agentId });
 });
@@ -178,7 +179,7 @@ test('coordination: removing a person ends their grants and agents in the same s
   await f.call(f.bob, 'journey_join', { journeyId });
   await f.call(f.eve, 'journey_join', { journeyId });
   await f.call(f.alice, 'journey_role', { journeyId, personId: f.b, role: 'write' });
-  const agentId = list<Agent>(await f.call(f.bob, 'agent_add', { journeyId, name: 'Bob agent', read: true, write: true, grant: true }), 'agents')[0]!.agentId;
+  const agentId = list<Agent>(await addAgent(f.backend, 'bob', journeyId, 'Bob agent', ["read","task.manage","artifact.write","project.create","journey.policy","member.invite","member.admit","agent.remove"]), 'agents')[0]!.agentId;
   await f.call(f.bob, 'grant_issue', { journeyId, grantee: f.e, need: 'write', resource: journeyId, uses: 3, expiresAt: 5000 });
   await f.call(f.alice, 'grant_issue', { journeyId, grantee: agentId, need: 'read', resource: journeyId, uses: 2, expiresAt: 5000 });
   const store = f.backend.journeyStores.get(journeyId)!;
@@ -187,7 +188,7 @@ test('coordination: removing a person ends their grants and agents in the same s
   assert.equal(store.writes, before + 1);
   assert.deepEqual(list<Member>(removed, 'members').map((m) => m.memberId), [f.a, f.e]);
   assert.deepEqual(list<Grant>(removed, 'grants').map(({ status, usesLeft }) => ({ status, usesLeft })), [{ status: 'ended', usesLeft: 0 }, { status: 'ended', usesLeft: 0 }]);
-  assert.equal(list<Agent>(removed, 'agents')[0]!.signed, false);
+  assert.equal(list<Member>(removed, 'members').some(m => m.memberId === agentId), false);
   await f.call(f.bob, 'journey_join', { journeyId });
   await f.refused(f.bob, 'journey_read', { journeyId, actingAgent: agentId });
 });
@@ -291,9 +292,10 @@ test('coordination: an agent may leave without guide authority and loses access'
   const f = await fixture(t);
   const journeyId = (await f.call(f.alice, 'journey_create', { name: 'Agent leave', policy: 'open' })).journeyId as string;
   await f.call(f.bob, 'journey_join', { journeyId });
-  const agentId = list<Agent>(await f.call(f.bob, 'agent_add', { journeyId, name: 'Agent', read: true, write: false, grant: false }), 'agents')[0]!.agentId;
-  const sibling = list<Agent>(await f.call(f.bob, 'agent_add', { journeyId, name: 'Sibling', read: true, write: false, grant: false }), 'agents')[1]!.agentId;
+  const agentId = list<Agent>(await addAgent(f.backend, 'bob', journeyId, 'Agent', ["read","task.manage"]), 'agents')[0]!.agentId;
+  const sibling = list<Agent>(await addAgent(f.backend, 'bob', journeyId, 'Sibling', ["read","task.manage"]), 'agents')[1]!.agentId;
   await f.refused(f.bob, 'journey_remove', { journeyId, actingAgent: agentId, memberId: f.a });
+  await setAgentCard(f.backend, 'bob', agentId, ['read', 'agent.remove']);
   await f.call(f.bob, 'journey_remove', { journeyId, actingAgent: agentId, memberId: sibling });
   assert.equal(list<Member>(await f.call(f.bob, 'journey_read', { journeyId }), 'members').some((m) => m.memberId === sibling), false);
   await f.call(f.bob, 'journey_leave', { journeyId, actingAgent: agentId });
@@ -306,7 +308,7 @@ test('tasks: member inbox resources isolate assignments and support offline poll
   const f = await fixture(t);
   const journeyId = (await f.call(f.alice, 'journey_create', { name: 'Inbox', policy: 'open' })).journeyId as string;
   await f.call(f.bob, 'journey_join', { journeyId });
-  const agentId = list<Agent>(await f.call(f.bob, 'agent_add', { journeyId, name: 'Worker', read: true, write: true, grant: false }), 'agents')[0]!.agentId;
+  const agentId = list<Agent>(await addAgent(f.backend, 'bob', journeyId, 'Worker', ["read","task.manage","artifact.write","project.create"]), 'agents')[0]!.agentId;
   const addressed = list<Task>(await f.call(f.alice, 'task_create', { journeyId, name: 'For worker', assignee: agentId, maxRounds: 2, deadline: 5000 }), 'tasks')[0]!.taskId;
   await f.call(f.alice, 'task_create', { journeyId, name: 'Private assignment', assignee: f.a, maxRounds: 2, deadline: 5000 });
   const uri = `wayfinding://journey/${journeyId}/inbox`;
@@ -345,7 +347,7 @@ test('tasks: modern inbox subscriptions receive committed updates and stop after
 test('coordination: a guide agent without read permission never receives private state from a mutation', async (t) => {
   const f = await fixture(t);
   const journeyId = (await f.call(f.alice, 'journey_create', { name: 'Private guide' })).journeyId as string;
-  const agentId = list<Agent>(await f.call(f.alice, 'agent_add', { journeyId, name: 'Guide agent', read: false, write: false, grant: true }), 'agents')[0]!.agentId;
+  const agentId = list<Agent>(await addAgent(f.backend, 'alice', journeyId, 'Guide agent', ["journey.policy","member.invite","member.admit","agent.remove"]), 'agents')[0]!.agentId;
   await f.refused(f.alice, 'journey_read', { journeyId, actingAgent: agentId });
   const changed = await f.call(f.alice, 'journey_policy', { journeyId, actingAgent: agentId, policy: 'open', defaultRole: 'read' });
   assert.deepEqual(changed, { journeyId, accepted: true });
@@ -409,7 +411,7 @@ test('tasks: assigned agents claim rounds and expire automatically at the cap', 
   const f = await fixture(t);
   const journeyId = (await f.call(f.alice, 'journey_create', { name: 'Assigned tasks', policy: 'open' })).journeyId as string;
   await f.call(f.bob, 'journey_join', { journeyId });
-  const agentId = list<Agent>(await f.call(f.bob, 'agent_add', { journeyId, name: 'Worker', read: true, write: false, grant: false }), 'agents')[0]!.agentId;
+  const agentId = list<Agent>(await addAgent(f.backend, 'bob', journeyId, 'Worker', ["read","task.manage"]), 'agents')[0]!.agentId;
   const taskId = list<Task>(await f.call(f.alice, 'task_create', { journeyId, assignee: agentId, name: 'Assigned', maxRounds: 1, deadline: 3000 }), 'tasks')[0]!.taskId;
   await f.refused(f.alice, 'task_step', { journeyId, taskId, action: 'claim' });
   await f.refused(f.bob, 'task_step', { journeyId, taskId, action: 'claim' });
@@ -445,7 +447,7 @@ test('tasks: Durable Object alarm expires an in-round task after eviction using 
   const f = await fixture(t);
   const journeyId = (await f.call(f.alice, 'journey_create', { name: 'Deadline', policy: 'open' })).journeyId as string;
   await f.call(f.bob, 'journey_join', { journeyId });
-  const agentId = list<Agent>(await f.call(f.bob, 'agent_add', { journeyId, name: 'Worker', read: true, write: false, grant: false }), 'agents')[0]!.agentId;
+  const agentId = list<Agent>(await addAgent(f.backend, 'bob', journeyId, 'Worker', ["read","task.manage"]), 'agents')[0]!.agentId;
   const taskId = list<Task>(await f.call(f.alice, 'task_create', { journeyId, assignee: agentId, name: 'Timed', maxRounds: 3, deadline: 2000 }), 'tasks')[0]!.taskId;
   const later = list<Task>(await f.call(f.alice, 'task_create', { journeyId, name: 'Later', maxRounds: 2, deadline: 4000 }), 'tasks')[1]!.taskId;
   const store = f.backend.journeyStores.get(journeyId)!;
@@ -472,22 +474,22 @@ test('tasks: capabilities reflect live person and card limits without allowing a
   const f = await fixture(t);
   const journeyId = (await f.call(f.alice, 'journey_create', { name: 'Capabilities', policy: 'open' })).journeyId as string;
   await f.call(f.bob, 'journey_join', { journeyId });
-  const agentId = list<Agent>(await f.call(f.bob, 'agent_add', { journeyId, name: 'Agent', read: true, write: true, grant: true }), 'agents')[0]!.agentId;
-  const caps = () => f.call(f.bob, 'agent_capabilities', { journeyId, actingAgent: agentId });
-  assert.deepEqual((await caps()).capabilities, { read: true, write: false, grant: false, guide: false });
+  const agentId = list<Agent>(await addAgent(f.backend, 'bob', journeyId, 'Agent', ["read","task.manage","artifact.write","project.create","journey.policy","member.invite","member.admit","agent.remove"]), 'agents')[0]!.agentId;
+  const caps = () => f.call(f.bob, 'agent_capabilities', { journeyId, agentId });
+  assert.deepEqual((await caps()).capabilities, ['read']);
   await f.call(f.alice, 'journey_role', { journeyId, personId: f.b, role: 'write' });
-  assert.equal(((await caps()).capabilities as Data).write, true);
+  assert.equal(((await caps()).capabilities as string[]).includes('artifact.write'), true);
   await f.call(f.alice, 'journey_guide', { journeyId, personId: f.b });
-  assert.equal(((await caps()).capabilities as Data).guide, true);
+  assert.equal(((await caps()).capabilities as string[]).includes('journey.policy'), true);
   await f.refused(f.bob, 'grant_issue', { journeyId, actingAgent: agentId, grantee: f.a, need: 'read', resource: journeyId, uses: 1, expiresAt: 5000 });
   await f.call(f.alice, 'journey_role', { journeyId, personId: f.b, role: 'read' });
-  assert.equal(((await caps()).capabilities as Data).write, false);
-  await f.call(f.bob, 'agent_card', { journeyId, agentId, action: 'edit', read: false, write: false, grant: false });
-  assert.deepEqual((await caps()).capabilities, { read: false, write: false, grant: false, guide: false });
-  await f.refused(f.alice, 'agent_capabilities', { journeyId, actingAgent: agentId });
+  assert.equal(((await caps()).capabilities as string[]).includes('artifact.write'), false);
+  await f.call(f.bob, 'agent_narrow', { agentId, remove: ['read', 'artifact.write', 'project.create', 'task.manage', 'journey.policy', 'member.invite', 'member.admit', 'agent.remove'] });
+  assert.deepEqual((await caps()).capabilities, []);
+  await f.refused(f.alice, 'agent_capabilities', { journeyId, agentId });
   await f.refused(f.bob, 'task_create', { journeyId, actingAgent: agentId, name: 'Denied', deadline: 5000, maxRounds: 1 });
   await f.call(f.bob, 'journey_remove', { journeyId, memberId: agentId });
-  await f.refused(f.bob, 'agent_capabilities', { journeyId, actingAgent: agentId });
+  await f.refused(f.bob, 'agent_capabilities', { journeyId, agentId });
 });
 
 

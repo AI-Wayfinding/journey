@@ -1,18 +1,22 @@
-import { encodeJourney, encodeProject, encodeAgentCard, encodeGrant, JOURNEY, PROJECT, decodeChoice, type JourneyNeed, type JourneyOp } from '../../rules/src/encode.ts';
-import { agentCardRule, artifactRule, grantRule, journeyRule, projectRule, taskRule, RULES, SLOTS, sameRules, sameState, scalar, cell, type Snapshot, type RulesStamp } from './rules.ts';
+import { encodeJourney, encodeProject, encodeGrant, JOURNEY, PROJECT, decodeChoice, type JourneyNeed, type JourneyOp } from '../../rules/src/encode.ts';
+import { artifactRule, grantRule, journeyRule, projectRule, taskRule, topicRule, postRule, RULES, SLOTS, sameRules, sameState, scalar, cell, type Snapshot, type RulesStamp } from './rules.ts';
+import { capabilities, type Capability } from '../../rules/src/capabilities.ts';
+import { allows, type Actor } from './agents.ts';
 import { Refused, isRelay, type Command, type TaskMethod, type ToolData } from './commands.ts';
 import { Serial, type KeyValueStorage } from './storage.ts';
 import { relay, deleteArtifactBlobs, type BlobStore } from './relay.ts';
 
 interface Identity { id: string; name: string }
 interface Project { id: string; name: string; purpose: string; rule: Snapshot }
-interface Agent { id: string; owner: string; card: Snapshot }
+interface Agent { id: string; owner: string }
 interface Grant { id: string; need: JourneyNeed; resource: string; expiresAt: number; rule: Snapshot }
+interface Post { id: string; topic: number; body: string; rule: Snapshot }
 interface Artifact { id: string; name: string; type: string; size: number; rule: Snapshot }
 interface Task { id: string; name: string; assignee?: string; deadline: number; createdAt: number; updatedAt: number; rule: Snapshot }
 export interface JourneyState {
   id: string; name: string; rulesHash: RulesStamp; identities: Identity[]; membership: Snapshot;
   projects: Project[]; agents: Agent[]; grants: Grant[]; artifacts: Artifact[]; tasks: Task[];
+  topics: Snapshot; posts: Post[];
 }
 
 function requireChange(before: Snapshot, after: Snapshot, what: string, ignore: string[] = []): Snapshot {
@@ -48,22 +52,48 @@ export class JourneyHost {
     return scalar(journeyRule.step(state.membership, encodeJourney({ op: 'check', actor: slot, need: 'read' })), 'allowed') === 1;
   }
   private has(state: JourneyState, slot: number, need: JourneyNeed): boolean {
-    const allowed = scalar(journeyRule.step(state.membership, encodeJourney({ op: 'check', actor: slot, need })), 'allowed') === 1;
-    if (!allowed || cell(state.membership, 'Members', slot) !== 2) return allowed;
-    const agent = state.agents.find((a) => a.id === state.identities[slot - 1]?.id);
-    if (!agent) return false;
-    const owner = cell(state.membership, 'AddedBy', slot);
-    return scalar(agentCardRule.step(agent.card, encodeAgentCard({ op: 'check', need: need === 'guide' ? 'grant' : need,
-      personHas: allowed, personLive: this.live(state, owner), agentLive: this.live(state, slot) })), 'allowed') === 1;
+    return scalar(journeyRule.step(state.membership, encodeJourney({ op: 'check', actor: slot, need })), 'allowed') === 1;
   }
-  private actor(state: JourneyState, personId: string, command: Command): number {
-    const agentId = 'actingAgent' in command.input ? command.input.actingAgent : undefined;
+  private actor(state: JourneyState, personId: string, command: Command, resolved?: Actor): number {
+    const agentId = resolved?.agent?.id ?? ('actingAgent' in command.input ? command.input.actingAgent : undefined);
     if (agentId === undefined) return this.slot(state, personId, true);
-    const agent = state.agents.find((a) => a.id === agentId && a.owner === personId);
-    if (!agent) throw new Refused('Only your own agent may act');
+    if (!resolved?.agent?.live || resolved.personId !== personId || !state.agents.some(a => a.id === agentId && a.owner === personId)) throw new Refused('Only your own live journey agent may act');
     const actor = this.slot(state, agentId);
     if (!this.live(state, actor)) throw new Refused('Agent is no longer a live member');
     return actor;
+  }
+  private can(state: JourneyState, actor: number, identity: Actor, capability: Capability): boolean {
+    const entry = capabilities.find(c => c.name === capability)!;
+    const person = this.slot(state, identity.personId);
+    const need = entry.authority === 'write' ? 'write' : entry.authority === 'guide' ? 'guide' : 'read';
+    return allows(identity, capability, this.has(state, person, need), this.live(state, person), this.live(state, actor));
+  }
+  private requireCapability(state: JourneyState, actor: number, identity: Actor, capability: Capability): void {
+    if (!this.can(state, actor, identity, capability)) throw new Refused(`Journey capability ${capability} refused`);
+  }
+  private commandCapability(command: Command): Capability | undefined {
+    switch (command.tool) {
+      case 'journey_read': case 'project_join': case 'project_leave': case 'grant_use': return 'read';
+      case 'journey_policy': case 'journey_role': case 'journey_guide': case 'journey_unguide': return 'journey.policy';
+      case 'journey_invite': return 'member.invite';
+      case 'journey_admit': case 'journey_refuse': return 'member.admit';
+      case 'journey_remove': return 'member.remove';
+      case 'journey_leave': return 'read';
+      case 'project_create': return 'project.create';
+      case 'project_update': return 'project.edit';
+      case 'grant_issue': case 'grant_revoke': return 'grant.issue';
+      case 'artifact_create': case 'artifact_version': case 'artifact_rename': return 'artifact.write';
+      case 'artifact_delete': return 'artifact.delete';
+      case 'task_create': return 'task.manage';
+      // Claiming/doing a task is member participation; managing/cancelling it is write authority.
+      case 'task_step': return command.input.action === 'cancel' ? 'task.manage' : 'read';
+      case 'mls_message_fetch': case 'artifact_blob_get': return 'read';
+      case 'mls_message_post': return 'read';
+      case 'artifact_blob_put': return 'artifact.write';
+      case 'artifact_blob_delete': return 'artifact.write';
+      case 'conversation_post': return 'post';
+      default: return undefined;
+    }
   }
   private taskView(state: JourneyState, task: Task): ToolData {
     return { taskId: task.id, name: task.name, assignee: task.assignee, deadline: task.deadline,
@@ -85,28 +115,28 @@ export class JourneyHost {
       }),
       pending: state.identities.flatMap((m, i) => { const p = cell(state.membership, 'Pending', i + 1); return p ? [{ personId: m.id, name: m.name, status: decodeChoice(JOURNEY.pending, p, 'pending') }] : []; }),
       projects: state.projects.map((p) => ({ projectId: p.id, name: p.name, purpose: p.purpose, status: decodeChoice(PROJECT.status, scalar(p.rule, 'status'), 'project status'), members: state.identities.filter((_, i) => cell(p.rule, 'Members', i + 1) === 1).map((m) => m.id) })),
-      agents: state.agents.map((a) => ({ agentId: a.id, owner: a.owner, signed: scalar(a.card, 'signed') === 1, read: scalar(a.card, 'mayRead') === 1, write: scalar(a.card, 'mayWrite') === 1, grant: scalar(a.card, 'mayGrant') === 1 })),
+      agents: state.agents.map(a => ({ agentId: a.id, owner: a.owner, signed: false, read: false, write: false, grant: false })),
       grants: state.grants.map((g) => ({ grantId: g.id, need: g.need, resource: g.resource, expiresAt: g.expiresAt, status: ['unissued', 'live', 'revoked', 'ended'][scalar(g.rule, 'status')], usesLeft: scalar(g.rule, 'usesLeft') })),
       artifacts: state.artifacts.map((a) => ({ artifactId: a.id, name: a.name, type: a.type, size: a.size, version: scalar(a.rule, 'version'), deleted: scalar(a.rule, 'at') === 2 })),
       tasks: state.tasks.map((t) => this.taskView(state, t)),
     };
   }
   /** A read-free authority probe; final invitation still runs the unchanged rule. */
-  requireGuide(personId: string, command: Command): Promise<void> {
+  requireGuide(personId: string, command: Command, resolved?: Actor): Promise<void> {
     return this.serial.run(async () => {
       const state = await this.load();
       if (!state) throw new Refused('Only guides may invite');
       let actor: number;
-      try { actor = this.actor(state, personId, command); }
+      try { actor = this.actor(state, personId, command, resolved); }
       catch (error) { if (error instanceof Refused) throw new Refused('Only guides may invite'); throw error; }
-      if (!this.has(state, actor, 'guide')) throw new Refused('Only guides may invite');
+      if (!this.can(state, actor, resolved ?? { personId }, 'member.invite')) throw new Refused('Only guides may invite');
     });
   }
   /** Used by the account directory, without leaking private journeys to nonmembers. */
-  summary(personId: string): Promise<ToolData | undefined> {
+  summary(personId: string, resolved?: Actor): Promise<ToolData | undefined> {
     return this.serial.run(async () => {
       const state = await this.load();
-      if (!state || !this.has(state, this.slot(state, personId), 'read')) return undefined;
+      if (!state || !this.can(state, this.slot(state, resolved?.agent?.id ?? personId), resolved ?? { personId }, 'read')) return undefined;
       return { journeyId: state.id, name: state.name };
     });
   }
@@ -114,16 +144,17 @@ export class JourneyHost {
     const recipients = new Set([personId, ...state.agents.filter((agent) => agent.owner === personId && this.live(state, this.slot(state, agent.id))).map((agent) => agent.id)]);
     return { journeyId: state.id, tasks: state.tasks.filter((task) => task.assignee === undefined || recipients.has(task.assignee)).map((task) => this.taskView(state, task)) };
   }
-  inbox(personId: string): Promise<ToolData> {
+  inbox(personId: string, resolved?: Actor): Promise<ToolData> {
     return this.serial.run(async () => {
       const state = await this.load();
-      if (!state || !this.has(state, this.slot(state, personId), 'read')) throw new Refused('Inbox reading refused');
-      return this.inboxView(state, personId);
+      if (!state || !this.can(state, this.slot(state, resolved?.agent?.id ?? personId), resolved ?? { personId }, 'read')) throw new Refused('Inbox reading refused');
+      return this.inboxView(state, resolved?.agent?.id ?? personId);
     });
   }
-  watchInbox(personId: string): Promise<ReadableStream<Uint8Array>> {
+  watchInbox(personId: string, resolved?: Actor): Promise<ReadableStream<Uint8Array>> {
     return this.serial.run(async () => {
       const state = await this.load();
+      if (resolved?.agent) throw new Refused('Agents must poll their inbox; live subscription requires a person connection');
       if (!state || !this.has(state, this.slot(state, personId), 'read')) throw new Refused('Inbox subscription refused');
       let controller: ReadableStreamDefaultController<Uint8Array>;
       return new ReadableStream<Uint8Array>({
@@ -165,14 +196,16 @@ export class JourneyHost {
       else await this.schedule(state);
     });
   }
-  task(personId: string, method: TaskMethod, taskId: string): Promise<ToolData> {
+  task(personId: string, method: TaskMethod, taskId: string, resolved?: Actor): Promise<ToolData> {
     return this.serial.run(async () => {
       const state = await this.load();
-      if (!state || !this.has(state, this.slot(state, personId), 'read')) throw new Refused('Task access refused');
+      const actor = state ? this.slot(state, resolved?.agent?.id ?? personId) : 0;
+      if (!state || !this.can(state, actor, resolved ?? { personId }, 'read')) throw new Refused('Task access refused');
       const task = state.tasks.find((task) => task.id === taskId);
       if (!task) throw new Refused('Task not found');
       if (method === 'cancel') {
-        this.apply(state, this.slot(state, personId), personId, { tool: 'task_step', input: { journeyId: state.id, taskId, action: 'cancel' } });
+        this.requireCapability(state, actor, resolved ?? { personId }, 'task.manage');
+        this.apply(state, actor, personId, { tool: 'task_step', input: { journeyId: state.id, taskId, action: 'cancel' } });
         await this.commit(state);
       }
       if (method !== 'get') return { resultType: 'complete' };
@@ -183,18 +216,55 @@ export class JourneyHost {
       return result;
     });
   }
-  execute(personId: string, command: Command, journeyId?: string): Promise<ToolData> {
+  execute(personId: string, command: Command, journeyId?: string, resolved?: Actor): Promise<ToolData> {
     return this.serial.run(async () => {
       let state = await this.load();
       if (command.tool === 'journey_create') {
         if (state) throw new Refused('Journey already exists');
         if (!journeyId) throw new Refused('Journey identity missing');
-        state = { id: journeyId, name: command.input.name, rulesHash: RULES, identities: [], membership: journeyRule.init(), projects: [], agents: [], grants: [], artifacts: [], tasks: [] };
+        state = { id: journeyId, name: command.input.name, rulesHash: RULES, identities: [], membership: journeyRule.init(), projects: [], agents: [], grants: [], artifacts: [], tasks: [], topics: topicRule.init(), posts: [] };
         const actor = this.slot(state, personId, true);
         state.membership = requireChange(state.membership, journeyRule.step(state.membership, encodeJourney({ op: 'found', actor, newPolicy: command.input.policy, role: command.input.defaultRole })), 'Founding');
+        // The live person is always the guide; a delegated creator also joins as
+        // their account agent so later calls never need to fall back to the person.
+        if (resolved?.agent) {
+          const subject = this.slot(state, resolved.agent.id, true);
+          state.membership = requireChange(state.membership, journeyRule.step(state.membership, encodeJourney({ op: 'addAgent', actor, subject })), 'Add founding agent', ['allowed']);
+          state.agents.push({ id: resolved.agent.id, owner: personId });
+          const identity = state.identities[subject - 1]; if (identity) identity.name = resolved.agent.name;
+        }
       } else {
         if (!state) throw new Refused('Journey not found');
-        const actor = this.actor(state, personId, command);
+        const actor = command.tool === 'agent_add' ? this.slot(state, personId) : this.actor(state, personId, command, resolved);
+        const identity = resolved ?? { personId };
+        if (isRelay(command) && !this.has(state, actor, 'read')) throw new Refused('A live readable member is required for relay');
+        const cap = this.commandCapability(command);
+        if (command.tool === 'artifact_delete') {
+          const artifact = state.artifacts.find(a => a.id === command.input.artifactId);
+          const creator = artifact ? scalar(artifact.rule, 'creator') : 0;
+          const creatorPerson = cell(state.membership, 'Members', creator) === 2 ? cell(state.membership, 'AddedBy', creator) : creator;
+          if (creatorPerson !== this.slot(state, personId) && !this.has(state, actor, 'guide')) throw new Refused('Only the artifact owner or guide may delete');
+        }
+        // Own-agent removal uses its account capability; all other journey
+        // operations intersect the catalogue capability with live journey authority.
+        const ownRemoval = command.tool === 'journey_remove' && state.agents.some(a => a.id === command.input.memberId && a.owner === personId);
+        if (ownRemoval && identity.agent) {
+          if (!allows(identity, 'agent.remove', this.has(state, actor, 'read'))) throw new Refused('Agent removal refused');
+        }
+        if (cap && !ownRemoval) this.requireCapability(state, actor, identity, cap);
+        if (command.tool === 'conversation_post') {
+          const target = 'projectId' in command.input.target ? command.input.target.projectId : command.input.target.itemId;
+          this.checkResource(state, target);
+          const targetSlot = this.resourceSlot(state, target);
+          const next = topicRule.step(state.topics, { op: 1, slot: state.posts.length, target: targetSlot, actor, canTopic: 1, boardOpen: 1, guide: +this.has(state, actor, 'guide'), locked: 0 });
+          const topic = scalar(next, 'selected') - 1;
+          if (topic < 0) throw new Refused('Conversation creation refused');
+          const rule = postRule.step(postRule.init(), { op: 0, actor, actorKind: +(identity.agent !== undefined), canPost: 1, topicOpen: +(cell(next, 'Locked', topic) === 0), guide: 0, newHidden: 0, newReplyTo: 0 });
+          if (scalar(rule, 'exists') !== 1) throw new Refused('Posting refused');
+          const post = { id: `post_${crypto.randomUUID()}`, topic, body: command.input.body, rule };
+          state.topics = next; state.posts.push(post); await this.commit(state);
+          return { postId: post.id, topicId: topic, author: identity.agent?.id ?? personId, authorKind: identity.agent ? 'agent' : 'person', body: post.body };
+        }
         if (isRelay(command)) {
           if (command.input.groupId !== state.id || command.input.memberId !== undefined) throw new Refused('Invalid journey relay identity');
           if (!this.has(state, actor, 'read')) throw new Refused('A live readable member is required for relay');
@@ -203,28 +273,29 @@ export class JourneyHost {
             if (!artifact || scalar(artifact.rule, 'at') !== 1 || ('version' in command.input && command.input.version > scalar(artifact.rule, 'version'))) throw new Refused('Live artifact version required');
             if (command.tool !== 'artifact_blob_get' && !this.has(state, actor, 'write')) throw new Refused('Artifact ciphertext write refused');
           }
-          const sender = command.input.actingAgent ?? personId;
+          const sender = resolved?.agent?.id ?? personId;
           return relay(this.storage, this.blobs, sender, command);
         }
         if (command.tool === 'agent_capabilities') {
-          return { journeyId: state.id, agentId: command.input.actingAgent,
-            capabilities: { read: this.has(state, actor, 'read'), write: this.has(state, actor, 'write'), grant: false, guide: this.has(state, actor, 'guide') } };
+          const current = state;
+          return { journeyId: state.id, agentId: command.input.agentId, capabilities: capabilities.filter(c => c.scope === 'journey' && this.can(current, actor, resolved ?? { personId }, c.name)).map(c => c.name) };
         }
         if (command.tool === 'journey_read') {
           if (!this.has(state, actor, 'read')) throw new Refused('Reading journey refused');
           return this.view(state);
         }
-        this.apply(state, actor, personId, command);
+        this.apply(state, actor, personId, command, resolved);
         if (command.tool === 'artifact_delete' && this.blobs) await deleteArtifactBlobs(this.storage, this.blobs, state.id, command.input.artifactId);
       }
       await this.commit(state);
       // Respond under the acting identity's read limit, never its owner's broader authority.
-      const readerId = 'actingAgent' in command.input ? command.input.actingAgent ?? personId : personId;
-      if (!this.has(state, this.slot(state, readerId), 'read')) return { journeyId: state.id, accepted: true };
+      const identity = command.tool === 'agent_add' ? { personId } : resolved ?? { personId };
+      const readerId = identity.agent?.id ?? personId;
+      if (!this.can(state, this.slot(state, readerId), identity, 'read')) return { journeyId: state.id, accepted: true };
       return this.view(state);
     });
   }
-  private apply(state: JourneyState, actor: number, personId: string, command: Command): void {
+  private apply(state: JourneyState, actor: number, personId: string, command: Command, resolved?: Actor): void {
     const membershipOps: Partial<Record<Command['tool'], JourneyOp>> = {
       journey_policy: 'policy', journey_invite: 'invite', journey_request: 'request', journey_join: 'join', journey_admit: 'admit', journey_refuse: 'refuse', journey_role: 'role', journey_guide: 'guide', journey_unguide: 'unguide', journey_remove: 'remove', journey_leave: 'leave',
     };
@@ -246,33 +317,19 @@ export class JourneyHost {
         role: 'role' in command.input ? command.input.role : command.tool === 'journey_policy' ? command.input.defaultRole : undefined,
         newPolicy: command.tool === 'journey_policy' ? command.input.policy : undefined }));
       state.membership = requireChange(before, next, op, ['allowed']);
-      // End grants and withdraw every removed agent card BEFORE the single put.
-      for (const agent of state.agents) {
-        if (!this.live(state, this.slot(state, agent.id)) && scalar(agent.card, 'signed') === 1) {
-          agent.card = agentCardRule.step(agent.card, encodeAgentCard({ op: 'withdraw' }));
-        }
-      }
       for (const grant of state.grants) {
         grant.rule = grantRule.step(grant.rule, encodeGrant({ op: 'end', actor,
           grantorLive: this.live(state, scalar(grant.rule, 'grantor')), granteeLive: this.live(state, scalar(grant.rule, 'to')) }));
       }
       return;
     }
-    if (!this.has(state, actor, 'read')) throw new Refused('A live member with a readable card is required');
+    if (!this.live(state, actor)) throw new Refused('A live member is required');
     switch (command.tool) {
       case 'agent_add': {
-        if (cell(state.membership, 'Members', actor) !== 1) throw new Refused('Only a person adds an agent');
-        const id = `agent_${crypto.randomUUID()}`, subject = this.slot(state, id, true);
+        const id = command.input.agentId, subject = this.slot(state, id, true);
         state.membership = requireChange(state.membership, journeyRule.step(state.membership, encodeJourney({ op: 'addAgent', actor, subject })), 'Add agent', ['allowed']);
-        const card = agentCardRule.step(agentCardRule.init(), encodeAgentCard({ op: 'sign', newRead: command.input.read, newWrite: command.input.write, newGrant: command.input.grant, personSigned: true }));
-        state.agents.push({ id, owner: personId, card });
-        const identity = state.identities[subject - 1]; if (identity) identity.name = command.input.name;
-        return;
-      }
-      case 'agent_card': {
-        const agent = state.agents.find((a) => a.id === command.input.agentId && a.owner === personId);
-        if (!agent || !this.live(state, this.slot(state, agent.id))) throw new Refused('Only the live agent owner may change its card');
-        agent.card = requireChange(agent.card, agentCardRule.step(agent.card, encodeAgentCard({ op: command.input.action, newRead: command.input.read, newWrite: command.input.write, newGrant: command.input.grant, personSigned: true })), 'Agent card', ['allowed']);
+        if (!state.agents.some(a => a.id === id)) state.agents.push({ id, owner: personId });
+        const identity = state.identities[subject - 1]; if (identity && resolved?.agent) identity.name = resolved.agent.name;
         return;
       }
       case 'project_create': {
@@ -330,7 +387,7 @@ export class JourneyHost {
         const artifact = state.artifacts.find((a) => a.id === command.input.artifactId);
         if (!artifact) throw new Refused('Artifact not found');
         artifact.rule = requireChange(artifact.rule, artifactRule.step(artifact.rule, { op: command.tool === 'artifact_version' ? 1 : command.tool === 'artifact_rename' ? 2 : 3,
-          actor, actorHasWrite: +this.has(state, actor, 'write'), type: scalar(artifact.rule, 'artifactType'), baseVersion: command.tool === 'artifact_version' ? command.input.baseVersion : 0 }), 'Artifact change');
+          actor, actorHasWrite: command.tool === 'artifact_delete' ? 1 : +this.has(state, actor, 'write'), type: scalar(artifact.rule, 'artifactType'), baseVersion: command.tool === 'artifact_version' ? command.input.baseVersion : 0 }), 'Artifact change');
         if (command.tool === 'artifact_version') artifact.size = command.input.size;
         if (command.tool === 'artifact_rename') artifact.name = command.input.name;
         return;

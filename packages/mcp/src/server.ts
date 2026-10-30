@@ -18,7 +18,7 @@ export function buildServer(ctx: Parameters<McpServerFactory>[0], backend?: Coor
   }, async (uri) => {
     const subject = subjectOf(ctx.authInfo?.extra);
     if (!subject || !backend?.inbox) throw new Refused('Authenticated inbox storage is required');
-    const inbox = await backend.inbox(subject, inboxJourney(uri.href));
+    const inbox = await backend.inbox(subject, inboxJourney(uri.href), ctx.authInfo?.clientId);
     return { contents: [{ uri: uri.href, mimeType: 'application/json', text: JSON.stringify(inbox) }] };
   });
   server.registerTool('whoami', {
@@ -40,7 +40,7 @@ export function buildServer(ctx: Parameters<McpServerFactory>[0], backend?: Coor
         const subject = subjectOf(ctx.authInfo?.extra);
         if (!subject) throw new Refused('No signed-in account on this request');
         if (!backend) throw new Refused('Coordination storage is not configured');
-        const result = await backend.execute(subject, parseCommand(name, args));
+        const result = await backend.execute(subject, parseCommand(name, args), ctx.authInfo?.clientId);
         return { content: [{ type: 'text' as const, text: JSON.stringify(result) }], structuredContent: result };
       } catch (error) {
         const message = error instanceof Refused ? error.message : 'Coordination operation failed';
@@ -76,13 +76,13 @@ export function buildServer(ctx: Parameters<McpServerFactory>[0], backend?: Coor
       try {
         // No input requests are outstanding: SEP-2663 says to ignore unknown/satisfied responses.
         // Copy only the task identifier, never caller-supplied state or input responses, to storage.
-        return await backend.task(subject, method, args.taskId);
+        return await backend.task(subject, method, args.taskId, ctx.authInfo?.clientId);
       } catch (error) {
         if (error instanceof Refused) throw new ProtocolError(-32602, error.message);
         throw new ProtocolError(-32603, 'Task storage operation failed');
       }
     });
   }
-  registerApps(server, subjectOf(ctx.authInfo?.extra), backend);
+  registerApps(server, subjectOf(ctx.authInfo?.extra), backend, ctx.authInfo?.clientId);
   return server;
 }

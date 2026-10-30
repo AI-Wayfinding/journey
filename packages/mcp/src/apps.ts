@@ -43,7 +43,7 @@ const viewTools: ViewTool[] = [
   { name: 'apps_project_update', kind: 'project', command: 'project_update', appOnly: true },
   { name: 'apps_artifact_rename', kind: 'artifacts', command: 'artifact_rename', appOnly: true },
 ];
-export function registerApps(server: McpServer, subject: string | undefined, backend?: CoordinationBackend) {
+export function registerApps(server: McpServer, subject: string | undefined, backend?: CoordinationBackend, clientId?: string) {
   registerViewResources(server);
   for (const tool of viewTools) {
     // Reuse the strict project-selector input, but never join on view/refresh.
@@ -57,7 +57,7 @@ export function registerApps(server: McpServer, subject: string | undefined, bac
         const command = tool.projectSelector
           ? parseCommand('journey_read', { journeyId: args.journeyId, ...(typeof args.actingAgent === 'string' ? { actingAgent: args.actingAgent } : {}) })
           : parseCommand(tool.command, args);
-        const data = project(await backend.execute(subject, command), tool.kind, args.projectId);
+        const data = project(await backend.execute(subject, command, clientId), tool.kind, args.projectId);
         return { content: [{ type: 'text' as const, text: JSON.stringify(data) }], structuredContent: data };
       } catch (error) {
         return { isError: true, content: [{ type: 'text' as const, text: error instanceof Refused ? error.message : 'View operation failed' }] };

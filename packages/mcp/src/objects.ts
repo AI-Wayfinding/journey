@@ -3,6 +3,7 @@ import { AccountsHost, WorkOSProfiles, type Account } from './accounts.ts';
 import { Backend, type AccountsPort, type JourneyPort } from './backend.ts';
 import { Refused, parseCommand, type Command, type ToolData } from './commands.ts';
 import { JourneyHost } from './journey.ts';
+import { actorSchema, assertionSchema, changeSchema, type Actor } from './agents.ts';
 import type { KeyValueStorage } from './storage.ts';
 import type { BlobStore } from './relay.ts';
 
@@ -41,17 +42,18 @@ export class Journey {
       if (request.method !== 'POST') throw new Refused('Internal requests must be POST');
       const body = record(await request.json());
       const personId = field(body, 'personId');
-      if (body['action'] === 'watchInbox') return new Response(await this.host.watchInbox(personId), { headers: { 'content-type': 'application/x-ndjson' } });
+      const actor = body['actor'] === undefined ? undefined : actorSchema.parse(body['actor']);
+      if (body['action'] === 'watchInbox') return new Response(await this.host.watchInbox(personId, actor), { headers: { 'content-type': 'application/x-ndjson' } });
       return respond(async () => {
-        if (body['action'] === 'requireGuide') return this.host.requireGuide(personId, command(body));
-        if (body['action'] === 'summary') return this.host.summary(personId);
-        if (body['action'] === 'inbox') return this.host.inbox(personId);
+        if (body['action'] === 'requireGuide') return this.host.requireGuide(personId, command(body), actor);
+        if (body['action'] === 'summary') return this.host.summary(personId, actor);
+        if (body['action'] === 'inbox') return this.host.inbox(personId, actor);
         if (body['action'] === 'task') {
           const method = field(body, 'method');
           if (method !== 'get' && method !== 'update' && method !== 'cancel') throw new Refused('Invalid task method');
-          return this.host.task(personId, method, field(body, 'taskId'));
+          return this.host.task(personId, method, field(body, 'taskId'), actor);
         }
-        return this.host.execute(personId, command(body), typeof body['journeyId'] === 'string' ? field(body, 'journeyId') : undefined);
+        return this.host.execute(personId, command(body), typeof body['journeyId'] === 'string' ? field(body, 'journeyId') : undefined, actor);
       });
     } catch (error) {
       return respond(async () => { throw error; });
@@ -60,11 +62,19 @@ export class Journey {
 }
 export class Accounts {
   private readonly host: AccountsHost;
-  constructor(state: ObjectState, env: Pick<ObjectBindings, 'WORKOS_API_KEY'> & Partial<Pick<ObjectBindings, 'BLOBS'>>) { this.host = new AccountsHost(state.storage, new WorkOSProfiles(env.WORKOS_API_KEY), env.BLOBS); }
+  constructor(state: ObjectState, env: Pick<ObjectBindings, 'WORKOS_API_KEY'> & Partial<Pick<ObjectBindings, 'BLOBS'>>, verifier?: import('./agents.ts').PasskeyVerifier) { this.host = new AccountsHost(state.storage, new WorkOSProfiles(env.WORKOS_API_KEY), env.BLOBS, verifier); }
   async fetch(request: Request): Promise<Response> {
     return respond(async () => {
       if (request.method !== 'POST') throw new Refused('Internal requests must be POST');
       const body = record(await request.json());
+      if (body['action'] === 'observeClient') return this.host.observeClient(field(body, 'personId'), field(body, 'clientId'));
+      if (body['action'] === 'resolveActor') return this.host.resolveActor(field(body, 'personId'), field(body, 'clientId'), typeof body['actingAgent'] === 'string' ? field(body, 'actingAgent') : undefined);
+      if (body['action'] === 'agentCommand') return this.host.agentCommand(field(body, 'personId'), field(body, 'clientId'), command(body));
+      if (body['action'] === 'beginAuthorization' || body['action'] === 'completeAuthorization') {
+        const identity = { subject: field(body, 'subject'), clientId: field(body, 'clientId') }, change = changeSchema.parse(body['change']);
+        return body['action'] === 'beginAuthorization' ? this.host.beginAuthorization(identity, change)
+          : this.host.completeAuthorization(identity, change, body['assertion'] === undefined ? undefined : assertionSchema.parse(body['assertion']));
+      }
       if (body['action'] === 'provision') return this.host.provision(field(body, 'subject'));
       if (body['action'] === 'lookup') return this.host.lookup(field(body, 'subject'));
       if (body['action'] === 'update') {
@@ -88,8 +98,8 @@ async function call<T>(namespace: ObjectNamespace, name: string, body: Record<st
   if (!response.ok) throw new Refused(typeof envelope['error'] === 'string' ? envelope['error'] : 'Coordination operation failed');
   return envelope['value'] as T;
 }
-async function watch(namespace: ObjectNamespace, id: string, personId: string): Promise<ReadableStream<Uint8Array>> {
-  const response = await namespace.getByName(id).fetch(new Request('https://coordination.internal/', { method: 'POST', body: JSON.stringify({ action: 'watchInbox', personId }) }));
+async function watch(namespace: ObjectNamespace, id: string, personId: string, actor?: Actor): Promise<ReadableStream<Uint8Array>> {
+  const response = await namespace.getByName(id).fetch(new Request('https://coordination.internal/', { method: 'POST', body: JSON.stringify({ action: 'watchInbox', personId, actor }) }));
   if (!response.ok || !response.body) throw new Refused('Inbox subscription refused');
   return response.body;
 }
@@ -102,13 +112,18 @@ export function durableBackend(env: ObjectBindings): Backend {
     personIdByEmail: (email) => call<string | undefined>(env.ACCOUNTS, 'accounts', { action: 'personIdByEmail', email }),
     directory: (add) => call<string[]>(env.ACCOUNTS, 'accounts', { action: 'directory', add }),
     group: (personId, command) => call<ToolData>(env.ACCOUNTS, 'accounts', { action: 'group', personId, tool: command.tool, input: command.input }),
+    observeClient: (personId, clientId) => call<void>(env.ACCOUNTS, 'accounts', { action: 'observeClient', personId, clientId }),
+    resolveActor: (personId, clientId, actingAgent) => call<Actor>(env.ACCOUNTS, 'accounts', { action: 'resolveActor', personId, clientId, actingAgent }),
+    agentCommand: (personId, clientId, command) => call<ToolData>(env.ACCOUNTS, 'accounts', { action: 'agentCommand', personId, clientId, tool: command.tool, input: command.input }),
+    beginAuthorization: (identity, change) => call(env.ACCOUNTS, 'accounts', { action: 'beginAuthorization', subject: identity.subject, clientId: identity.clientId, change }),
+    completeAuthorization: (identity, change, assertion) => call(env.ACCOUNTS, 'accounts', { action: 'completeAuthorization', subject: identity.subject, clientId: identity.clientId, change, assertion }),
   };
   return new Backend(accounts, (id): JourneyPort => ({
-    requireGuide: (personId, command) => call<void>(env.JOURNEYS, id, { action: 'requireGuide', personId, tool: command.tool, input: command.input }),
-    execute: (personId, command, journeyId) => call<ToolData>(env.JOURNEYS, id, { personId, journeyId, tool: command.tool, input: command.input }),
-    summary: (personId) => call<ToolData | undefined>(env.JOURNEYS, id, { action: 'summary', personId }),
-    inbox: (personId) => call<ToolData>(env.JOURNEYS, id, { action: 'inbox', personId }),
-    watchInbox: (personId) => watch(env.JOURNEYS, id, personId),
-    task: (personId, method, taskId) => call<ToolData>(env.JOURNEYS, id, { action: 'task', personId, method, taskId }),
+    requireGuide: (personId, command, actor) => call<void>(env.JOURNEYS, id, { action: 'requireGuide', personId, tool: command.tool, input: command.input, actor }),
+    execute: (personId, command, journeyId, actor) => call<ToolData>(env.JOURNEYS, id, { personId, journeyId, tool: command.tool, input: command.input, actor }),
+    summary: (personId, actor) => call<ToolData | undefined>(env.JOURNEYS, id, { action: 'summary', personId, actor }),
+    inbox: (personId, actor) => call<ToolData>(env.JOURNEYS, id, { action: 'inbox', personId, actor }),
+    watchInbox: (personId, actor) => watch(env.JOURNEYS, id, personId, actor),
+    task: (personId, method, taskId, actor) => call<ToolData>(env.JOURNEYS, id, { action: 'task', personId, method, taskId, actor }),
   }));
 }

@@ -51,9 +51,13 @@ export function createVerifier(options: VerifierOptions): OAuthTokenVerifier {
         throw new OAuthError(OAuthErrorCode.InvalidToken, 'Access token lacks sub or exp');
       }
 
+      const clientId = payload['client_id'];
+      if (typeof clientId !== 'string' || clientId.length === 0 || clientId.length > 200) {
+        throw new OAuthError(OAuthErrorCode.InvalidToken, 'Access token lacks a valid client_id');
+      }
       return {
         token,
-        clientId: sub,
+        clientId,
         scopes: scopesOf(payload),
         expiresAt: exp,
         resource: audienceFor(payload, options.resource),

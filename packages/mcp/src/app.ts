@@ -103,7 +103,7 @@ export function createApp(options: AppOptions): { fetch(request: Request): Promi
           if (!Array.isArray(uris) || uris.length > 32 || uris.some((uri) => typeof uri !== 'string')) throw new Error('Invalid inbox subscriptions');
           const subject = auth.extra?.['sub'];
           if (typeof subject !== 'string') throw new Error('Missing subject');
-          for (const uri of new Set<string>(uris)) streams.push(await options.backend.watchInbox(subject, inboxJourney(uri)));
+          for (const uri of new Set<string>(uris)) streams.push(await options.backend.watchInbox(subject, inboxJourney(uri), auth.clientId));
           let dispose = () => {};
           let closed = false;
           const bus = new InboxBus(streams, () => dispose());

@@ -2,7 +2,10 @@
 // from packages/rules/generated run here: never the gdp-wired interpreter.
 import * as journeyModule from '../../rules/generated/journey.js';
 import * as projectModule from '../../rules/generated/project.js';
-import * as agentCardModule from '../../rules/generated/agentCard.js';
+import * as cardModule from '../../rules/generated/card.js';
+import * as bindingModule from '../../rules/generated/binding.js';
+import * as topicModule from '../../rules/generated/topic.js';
+import * as postModule from '../../rules/generated/post.js';
 import * as grantModule from '../../rules/generated/grant.js';
 import * as artifactModule from '../../rules/generated/artifact.js';
 import * as taskModule from '../../rules/generated/task.js';
@@ -25,22 +28,28 @@ export interface RulesStamp {
   gdpWired: string;
   journey: string;
   project: string;
-  agentCard: string;
   grant: string;
   artifact: string;
   task: string;
   personalGroup: string;
+  card: string;
+  binding: string;
+  topic: string;
+  post: string;
 }
 
 export const RULES: RulesStamp = Object.freeze({
   gdpWired: lock.gdpWired,
   journey: lock.files['generated/journey.js'],
   project: lock.files['generated/project.js'],
-  agentCard: lock.files['generated/agentCard.js'],
   grant: lock.files['generated/grant.js'],
   artifact: lock.files['generated/artifact.js'],
   task: lock.files['generated/task.js'],
   personalGroup: lock.files['generated/personalGroup.js'],
+  card: lock.files['generated/card.js'],
+  binding: lock.files['generated/binding.js'],
+  topic: lock.files['generated/topic.js'],
+  post: lock.files['generated/post.js'],
 });
 
 /** Whether `stamp` names exactly the rule modules this build runs. */
@@ -92,7 +101,7 @@ function thaw(snapshot: Snapshot): State {
 export interface Rule {
   init(): Snapshot;
   /** The state after one request. Never changes `snapshot`; throws RangeError for a request outside the rule's bounds. */
-  step(snapshot: Snapshot, input: Record<string, number>): Snapshot;
+  step(snapshot: Snapshot, input: Record<string, number | Map<number, number>>): Snapshot;
 }
 
 function rule(module: Machine, params: Record<string, number>): Rule {
@@ -107,7 +116,10 @@ export const SLOTS = 65_536;
 
 export const journeyRule = rule(journeyModule, { slots: SLOTS });
 export const projectRule = rule(projectModule, {});
-export const agentCardRule = rule(agentCardModule, {});
+export const cardRule = rule(cardModule, {});
+export const bindingRule = rule(bindingModule, { person: 1 });
+export const topicRule = rule(topicModule, {});
+export const postRule = rule(postModule, {});
 export const grantRule = rule(grantModule, {});
 export const artifactRule = rule(artifactModule, {});
 export const taskRule = rule(taskModule, {});
