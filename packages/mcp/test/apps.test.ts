@@ -42,13 +42,20 @@ test('apps: versioned resources and app-only tools use official metadata', async
     ['ui://wayfinding/v1/artifacts.html', 'text/html;profile=mcp-app'],
     ['ui://wayfinding/v1/journey.html', 'text/html;profile=mcp-app'],
     ['ui://wayfinding/v1/project.html', 'text/html;profile=mcp-app'],
+    ['ui://wayfinding/v2/agents.html', 'text/html;profile=mcp-app'],
     ['ui://wayfinding/v2/forum.html', 'text/html;profile=mcp-app'],
+    ['ui://wayfinding/v2/library.html', 'text/html;profile=mcp-app'],
+    ['ui://wayfinding/v2/round.html', 'text/html;profile=mcp-app'],
+    ['ui://wayfinding/v3/forum.html', 'text/html;profile=mcp-app'],
   ]);
   const tools = (await client.listTools()).tools;
   assert.deepEqual(tools.filter((tool) => tool.name.startsWith('apps_')).map((tool) => [tool.name, (tool._meta?.ui as { visibility: string[] }).visibility]).sort(), [
     ['apps_artifact_rename', ['app']], ['apps_artifacts_refresh', ['app']],
     ['apps_journey_invite', ['app']], ['apps_journey_policy', ['app']], ['apps_journey_refresh', ['app']],
     ['apps_project_refresh', ['app']], ['apps_project_update', ['app']],
+    ['apps_v2_agents', ['app']], ['apps_v2_contribute', ['app']], ['apps_v2_forum', ['app']],
+    ['apps_v2_interview_read', ['app']], ['apps_v2_interview_share', ['app']], ['apps_v2_interview_write', ['app']],
+    ['apps_v2_library', ['app']], ['apps_v2_reply', ['app']], ['apps_v2_round', ['app']], ['apps_v2_topic', ['app']],
   ]);
   assert.equal((tools.find((tool) => tool.name === 'journey_view')!._meta?.ui as { resourceUri: string }).resourceUri, 'ui://wayfinding/v1/journey.html');
   const view = await client.readResource({ uri: 'ui://wayfinding/v1/journey.html' });
@@ -129,7 +136,7 @@ test('apps: adding a later release still serves and executes the original v1 URI
   const client = new Client({ name: 'release-host', version: '1.0.0' });
   await client.connect(new StreamableHTTPClientTransport(RESOURCE, { fetch: bridge(target) }));
   t.after(() => client.close());
-  assert.equal((await client.listResources()).resources.length, 5);
+  assert.equal((await client.listResources()).resources.length, 9);
   const v1 = (await client.readResource({ uri: 'ui://wayfinding/v1/journey.html' })).contents[0]!;
   const v2 = (await client.readResource({ uri: 'ui://wayfinding/v2/journey.html' })).contents[0]!;
   assert.ok('text' in v1 && 'text' in v2);
