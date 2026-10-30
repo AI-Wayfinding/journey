@@ -22,7 +22,7 @@ async function fixture() {
   const target = createApp({ verifier: createVerifier({ issuer: ISSUER, resource: RESOURCE, getKey: createLocalJWKSet(signer.jwks) }),
     resource: RESOURCE, issuer: ISSUER, allowedHosts: [RESOURCE.hostname], backend,
     console: { secret: 'synthetic-console-secret-at-least-32-bytes', backend, now: () => now,
-      send: async (url, init) => { assert.equal(String(url), `${ISSUER}/oauth2/token`); exchanges.push(new URLSearchParams(String(init?.body))); return Response.json({ access_token: accessToken, token_type: 'Bearer' }); } },
+      send: async (url, init) => { assert.equal(String(url), `${ISSUER}/oauth2/token`); assert.equal(init?.redirect, 'manual', 'Workers fetch accepts only follow or manual'); exchanges.push(new URLSearchParams(String(init?.body))); return Response.json({ access_token: accessToken, token_type: 'Bearer' }); } },
   });
   const send = (path: string, init?: RequestInit) => bridge(target)(`${origin}${path}`, init);
   async function login() {

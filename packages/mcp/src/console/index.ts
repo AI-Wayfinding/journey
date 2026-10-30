@@ -59,7 +59,7 @@ export function createConsole(config: ConsoleConfig) {
         if (pending?.kind !== 'oauth' || url.searchParams.getAll('state').length !== 1 || url.searchParams.get('state') !== pending.state) throw new Refused('OAuth state refused');
         const code = z.string().min(1).max(4096).parse(url.searchParams.get('code'));
         if (url.searchParams.getAll('code').length !== 1 || url.searchParams.has('error')) throw new Refused('OAuth code refused');
-        const response = await send(tokenEndpoint, { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(10_000),
+        const response = await send(tokenEndpoint, { method: 'POST', redirect: 'manual', signal: AbortSignal.timeout(10_000),
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'authorization_code', code, client_id: clientId,
             redirect_uri: redirectUri, code_verifier: pending.verifier, resource: config.resource.href }).toString() });
         if (!response.ok) throw new Refused('Sign-in exchange refused');
