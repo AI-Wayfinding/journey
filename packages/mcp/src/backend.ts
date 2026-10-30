@@ -7,11 +7,14 @@ import { JourneyHost } from './journey.ts';
 import { MemoryStorage } from './storage.ts';
 import { MemoryBlobs, encodeBytes } from './relay.ts';
 
+import type { RecordOperation, ConsoleRecord, PasskeyOperation } from './console/contract.ts';
 const namedState = z.object({
   members: z.array(z.object({ memberId: z.string(), name: z.string(), kind: z.enum(['person', 'agent']), role: z.enum(['read', 'write']), guide: z.boolean(), owner: z.string().optional() }).strict()),
   pending: z.array(z.object({ personId: z.string(), name: z.string(), status: z.string() }).strict()),
 });
 export interface AccountsPort {
+  consoleRecord(operation: RecordOperation): Promise<ConsoleRecord | undefined>;
+  passkey(identity: ClientIdentity, operation: PasskeyOperation): Promise<ToolData>;
   provision(subject: string): Promise<Account>;
   lookup(subject: string): Promise<Account | undefined>;
   update(personId: string, nickname: string): Promise<Account>;
@@ -39,6 +42,8 @@ export class Backend implements CoordinationBackend {
   private readonly accounts: AccountsPort;
   private readonly journey: (id: string) => JourneyPort;
   constructor(accounts: AccountsPort, journey: (id: string) => JourneyPort) { this.accounts = accounts; this.journey = journey; }
+  consoleRecord(operation: RecordOperation) { return this.accounts.consoleRecord(operation); }
+  passkey(identity: ClientIdentity, operation: PasskeyOperation) { return this.accounts.passkey(identity, operation); }
   beginAuthorization(identity: ClientIdentity, change: CardChange) { return this.accounts.beginAuthorization(identity, change); }
   completeAuthorization(identity: ClientIdentity, change: CardChange, assertion: AuthenticationResponseJSON | undefined) { return this.accounts.completeAuthorization(identity, change, assertion); }
   private async named(data: ToolData): Promise<ToolData> {

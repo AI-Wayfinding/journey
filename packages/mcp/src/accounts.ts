@@ -1,3 +1,4 @@
+import * as z from 'zod';
 import { Refused, isRelay, type Command, type KeyPackageCommand, type ToolData } from './commands.ts';
 import { personalGroupRule, RULES, sameRules, sameState, cell, SLOTS, type Snapshot, type RulesStamp } from './rules.ts';
 import { Serial, type KeyValueStorage } from './storage.ts';
@@ -6,6 +7,8 @@ import { bindingRule, cardRule, scalar } from './rules.ts';
 import { assertionSchema, changeSchema, changeDigest, base64url, cardCaps, stepCard, requireAccountCapability, WebAuthnVerifier, type AgentAccount, type Actor, type ClientIdentity, type CardChange, type PasskeyVerifier } from './agents.ts';
 import type { AuthenticationResponseJSON } from '@simplewebauthn/server';
 
+import { recordOperation, consoleRecord, passkeyOperation, type RecordOperation, type ConsoleRecord, type PasskeyOperation } from './console/contract.ts';
+import { managePasskey } from './console/passkeys.ts';
 export interface Profile { name: string; email: string }
 export interface Profiles { get(subject: string): Promise<Profile> }
 export interface Account extends Profile, AgentAccount { subject: string; personId: string; nickname?: string; group: Snapshot; identities: { id: string; name: string; kind: 'device' | 'agent' }[] }
@@ -26,6 +29,23 @@ export class AccountsHost {
     const state = JSON.parse(raw) as AccountsState;
     if (!sameRules(state.rulesHash)) throw new Refused('Stored accounts use different rules');
     return state;
+  }
+  /** Host-only bounded session registry; a single replacement makes take/delete atomic. */
+  consoleRecord(supplied: RecordOperation): Promise<ConsoleRecord | undefined> {
+    return this.serial.run(async () => {
+      const operation = recordOperation.parse(supplied), raw = await this.storage.get('console:records');
+      let records: Record<string, ConsoleRecord> = {};
+      try { records = raw === undefined ? {} : z.record(z.string(), consoleRecord).parse(JSON.parse(String(raw))); }
+      catch { throw new Refused('Invalid stored console sessions'); }
+      const active = Object.fromEntries(Object.entries(records).filter(([, record]) => record.expiresAt > this.now()));
+      const previous = active[operation.id];
+      if (operation.op === 'put') {
+        if (previous || Object.keys(active).length >= 128) throw new Refused('Console session capacity reached');
+        active[operation.id] = operation.record;
+      } else if (operation.op !== 'read') delete active[operation.id];
+      if (operation.op !== 'read' || Object.keys(active).length !== Object.keys(records).length) await this.storage.put('console:records', JSON.stringify(active));
+      return operation.op === 'read' || operation.op === 'take' ? previous : undefined;
+    });
   }
   lookup(subject: string): Promise<Account | undefined> {
     return this.serial.run(async () => (await this.load()).accounts.find(a => a.subject === subject));
@@ -189,6 +209,16 @@ export class AccountsHost {
       if (credential) credential.counter = verified.counter;
       account.assertions = account.assertions.filter(a => a !== pending);
       await this.storage.put('accounts', JSON.stringify(state)); return { accepted: true };
+    });
+  }
+  passkey(identity: ClientIdentity, supplied: PasskeyOperation): Promise<ToolData> {
+    return this.serial.run(async () => {
+      const state = await this.load(), account = state.accounts.find(a => a.subject === identity.subject);
+      if (!account || this.resolve(account, identity.clientId).agent) throw new Refused('Only a live person manages passkeys');
+      const operation = passkeyOperation.parse(supplied);
+      const result = await managePasskey(account, state.accounts, this.storage, operation, this.now());
+      if (operation.op === 'finish' || operation.op === 'delete') await this.storage.put('accounts', JSON.stringify(state));
+      return result;
     });
   }
   private requireIdentity(account: Account, memberId: string): void {
