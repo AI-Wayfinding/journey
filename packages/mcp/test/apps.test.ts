@@ -42,12 +42,20 @@ test('apps: versioned resources and app-only tools use official metadata', async
     ['ui://wayfinding/v1/artifacts.html', 'text/html;profile=mcp-app'],
     ['ui://wayfinding/v1/journey.html', 'text/html;profile=mcp-app'],
     ['ui://wayfinding/v1/project.html', 'text/html;profile=mcp-app'],
+    ['ui://wayfinding/v2/agents.html', 'text/html;profile=mcp-app'],
+    ['ui://wayfinding/v2/forum.html', 'text/html;profile=mcp-app'],
+    ['ui://wayfinding/v2/library.html', 'text/html;profile=mcp-app'],
+    ['ui://wayfinding/v2/round.html', 'text/html;profile=mcp-app'],
+    ['ui://wayfinding/v3/forum.html', 'text/html;profile=mcp-app'],
   ]);
   const tools = (await client.listTools()).tools;
   assert.deepEqual(tools.filter((tool) => tool.name.startsWith('apps_')).map((tool) => [tool.name, (tool._meta?.ui as { visibility: string[] }).visibility]).sort(), [
     ['apps_artifact_rename', ['app']], ['apps_artifacts_refresh', ['app']],
     ['apps_journey_invite', ['app']], ['apps_journey_policy', ['app']], ['apps_journey_refresh', ['app']],
     ['apps_project_refresh', ['app']], ['apps_project_update', ['app']],
+    ['apps_v2_agents', ['app']], ['apps_v2_contribute', ['app']], ['apps_v2_forum', ['app']],
+    ['apps_v2_interview_read', ['app']], ['apps_v2_interview_share', ['app']], ['apps_v2_interview_write', ['app']],
+    ['apps_v2_library', ['app']], ['apps_v2_reply', ['app']], ['apps_v2_round', ['app']], ['apps_v2_topic', ['app']],
   ]);
   assert.equal((tools.find((tool) => tool.name === 'journey_view')!._meta?.ui as { resourceUri: string }).resourceUri, 'ui://wayfinding/v1/journey.html');
   const view = await client.readResource({ uri: 'ui://wayfinding/v1/journey.html' });
@@ -128,7 +136,7 @@ test('apps: adding a later release still serves and executes the original v1 URI
   const client = new Client({ name: 'release-host', version: '1.0.0' });
   await client.connect(new StreamableHTTPClientTransport(RESOURCE, { fetch: bridge(target) }));
   t.after(() => client.close());
-  assert.equal((await client.listResources()).resources.length, 4);
+  assert.equal((await client.listResources()).resources.length, 9);
   const v1 = (await client.readResource({ uri: 'ui://wayfinding/v1/journey.html' })).contents[0]!;
   const v2 = (await client.readResource({ uri: 'ui://wayfinding/v2/journey.html' })).contents[0]!;
   assert.ok('text' in v1 && 'text' in v2);
@@ -163,4 +171,70 @@ test('apps: signin target is configuration, not the issuer or request query', as
     verifier: { async verifyAccessToken() { throw new Error('unused'); } }, signinUrl: 'https://login.example.test/authorize?client_id=test' });
   const response = await target.fetch(new Request('https://poc.wayfinding.support/signin?url=https://evil.test'));
   assert.equal(response.headers.get('location'), 'https://login.example.test/authorize?client_id=test');
+});
+
+
+test('forum apps: bundled boards, topics and thread navigate and post via the official host', async t => {
+  const f = await fixture(t);
+  const resources = (await f.client.listResources()).resources;
+  assert.ok(resources.some(r => r.uri === 'ui://wayfinding/v2/forum.html'));
+  const tools = (await f.client.listTools()).tools;
+  for (const name of ['forum_topic_create_view', 'forum_post_create_view']) assert.deepEqual((tools.find(t => t.name === name)!._meta!.ui as { visibility: string[] }).visibility, ['app']);
+  const boards = await f.call('forum_view', { journeyId: f.journeyId });
+  const boardId = (boards.boards as { boardId: string }[])[0]!.boardId;
+  const resource = (await f.client.readResource({ uri: 'ui://wayfinding/v2/forum.html' })).contents[0]!;
+  assert.ok('text' in resource); assert.doesNotMatch(resource.text, /<(?:script|link)[^>]+(?:src|href)=/i);
+  const host = new AppsHost(resource.text, f.client); t.after(() => host.dispose());
+  await host.until(() => host.nodes.get('status')!.textContent === 'Connected.');
+  host.notify('ui/notifications/tool-result', { structuredContent: boards });
+  await host.until(() => host.text.includes('General'));
+  host.submit('board', { boardId });
+  await host.until(() => host.text.includes('Topics'));
+  host.submit('newtopic', { title: 'A forum question', body: '<img src=x onerror=alert(1)> Opening words' });
+  await host.until(() => host.text.includes('Opening words'));
+  assert.equal(host.nodes.get('title')!.textContent, 'A forum question');
+  assert.match(host.text, /alice \[person\]/);
+  assert.match(host.text, /<img src=x onerror=alert\(1\)>/); // textContent, never HTML.
+  host.submit('reply', { body: 'A forum answer', replyTo: '' });
+  await host.until(() => host.text.includes('A forum answer'));
+  assert.deepEqual(host.messages.filter(m => m.method === 'tools/call').map(m => m.params!.name), ['forum_view', 'forum_topic_create_view', 'forum_post_create_view']);
+  const topics = await f.call('topic_list', { boardId });
+  const topicId = (topics.topics as { topicId: string }[])[0]!.topicId;
+  host.submit('thread', { topicId });
+  await host.until(() => host.messages.filter(m => m.method === 'tools/call').length === 4 && host.nodes.get('status')!.textContent === 'Up to date.');
+  host.click('refresh');
+  await host.until(() => host.messages.filter(m => m.method === 'tools/call').length === 5 && host.nodes.get('status')!.textContent === 'Up to date.');
+  const thread = await f.call('topic_read', { topicId });
+  assert.equal((thread.posts as unknown[]).length, 2);
+  host.click('signin'); await host.until(() => host.opened.length === 1);
+  assert.deepEqual(host.opened, ['https://poc.wayfinding.support/signin']);
+});
+
+test('forum apps: authority and strict mutation inputs are checked even for direct callers', async t => {
+  const f = await fixture(t), boards = await f.call('forum_boards', { journeyId: f.journeyId });
+  const boardId = (boards.boards as { boardId: string }[])[0]!.boardId;
+  const topic = await f.call('topic_create', { boardId, title: 'Protected', body: 'Opening' });
+  const bob = await f.connect('bob'); await bob.callTool({ name: 'account_read', arguments: {} });
+  const before = f.backend.snapshot();
+  for (const [name, args] of [
+    ['forum_view', { journeyId: f.journeyId }],
+    ['forum_topic_create_view', { boardId, title: 'No', body: 'No' }],
+    ['forum_post_create_view', { topicId: topic.topicId, body: 'No' }],
+  ] as const) assert.equal((await bob.callTool({ name, arguments: args })).isError, true);
+  assert.equal((await f.client.callTool({ name: 'forum_post_create_view', arguments: { topicId: topic.topicId, body: 'No', author: 'bob', subject: 'bob' } })).isError, true);
+  assert.equal(f.backend.snapshot(), before);
+  await f.call('topic_lock', { topicId: topic.topicId });
+  assert.equal((await f.client.callTool({ name: 'forum_post_create_view', arguments: { topicId: topic.topicId, body: 'Locked' } })).isError, true);
+});
+
+test('forum apps: projection drops hidden bodies, artifact data and access URLs', async t => {
+  const contaminated = app(signer, { async execute() { return { journeyId: 'j', topicId: 't', title: 'Safe', author: 'p', authorName: 'Person', authorKind: 'person', locked: false, postCount: 1, replyCount: 0, createdAt: 1, lastActivity: 1,
+    content: 'SECRET', url: 'https://evil.test', posts: [{ postId: 'p', topicId: 't', author: 'p', authorName: 'Person', authorKind: 'person', body: 'HIDDEN', hidden: true, edited: false, createdAt: 1, updatedAt: 1, content: 'SECRET', url: 'https://evil.test' }] }; } });
+  const client = new Client({ name: 'forum-projection', version: '1' });
+  await client.connect(new StreamableHTTPClientTransport(RESOURCE, { fetch: bridge(contaminated), requestInit: { headers: { authorization: `Bearer ${await token(signer)}` } } }));
+  t.after(() => client.close());
+  const result = await client.callTool({ name: 'forum_view', arguments: { journeyId: 'j', topicId: 't' } });
+  assert.notEqual(result.isError, true);
+  assert.doesNotMatch(JSON.stringify(result), /SECRET|HIDDEN|evil[.]test/);
+  assert.match(JSON.stringify(result.structuredContent), /Safe/);
 });

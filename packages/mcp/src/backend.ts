@@ -1,16 +1,23 @@
 import * as z from 'zod';
 import { AccountsHost, type Account, type Profiles } from './accounts.ts';
 import { Refused, parseCommand, isRelay, type Command, type CoordinationBackend, type TaskMethod, type ToolData } from './commands.ts';
+import { allows, requireAccountCapability, type Actor, type ClientIdentity, type CardChange, type PasskeyVerifier } from './agents.ts';
+import type { AuthenticationResponseJSON } from '@simplewebauthn/server';
 import { JourneyHost } from './journey.ts';
+import { itemJourney } from './library.ts';
+import { isForumCommand, forumCommandJourney } from './forum.ts';
+import { isRoundCommand, roundJourney } from './rounds.ts';
 import { MemoryStorage } from './storage.ts';
 import { MemoryBlobs, encodeBytes } from './relay.ts';
 
+import type { RecordOperation, ConsoleRecord, PasskeyOperation } from './console/contract.ts';
 const namedState = z.object({
   members: z.array(z.object({ memberId: z.string(), name: z.string(), kind: z.enum(['person', 'agent']), role: z.enum(['read', 'write']), guide: z.boolean(), owner: z.string().optional() }).strict()),
   pending: z.array(z.object({ personId: z.string(), name: z.string(), status: z.string() }).strict()),
 });
-
 export interface AccountsPort {
+  consoleRecord(operation: RecordOperation): Promise<ConsoleRecord | undefined>;
+  passkey(identity: ClientIdentity, operation: PasskeyOperation): Promise<ToolData>;
   provision(subject: string): Promise<Account>;
   lookup(subject: string): Promise<Account | undefined>;
   update(personId: string, nickname: string): Promise<Account>;
@@ -18,116 +25,183 @@ export interface AccountsPort {
   personIdByEmail(email: string): Promise<string | undefined>;
   directory(add?: string): Promise<string[]>;
   group(personId: string, command: Command): Promise<ToolData>;
+  observeClient(personId: string, clientId: string): Promise<void>;
+  resolveActor(personId: string, clientId: string, actingAgent?: string): Promise<Actor>;
+  agentCommand(personId: string, clientId: string, command: Command): Promise<ToolData>;
+  beginAuthorization(identity: ClientIdentity, change: CardChange): Promise<{ challenge: string }>;
+  completeAuthorization(identity: ClientIdentity, change: CardChange, assertion: AuthenticationResponseJSON | undefined): Promise<ToolData>;
 }
 export interface JourneyPort {
-  requireGuide(personId: string, command: Command): Promise<void>;
-  execute(personId: string, command: Command, journeyId?: string): Promise<ToolData>;
-  summary(personId: string): Promise<ToolData | undefined>;
-  inbox(personId: string): Promise<ToolData>;
-  watchInbox(personId: string): Promise<ReadableStream<Uint8Array>>;
-  task(personId: string, method: TaskMethod, taskId: string): Promise<ToolData>;
+  requireGuide(personId: string, command: Command, actor?: Actor): Promise<void>;
+  execute(personId: string, command: Command, journeyId?: string, actor?: Actor): Promise<ToolData>;
+  summary(personId: string, actor?: Actor): Promise<ToolData | undefined>;
+  inbox(personId: string, actor?: Actor): Promise<ToolData>;
+  watchInbox(personId: string, actor?: Actor): Promise<ReadableStream<Uint8Array>>;
+  task(personId: string, method: TaskMethod, taskId: string, actor?: Actor): Promise<ToolData>;
 }
 
-/** Authenticated people, never caller-supplied ids, select the acting account. */
+/** Resolve every request from verified (subject, client_id), never a supplied identity. */
 export class Backend implements CoordinationBackend {
   private readonly accounts: AccountsPort;
   private readonly journey: (id: string) => JourneyPort;
   constructor(accounts: AccountsPort, journey: (id: string) => JourneyPort) { this.accounts = accounts; this.journey = journey; }
+  consoleRecord(operation: RecordOperation) { return this.accounts.consoleRecord(operation); }
+  passkey(identity: ClientIdentity, operation: PasskeyOperation) { return this.accounts.passkey(identity, operation); }
+  beginAuthorization(identity: ClientIdentity, change: CardChange) { return this.accounts.beginAuthorization(identity, change); }
+  completeAuthorization(identity: ClientIdentity, change: CardChange, assertion: AuthenticationResponseJSON | undefined) { return this.accounts.completeAuthorization(identity, change, assertion); }
+  private async namedForum(data: ToolData): Promise<ToolData> {
+    const row = z.object({ author: z.string(), authorKind: z.enum(['person', 'agent']) }).passthrough();
+    const posts = data.posts === undefined ? [] : z.array(row).parse(data.posts);
+    const topics = data.topics === undefined ? [] : z.array(row).parse(data.topics);
+    const topic = data.topic == null ? undefined : row.parse(data.topic);
+    const own = row.safeParse(data);
+    const people = [...new Set([...posts, ...topics, ...(topic ? [topic] : []), ...(own.success ? [own.data] : [])].filter(r => r.authorKind === 'person').map(r => r.author))];
+    const names: Record<string, string> = {};
+    for (let i = 0; i < people.length; i += 128) Object.assign(names, await this.accounts.names(people.slice(i, i + 128)));
+    const name = (r: z.output<typeof row>): ToolData => ({ ...r, authorName: r.authorKind === 'person' ? names[r.author] ?? 'Wayfinding member' : r.authorName });
+    const result = own.success ? name(own.data) : { ...data };
+    if (data.posts !== undefined) result.posts = posts.map(name);
+    if (data.topics !== undefined) result.topics = topics.map(name);
+    if (topic) result.topic = name(topic);
+    return result;
+  }
   private async named(data: ToolData): Promise<ToolData> {
     if (!('members' in data) || !('pending' in data)) return data;
     const { members, pending } = namedState.parse(data);
-    const ids = [...members.filter(m => m.kind === 'person').map(m => m.memberId), ...pending.map(p => p.personId)];
-    const names = await this.accounts.names(ids);
-    return { ...data,
-      members: members.map(m => ({ ...m, name: m.kind === 'person' ? names[m.memberId] ?? 'Wayfinding member' : m.name })),
-      pending: pending.map(p => ({ ...p, name: names[p.personId] ?? 'Wayfinding member' })),
-    };
+    const names = await this.accounts.names([...members.filter(m => m.kind === 'person').map(m => m.memberId), ...pending.map(p => p.personId)]);
+    const agents: ToolData[] = [];
+    for (const member of members.filter(m => m.kind === 'agent' && m.owner)) {
+      const owner = member.owner!;
+      let identity: Actor;
+      try { identity = await this.accounts.resolveActor(owner, 'trusted-host', member.memberId); }
+      catch { agents.push({ agentId: member.memberId, owner, signed: false, read: false, write: false, grant: false }); continue; }
+      agents.push({ agentId: member.memberId, owner, signed: identity.agent?.card.scalars.signed === 1,
+        read: allows(identity, 'read', true), write: allows(identity, 'artifact.write', member.role === 'write'), grant: false });
+    }
+    return { ...data, agents, members: members.map(m => ({ ...m, name: m.kind === 'person' ? names[m.memberId] ?? 'Wayfinding member' : m.name })),
+      pending: pending.map(p => ({ ...p, name: names[p.personId] ?? 'Wayfinding member' })) };
   }
   private accountView(account: Account): ToolData {
     return { personId: account.personId, personalGroupId: `personal_${account.personId}`, subject: account.subject, name: account.name, nickname: account.nickname, email: account.email };
   }
-  async execute(subject: string, supplied: Command): Promise<ToolData> {
+  async execute(subject: string, supplied: Command, clientId = 'trusted-host'): Promise<ToolData> {
+    const result = await this.executeCommand(subject, supplied, clientId);
+    const account = await this.accounts.lookup(subject);
+    if (account) await this.accounts.observeClient(account.personId, clientId);
+    return result;
+  }
+  private async executeCommand(subject: string, supplied: Command, clientId: string): Promise<ToolData> {
     const command = parseCommand(supplied.tool, supplied.input);
-    // Relay refusals must not provision an account or otherwise write storage.
     const relayCommand = isRelay(command) || command.tool === 'mls_key_package_publish' || command.tool === 'mls_key_package_fetch';
     const account = relayCommand || command.tool === 'journey_invite' ? await this.accounts.lookup(subject) : await this.accounts.provision(subject);
     if (!account) throw new Refused(command.tool === 'journey_invite' ? 'Only guides may invite' : 'Account not provisioned; call account_read first');
-    if (command.tool === 'mls_key_package_publish' || command.tool === 'mls_key_package_fetch') return this.accounts.group(account.personId, command);
+    let actor: Actor;
+    try { actor = await this.accounts.resolveActor(account.personId, clientId, 'actingAgent' in command.input ? command.input.actingAgent : undefined); }
+    catch (error) { if (command.tool === 'journey_invite') throw new Refused('Only guides may invite'); throw error; }
+    if (command.tool === 'mls_key_package_publish' || command.tool === 'mls_key_package_fetch') {
+      if (actor.agent) throw new Refused('Only a person manages device key packages');
+      return this.accounts.group(account.personId, command);
+    }
     if (isRelay(command)) {
-      if (command.input.groupId.startsWith('personal_')) return this.accounts.group(account.personId, command);
-      return this.journey(command.input.groupId).execute(account.personId, command);
+      if (command.input.groupId.startsWith('personal_')) {
+        if (actor.agent) throw new Refused('Personal relay requires a person connection');
+        return this.accounts.group(account.personId, command);
+      }
+      return this.journey(command.input.groupId).execute(account.personId, command, undefined, actor);
+    }
+
+    if (isRoundCommand(command)) {
+      const journeyId = 'journeyId' in command.input ? command.input.journeyId : roundJourney(command.input.roundId);
+      return this.journey(journeyId).execute(account.personId, command, undefined, actor);
     }
     switch (command.tool) {
-      case 'account_read': return this.accountView(account);
-      case 'account_update': return this.accountView(await this.accounts.update(account.personId, command.input.nickname));
+      case 'account_read':
+        if (actor.agent) throw new Refused('Only a person reads the private account profile');
+        return this.accountView(account);
+      case 'account_update': {
+        requireAccountCapability(actor, 'account.nickname');
+        const updated = await this.accounts.update(account.personId, command.input.nickname);
+        return actor.agent ? { nickname: updated.nickname, actingAgent: actor.agent.id } : this.accountView(updated);
+      }
+      // Route opaque forum ids only after resolving the authenticated actor.
+      case 'forum_boards': case 'board_create': case 'board_update': case 'topic_create': case 'topic_list': case 'topic_read':
+      case 'post_create': case 'post_edit': case 'post_hide': case 'post_unhide': case 'topic_lock': case 'topic_unlock': case 'conversation_read': case 'conversation_post':
+        if (!isForumCommand(command)) throw new Refused('Invalid forum command');
+        return this.namedForum(await this.journey(forumCommandJourney(command)).execute(account.personId, command, undefined, actor));
+      case 'library_get': case 'library_version': case 'library_update': case 'library_delete':
+        return this.journey(itemJourney(command.input.itemId)).execute(account.personId, command, undefined, actor);
+      case 'agent_create': case 'agent_list': case 'agent_narrow': case 'agent_remove': case 'agent_card': case 'client_list':
+        return this.accounts.agentCommand(account.personId, clientId, command);
+      case 'agent_capabilities': {
+        const data = await this.accounts.agentCommand(account.personId, clientId, command);
+        if (!command.input.journeyId) return data;
+        const target = await this.accounts.resolveActor(account.personId, 'trusted-host', command.input.agentId);
+        return this.journey(command.input.journeyId).execute(account.personId, command, undefined, target);
+      }
       case 'journey_create': {
+        requireAccountCapability(actor, 'journey.create');
         const id = `journey_${crypto.randomUUID()}`;
-        // Reserve in the durable directory first. An interrupted create leaves
-        // an empty entry, not an unreachable journey; summaries skip empty entries.
         await this.accounts.directory(id);
-        return this.named(await this.journey(id).execute(account.personId, command, id));
+        return this.named(await this.journey(id).execute(account.personId, command, id, actor));
       }
       case 'journey_list': {
+        if (!allows(actor, 'read', true)) throw new Refused('Reading journeys refused');
         const ids = await this.accounts.directory();
-        const summaries = await Promise.all(ids.map((id) => this.journey(id).summary(account.personId)));
-        return { journeys: summaries.filter((s) => s !== undefined) };
+        const summaries = await Promise.all(ids.map(id => this.journey(id).summary(account.personId, actor)));
+        return { journeys: summaries.filter(s => s !== undefined) };
       }
       case 'personal_group_add': case 'personal_group_read': case 'personal_group_remove':
+        if (actor.agent) throw new Refused('Only a person manages personal group identities');
         return this.accounts.group(account.personId, command);
       case 'journey_invite': {
         const journey = this.journey(command.input.journeyId);
-        if (command.input.email === undefined) return this.named(await journey.execute(account.personId, command));
-        // Use the compiled rule (and agent card) before exposing any lookup result.
-        await journey.requireGuide(account.personId, command);
+        if (command.input.email === undefined) return this.named(await journey.execute(account.personId, command, undefined, actor));
+        await journey.requireGuide(account.personId, command, actor);
         const personId = await this.accounts.personIdByEmail(command.input.email);
         if (!personId) throw new Refused('No Wayfinding account uses that email yet; ask them to sign in once, then invite again');
-        const resolved = parseCommand('journey_invite', { journeyId: command.input.journeyId, actingAgent: command.input.actingAgent, personId });
-        return this.named(await journey.execute(account.personId, resolved));
+        const resolved = parseCommand('journey_invite', { journeyId: command.input.journeyId, actingAgent: actor.agent?.id, personId });
+        return this.named(await journey.execute(account.personId, resolved, undefined, actor));
       }
       default:
         if (!('journeyId' in command.input)) throw new Refused('Journey id required');
-        return this.named(await this.journey(command.input.journeyId).execute(account.personId, command));
+        if (command.tool === 'agent_add') {
+          if (actor.agent) throw new Refused('Only a person adds agents');
+          const target = await this.accounts.resolveActor(account.personId, 'trusted-host', command.input.agentId);
+          return this.named(await this.journey(command.input.journeyId).execute(account.personId, command, undefined, target));
+        }
+        return this.named(await this.journey(command.input.journeyId).execute(account.personId, command, undefined, actor));
     }
   }
-  async inbox(subject: string, journeyId: string): Promise<ToolData> {
+  private async actor(subject: string, clientId: string): Promise<Actor> {
     const account = await this.accounts.provision(subject);
-    return this.journey(journeyId).inbox(account.personId);
+    return this.accounts.resolveActor(account.personId, clientId);
   }
-  async watchInbox(subject: string, journeyId: string): Promise<ReadableStream<Uint8Array>> {
-    const account = await this.accounts.provision(subject);
-    return this.journey(journeyId).watchInbox(account.personId);
+  async inbox(subject: string, journeyId: string, clientId = 'trusted-host'): Promise<ToolData> {
+    const actor = await this.actor(subject, clientId); return this.journey(journeyId).inbox(actor.personId, actor);
   }
-  async task(subject: string, method: TaskMethod, taskId: string): Promise<ToolData> {
+  async watchInbox(subject: string, journeyId: string, clientId = 'trusted-host'): Promise<ReadableStream<Uint8Array>> {
+    const actor = await this.actor(subject, clientId); return this.journey(journeyId).watchInbox(actor.personId, actor);
+  }
+  async task(subject: string, method: TaskMethod, taskId: string, clientId = 'trusted-host'): Promise<ToolData> {
     const match = /^task_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.exec(taskId);
     if (!match) throw new Refused('Invalid task id');
-    const account = await this.accounts.provision(subject);
-    return this.journey(`journey_${match[1]}`).task(account.personId, method, taskId);
+    const actor = await this.actor(subject, clientId); return this.journey(`journey_${match[1]}`).task(actor.personId, method, taskId, actor);
   }
 }
-
-/** In-process DO stand-ins retain the real hosts and real generated rules. */
 export class MemoryBackend extends Backend {
   readonly accountStorage: MemoryStorage;
   readonly journeyStores: Map<string, MemoryStorage>;
   readonly blobs: MemoryBlobs;
-  constructor(profiles: Profiles, now: () => number = Date.now) {
-    const storage = new MemoryStorage();
-    const stores = new Map<string, MemoryStorage>();
-    const hosts = new Map<string, JourneyHost>();
-    const blobs = new MemoryBlobs();
-    super(new AccountsHost(storage, profiles, blobs), (id) => {
+  readonly accountsHost: AccountsHost;
+  constructor(profiles: Profiles, now: () => number = Date.now, verifier?: PasskeyVerifier) {
+    const storage = new MemoryStorage(), stores = new Map<string, MemoryStorage>(), hosts = new Map<string, JourneyHost>(), blobs = new MemoryBlobs();
+    const accounts = new AccountsHost(storage, profiles, blobs, verifier, now);
+    super(accounts, id => {
       let host = hosts.get(id);
-      if (!host) {
-        const store = new MemoryStorage();
-        stores.set(id, store);
-        host = new JourneyHost(store, now, blobs);
-        hosts.set(id, host);
-      }
+      if (!host) { const store = new MemoryStorage(); stores.set(id, store); host = new JourneyHost(store, now, blobs); hosts.set(id, host); }
       return host;
     });
-    this.accountStorage = storage;
-    this.journeyStores = stores;
-    this.blobs = blobs;
+    this.accountsHost = accounts; this.accountStorage = storage; this.journeyStores = stores; this.blobs = blobs;
   }
   snapshot(): string {
     return JSON.stringify({ accounts: [...this.accountStorage.data], journeys: [...this.journeyStores].filter(([, s]) => s.data.size !== 0).map(([id, s]) => [id, [...s.data]]), blobs: [...this.blobs.data].map(([key, value]) => [key, encodeBytes(value)]) });

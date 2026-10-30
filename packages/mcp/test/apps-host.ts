@@ -50,7 +50,7 @@ export class AppsHost {
       body: { dataset: { view: kind } },
       getElementById: (id: string) => this.nodes.get(id) ?? null,
       createElement: () => new Element(),
-      querySelectorAll: () => [this.nodes.get('refresh')!, this.nodes.get('signin')!],
+      querySelectorAll: () => [...html.matchAll(/<button[^>]*id="([^"]+)"/g)].map(m => this.nodes.get(m[1]!)!),
       querySelector: (selector: string) => { const m = /#([^ ]+) \[name="([^"]+)"\]/.exec(selector)!; return this.fields.get(`${m[1]}:${m[2]}`); },
     }, console: { debug() {}, warn() {}, error: (...args: unknown[]) => { this.errors.push(args); } },
     setTimeout: (callback: () => void, delay: number) => { const timer = setTimeout(() => { this.timers.delete(timer); callback(); }, delay); this.timers.add(timer); return timer; },

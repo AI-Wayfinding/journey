@@ -13,6 +13,22 @@ export async function keyPair(kid: string) {
   const jwk = { ...(await exportJWK(publicKey)), kid, alg: 'RS256', use: 'sig' };
   return { privateKey, kid, jwks: { keys: [jwk] } };
 }
+// Only synthetic tests use this verifier. Production always uses WebAuthnVerifier.
+export const testPasskeys: import('../src/agents.ts').PasskeyVerifier = { async verify(assertion, challenge) {
+  if (assertion.response.clientDataJSON !== challenge || assertion.response.signature !== 'test-valid') throw new Error('Invalid synthetic assertion');
+  return { credentialId: 'synthetic', counter: 0 };
+} };
+export async function setAgentCard(backend: import('../src/backend.ts').Backend, subject: string, agentId: string, capabilities: import('../../rules/src/capabilities.ts').Capability[]) {
+  const identity = { subject, clientId: 'test-console' }, change = { kind: 'card' as const, agentId, capabilities };
+  const { challenge } = await backend.beginAuthorization(identity, change);
+  await backend.completeAuthorization(identity, change, { id: 'synthetic', rawId: 'synthetic', type: 'public-key', clientExtensionResults: {}, response: { clientDataJSON: challenge, authenticatorData: '', signature: 'test-valid' } });
+}
+export async function addAgent(backend: import('../src/backend.ts').Backend, subject: string, journeyId: string, name: string, capabilities: import('../../rules/src/capabilities.ts').Capability[]) {
+  const { parseCommand } = await import('../src/commands.ts');
+  const created = await backend.execute(subject, parseCommand('agent_create', { name }));
+  await setAgentCard(backend, subject, String(created.agentId), capabilities);
+  return backend.execute(subject, parseCommand('agent_add', { journeyId, agentId: created.agentId }));
+}
 
 export type Signer = Awaited<ReturnType<typeof keyPair>>;
 
@@ -26,6 +42,7 @@ export async function token(signer: Signer, claims: JWTPayload = {}, kid = signe
     iat: now,
     exp: now + 300,
     sid: 'session_01TEST',
+    client_id: 'test-client',
     jti: crypto.randomUUID(),
     ...claims,
   };

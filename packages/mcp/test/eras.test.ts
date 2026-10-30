@@ -21,6 +21,10 @@ async function listAndCall(client: Client, sub: string, era: 'legacy' | 'modern'
   assert.deepEqual(
     tools.map((t) => t.name),
     ['whoami', ...TOOL_NAMES,
+      'forum_view', 'forum_topic_create_view', 'forum_post_create_view',
+      'library_view', 'apps_v2_library', 'round_view', 'apps_v2_round', 'agent_capabilities_view', 'apps_v2_agents',
+      'forum_view_v3', 'apps_v2_forum', 'apps_v2_topic', 'apps_v2_reply', 'apps_v2_interview_read',
+      'apps_v2_interview_write', 'apps_v2_interview_share', 'apps_v2_contribute',
       'journey_view', 'project_view', 'artifact_list_view',
       'apps_journey_refresh', 'apps_project_refresh', 'apps_artifacts_refresh',
       'apps_journey_policy', 'apps_journey_invite', 'apps_project_update', 'apps_artifact_rename'],

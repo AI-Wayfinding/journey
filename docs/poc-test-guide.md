@@ -4,7 +4,41 @@ Wayfinding gives a team and its agents a shared journey: membership, tasks, arti
 
 **Use synthetic data only.** The proxy uses unaudited ts-mls 1.6.4 and WorkOS AuthKit Staging. Do not upload client material, personal data or secrets. This is a proof of concept, not a production service.
 
-## Verified live: 2026-10-29
+## What is new in v2
+
+The server now runs v2 state. Journeys created before the v2 deploy are not carried over; create a new one.
+
+### Console
+
+Open `https://poc.wayfinding.support/console` and sign in with the same Staging account. A signed-out visit redirects to sign-in. The console lists your journeys, agents and connected clients. It is the only place to:
+
+- register a **passkey**;
+- **widen** an agent's card (add capabilities), confirmed with a fresh passkey assertion;
+- **bind** a connected client to an agent, so that client always acts as that agent.
+
+Narrowing a card or removing an agent needs no passkey. Each journey page links to its library, forum and rounds.
+
+### Agents and capabilities
+
+`agent_create` makes an account-level agent with an **empty card**. An agent can do nothing until you widen its card in the console. Capabilities are named, for example `artifact.write`, `post`, `topic.create`, `round.contribute` and `member.invite`; `agent_capabilities` shows them for one journey. An agent never holds more than its owner. `agent.add`, `client.bind`, `card.change`, `passkey.manage` and `grant.issue` are never assignable. Add the agent to a journey with `agent_add`, then act as it by passing `actingAgent`, or bind a client in the console.
+
+### Library
+
+`library_add` stores an item with a kind (`markdown`, `html`, `pdf`, `code`, `image`, `video`, `audio`, `data`, `link`, `skill`, `prompt`, `agent`, `applet`, `other`), free labels, an optional project and `members` or `private` visibility. Use `library_search` to find items by text, kind, label or project, and `library_version` to add a version. `library_view` opens the library in an Apps-capable host.
+
+### Forum
+
+Each journey starts with a **General** board. Use `topic_create`, `topic_list`, `topic_read` and `post_create` for discussion. Every project and library item has one attached conversation: `conversation_post` and `conversation_read` with `target: { itemId }` or `target: { projectId }`. Posts record whether a person or an agent wrote them. `forum_view` opens the forum view.
+
+### Sensemaking rounds
+
+A round moves `planned` → `open` → `synthesising` → `closed`. `round_create` defaults to the **first-position** format and can point at a guidance item. Each participant's interview is private (`interview_write`, `interview_read`) until they call `interview_share`. Contributions (`round_contribute`) are attributed to the person and accepted while the round is open or synthesising. `round_next` starts the next round. `round_view` opens the round view.
+
+### Verified live: 2026-10-30
+
+Against `https://poc.wayfinding.support/mcp` (Worker version `35deaf71`), synthetic account A through the local proxy: created a journey and an agent; an `actingAgent` `topic_create` with an empty card was **refused** (`Forum topic.create capability refused`); added a markdown guide and a link to the library and found the guide with `library_search`; created a forum topic and commented on the guide's attached conversation; ran a first-position round through open, a private interview, share, a contribution and synthesising. A signed-out `GET /console` returned 303 to `/console/login`. Passkey widening and client binding need a browser and were covered by automated tests only.
+
+## Verified live: 2026-10-29 (v1 state)
 
 The full two-person walkthrough below **passed** against `https://poc.wayfinding.support/mcp` on 2026-10-29, from 19:59:41 to 20:00:16 UTC. Both local proxies used source commit `b7a6969`, fresh stores, separate browser sessions and the official MCP client SDK. All 31 tool calls passed their data assertions; the harness exited 0.
 
@@ -24,7 +58,7 @@ The earlier account provisioning blocker no longer occurs. This run found no app
 ## Prepare
 
 - Install Node **22.18 or later**, npm and an MCP client with local stdio support.
-- Clone this repository, check out `rewrite-poc`, then run `npm ci` from its root.
+- Clone this repository, check out `rewrite-v2`, then run `npm ci` from its root.
 - Arrange two synthetic accounts in **WorkOS Staging**, with verified email and password sign-in. Use an unclaimed domain such as `test.wayfinding.support`. Avoid `example.com`: the Staging Test Organization claims it and changes the sign-in route.
 - Keep passwords out of chat, shell history and Git. An operator creating accounts needs the Staging API key; MCP users do not.
 

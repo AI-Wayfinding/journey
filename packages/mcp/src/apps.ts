@@ -5,7 +5,9 @@ import { releasedViews } from '@ai-wayfinding/apps/views';
 import { journeyView, projectView, artifactsView, type ViewKind } from '@ai-wayfinding/apps/contract';
 import { inputs, parseCommand, Refused, type CoordinationBackend, type ToolData, type ToolName } from './commands.ts';
 
-export interface ReleasedView { uri: string; kind: ViewKind; html: string }
+import { registerV2Apps } from './v2-apps.ts';
+import { registerForumApps } from './forum-apps.ts';
+export interface ReleasedView { uri: string; kind: ViewKind | 'forum' | 'library' | 'round' | 'agents'; html: string }
 // Add releases; never replace or remove a released URI when shipping a successor.
 export function registerViewResources(server: McpServer, releases: readonly ReleasedView[] = releasedViews) {
   for (const release of releases) registerAppResource(server, release.uri, release.uri,
@@ -43,8 +45,10 @@ const viewTools: ViewTool[] = [
   { name: 'apps_project_update', kind: 'project', command: 'project_update', appOnly: true },
   { name: 'apps_artifact_rename', kind: 'artifacts', command: 'artifact_rename', appOnly: true },
 ];
-export function registerApps(server: McpServer, subject: string | undefined, backend?: CoordinationBackend) {
+export function registerApps(server: McpServer, subject: string | undefined, backend?: CoordinationBackend, clientId?: string) {
   registerViewResources(server);
+  registerForumApps(server, subject, backend, clientId);
+  registerV2Apps(server, subject, backend, clientId);
   for (const tool of viewTools) {
     // Reuse the strict project-selector input, but never join on view/refresh.
     const inputSchema: z.ZodObject<z.ZodRawShape> = tool.projectSelector ? inputs.project_join : inputs[tool.command];
@@ -57,7 +61,7 @@ export function registerApps(server: McpServer, subject: string | undefined, bac
         const command = tool.projectSelector
           ? parseCommand('journey_read', { journeyId: args.journeyId, ...(typeof args.actingAgent === 'string' ? { actingAgent: args.actingAgent } : {}) })
           : parseCommand(tool.command, args);
-        const data = project(await backend.execute(subject, command), tool.kind, args.projectId);
+        const data = project(await backend.execute(subject, command, clientId), tool.kind, args.projectId);
         return { content: [{ type: 'text' as const, text: JSON.stringify(data) }], structuredContent: data };
       } catch (error) {
         return { isError: true, content: [{ type: 'text' as const, text: error instanceof Refused ? error.message : 'View operation failed' }] };

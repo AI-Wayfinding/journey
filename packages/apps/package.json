@@ -1,6 +1,6 @@
 {
   "name": "@ai-wayfinding/apps", "version": "0.1.0", "private": true, "type": "module",
-  "exports": { "./views": "./generated/views.ts", "./contract": "./src/contract.ts" },
+  "exports": { "./views": "./generated/views.ts", "./contract": "./src/contract.ts", "./forum-contract": "./src/forum-contract.ts" },
   "scripts": {
     "build": "node scripts/build.ts", "check": "node scripts/build.ts --check",
     "typecheck": "npm run check && tsc --noEmit -p tsconfig.json", "test": "node --test test/*.test.ts"

@@ -1,7 +1,7 @@
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
-import { app, bridge, keyPair, RESOURCE, token } from './helpers.ts';
+import { app, bridge, keyPair, RESOURCE, token, addAgent, setAgentCard, testPasskeys } from './helpers.ts';
 import { Accounts, Journey, durableBackend } from '../src/objects.ts';
 import { MemoryStorage } from '../src/storage.ts';
 import { MemoryBlobs } from '../src/relay.ts';
@@ -25,7 +25,7 @@ async function fixture(t: TestContext) {
     ACCOUNTS: { getByName() { return { async fetch(request) {
       const body = await request.clone().json() as Data;
       if (body.action === 'personIdByEmail') emailLookups++;
-      return new Accounts({ storage }, { WORKOS_API_KEY: 'synthetic', BLOBS: blobs }).fetch(request);
+      return new Accounts({ storage }, { WORKOS_API_KEY: 'synthetic', BLOBS: blobs }, testPasskeys).fetch(request);
     } }; } },
     JOURNEYS: { getByName(id) { let store = stores.get(id); if (!store) { store = new MemoryStorage(); stores.set(id, store); }
       return { fetch: (request) => new Journey({ storage: store }, { BLOBS: blobs }).fetch(request) };
@@ -54,7 +54,7 @@ async function fixture(t: TestContext) {
   const a = (await call(alice, 'account_read')).personId as string;
   const b = (await call(bob, 'account_read')).personId as string;
   await call(eve, 'account_read');
-  return { alice, bob, eve, a, b, call, refused, connect, storage, stores, emailLookups: () => emailLookups };
+  return { backend, alice, bob, eve, a, b, call, refused, connect, storage, stores, emailLookups: () => emailLookups };
 }
 
 test('names: nickname is strict, trimmed, persistent after eviction and returned on account_read', async t => {
@@ -86,7 +86,7 @@ test('names: every journey state response resolves current people names, preserv
   assert.equal(((await f.call(f.alice, 'journey_read', { journeyId })).pending as Pending[])[0]!.name, 'Bobby');
   const admitted = await f.call(f.alice, 'journey_admit', { journeyId, personId: f.b });
   assert.equal((admitted.members as Member[]).find(m => m.memberId === f.b)!.name, 'Bobby');
-  const added = await f.call(f.bob, 'agent_add', { journeyId, name: 'Scout', read: true, write: false, grant: false });
+  const added = await addAgent(f.backend, 'bob', journeyId, 'Scout', ["read","task.manage"]);
   assert.equal((added.members as Member[]).find(m => m.kind === 'agent')!.name, 'Scout');
   const before = f.stores.get(journeyId)!.data.get('journey');
   await f.call(f.bob, 'account_update', { nickname: 'Robert' });
@@ -128,13 +128,13 @@ test('names: email invites match exactly ignoring case and non-guides cannot tri
   for (const tool of ['journey_admit', 'journey_refuse', 'journey_role', 'journey_guide', 'journey_unguide']) {
     await f.refused(f.alice, tool, { journeyId, email: 'eve@example.test', ...(tool === 'journey_role' ? { role: 'read' } : {}) });
   }
-  const agentState = await f.call(f.alice, 'agent_add', { journeyId, name: 'Limited', read: true, write: false, grant: false });
+  const agentState = await addAgent(f.backend, 'alice', journeyId, 'Limited', ["read","task.manage"]);
   const agentId = (agentState.members as Member[]).find(m => m.kind === 'agent')!.memberId;
   await f.refused(f.alice, 'journey_invite', { journeyId, actingAgent: agentId, email: 'eve@example.test' }, 'Only guides may invite');
   assert.equal(f.emailLookups(), lookups);
   await f.refused(f.alice, 'journey_invite', { journeyId, actingAgent: 'agent_unknown', email: 'eve@example.test' }, 'Only guides may invite');
   assert.equal(f.emailLookups(), lookups);
-  await f.call(f.alice, 'agent_card', { journeyId, agentId, action: 'edit', read: false, write: false, grant: true });
+  await setAgentCard(f.backend, 'alice', agentId, ['member.invite']);
   assert.deepEqual(await f.call(f.alice, 'journey_invite', { journeyId, actingAgent: agentId, email: 'eve@example.test' }), { journeyId, accepted: true });
 });
 

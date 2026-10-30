@@ -1,0 +1,15 @@
+<a href="#main">Skip to content</a>
+<main id="main"><header><h1 id="title">Journey workspace</h1><nav aria-label="Journey workspace"><button id="nav-library" disabled>Library</button><button id="nav-forum" disabled>Forum</button><button id="nav-round" disabled>Sensemaking</button><button id="nav-agents" disabled>Agent capabilities</button></nav><button id="refresh" disabled>Refresh</button><button id="signin" disabled>Open console</button></header>
+<section id="overview" aria-live="polite"></section>
+<form id="filters"><h2>Find library artifacts</h2><label>Search <input name="query" maxlength="4096" type="search"></label><label>Kind <select name="kind"><option value="">All kinds</option><!-- kinds --></select></label><label>Label <input name="label" maxlength="200"></label><label>Project ID (optional) <input name="projectId" maxlength="200"></label><label>Project artifacts <select name="includeProjects"><option value="false">Hide project artifacts</option><option value="true">Include project artifacts</option></select></label><button disabled>Apply filters</button></form>
+<form id="item"><h2>Artifact details</h2><label>Artifact <select id="item-options" name="itemId" required></select></label><button disabled>Open artifact</button></form>
+<form id="board"><h2>Browse a board</h2><label>Board <select id="board-options" name="boardId" required></select></label><button disabled>Show topics</button></form>
+<form id="thread"><h2>Read a topic</h2><label>Topic <select id="topic-options" name="topicId" required></select></label><button disabled>Open thread</button></form>
+<form id="newtopic"><h2>Start a topic</h2><label>Title <input name="title" maxlength="4096" required></label><label>Opening post <textarea name="body" maxlength="4096" rows="4" required></textarea></label><button disabled>Create topic</button></form>
+<form id="round"><h2>Choose a round</h2><label>Round <select id="round-options" name="roundId" required></select></label><button disabled>Open round</button></form>
+<button id="document" disabled>Open sensemaking document details</button><button id="my-interview" disabled>Read my interview</button>
+<form id="interview"><h2>My interview notes</h2><label>Notes <textarea name="text" maxlength="262144" rows="8"></textarea></label><button disabled>Save my interview</button></form>
+<p id="share-note" hidden>Sharing your interview is permanent. Later edits are shared too.</p><button id="share" disabled>Share my interview with the round permanently</button>
+<form id="contribute"><h2>Contribute to the sensemaking document</h2><label>Contribution <textarea name="text" maxlength="262144" rows="5" required></textarea></label><button disabled>Add contribution as my person</button></form>
+<form id="reply"><h2>Reply to this conversation</h2><label>Post <textarea name="body" maxlength="4096" rows="4" required></textarea></label><label>Quote post ID (optional) <input name="replyTo" maxlength="200"></label><button disabled>Post reply</button></form>
+</main>
