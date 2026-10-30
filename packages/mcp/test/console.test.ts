@@ -118,6 +118,13 @@ test('console: CSRF, foreign origins, oversized bodies and hostile form fields c
   assert.equal((await post(JSON.stringify({ csrf, name: 'Allowed', capabilities: ['read'], subject: 'mallory', live: true }))).status, 303);
   const agents = (await f.backend.execute('alice', parseCommand('agent_list', {}), clientId)).agents as { name: string; capabilities: string[] }[];
   assert.equal(agents[0]!.name, 'Allowed'); assert.deepEqual(agents[0]!.capabilities, []);
+  // Browsers that hide the origin send `Origin: null`; only a same-origin Sec-Fetch-Site makes that acceptable.
+  const nullOrigin = (site?: string) => f.send('/console/agents/create', { method: 'POST', redirect: 'manual', headers: { cookie: login.cookie, origin: 'null', 'content-type': 'application/x-www-form-urlencoded', ...(site ? { 'sec-fetch-site': site } : {}) }, body: `csrf=${csrf}&name=Null+origin` });
+  assert.equal((await nullOrigin()).status, 403);
+  assert.equal((await nullOrigin('cross-site')).status, 403);
+  assert.equal((await nullOrigin('same-site')).status, 403);
+  assert.equal((await nullOrigin('same-origin')).status, 303);
+  assert.match((await f.send('/console', { headers: { cookie: login.cookie } })).headers.get('referrer-policy')!, /^same-origin$/);
 });
 
 test('console: OAuth state is cookie-bound, expires, and a callback can be exchanged only once', async () => {

@@ -4,7 +4,10 @@ import { Refused } from '../commands.ts';
 
 /** Bound all browser input before decoding JSON or URL-encoded form fields. */
 export async function formBody(request: Request, csrf: string, origin: string): Promise<Record<string, unknown>> {
-  if (request.headers.get('origin') !== origin) throw new Refused('Form origin refused');
+  // Browsers may send `Origin: null` for privacy; then accept only a browser-set Sec-Fetch-Site: same-origin, which pages cannot forge.
+  const sent = request.headers.get('origin');
+  const sameOrigin = sent === origin || (sent === 'null' && request.headers.get('sec-fetch-site') === 'same-origin');
+  if (!sameOrigin) throw new Refused('Form origin refused');
   const reader = request.body?.getReader();
   if (!reader) throw new Refused('Form body required');
   let text = '', size = 0;

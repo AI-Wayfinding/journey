@@ -19,7 +19,8 @@ export function createConsole(config: ConsoleConfig) {
   const tokenEndpoint = new URL('/oauth2/token', config.issuer);
   if (tokenEndpoint.protocol !== 'https:') throw new Refused('HTTPS AuthKit issuer required');
   const sessions = new ConsoleSessions(config.backend, config.secret, origin, now);
-  const headers = { 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff',
+  // same-origin (not no-referrer): with no-referrer, browsers send `Origin: null` on form posts and the origin check refuses them.
+  const headers = { 'Cache-Control': 'no-store', 'Referrer-Policy': 'same-origin', 'X-Content-Type-Options': 'nosniff',
     'Content-Security-Policy': "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'" };
   const redirect = (location: string, cookies: string[] = []) => {
     const h = new Headers({ ...headers, Location: location });
