@@ -4,6 +4,7 @@ import { Refused, parseCommand, isRelay, type Command, type CoordinationBackend,
 import { allows, requireAccountCapability, type Actor, type ClientIdentity, type CardChange, type PasskeyVerifier } from './agents.ts';
 import type { AuthenticationResponseJSON } from '@simplewebauthn/server';
 import { JourneyHost } from './journey.ts';
+import { itemJourney } from './library.ts';
 import { MemoryStorage } from './storage.ts';
 import { MemoryBlobs, encodeBytes } from './relay.ts';
 
@@ -94,6 +95,8 @@ export class Backend implements CoordinationBackend {
         const updated = await this.accounts.update(account.personId, command.input.nickname);
         return actor.agent ? { nickname: updated.nickname, actingAgent: actor.agent.id } : this.accountView(updated);
       }
+      case 'library_get': case 'library_version': case 'library_update': case 'library_delete':
+        return this.journey(itemJourney(command.input.itemId)).execute(account.personId, command, undefined, actor);
       case 'agent_create': case 'agent_list': case 'agent_narrow': case 'agent_remove': case 'agent_card': case 'client_list':
         return this.accounts.agentCommand(account.personId, clientId, command);
       case 'agent_capabilities': {

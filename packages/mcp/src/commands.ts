@@ -1,5 +1,6 @@
 import * as z from 'zod';
 import { capabilities } from '../../rules/src/capabilities.ts';
+import { libraryInputs, libraryDescriptions } from './library-inputs.ts';
 const capability = z.enum(capabilities.map(c => c.name));
 
 const id = z.string().min(1).max(200);
@@ -69,6 +70,7 @@ export const inputs = {
   artifact_blob_get: z.object({ ...relayContext, artifactId: id, version: nat.min(1) }).strict(),
   artifact_blob_delete: z.object({ ...relayContext, artifactId: id }).strict(),
   account_update: z.object({ ...acting, nickname: z.string().trim().min(1).max(80) }).strict(),
+  ...libraryInputs,
 } as const;
 
 export type RelayCommand = Extract<Command, { tool: 'mls_message_post' | 'mls_message_fetch' | 'artifact_blob_put' | 'artifact_blob_get' | 'artifact_blob_delete' }>;
@@ -77,6 +79,7 @@ export function isRelay(command: Command): command is RelayCommand {
   return ['mls_message_post', 'mls_message_fetch', 'artifact_blob_put', 'artifact_blob_get', 'artifact_blob_delete'].includes(command.tool);
 }
 export const descriptions: Record<ToolName, string> = {
+  ...libraryDescriptions,
   account_read: 'Read your account, WorkOS profile, nickname, personId and personalGroupId.',
   account_update: 'Set your display nickname using a trimmed nickname of 1 to 80 characters.',
   journey_create: 'Create a journey with a name, joining policy and default member role; you become its guide.',

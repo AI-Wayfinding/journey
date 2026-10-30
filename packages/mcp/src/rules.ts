@@ -9,6 +9,7 @@ import * as postModule from '../../rules/generated/post.js';
 import * as grantModule from '../../rules/generated/grant.js';
 import * as artifactModule from '../../rules/generated/artifact.js';
 import * as taskModule from '../../rules/generated/task.js';
+import * as itemModule from '../../rules/generated/item.js';
 import * as groupModule from '../../rules/generated/personalGroup.js';
 import lock from '../../rules/rules.lock.json' with { type: 'json' };
 
@@ -36,6 +37,7 @@ export interface RulesStamp {
   binding: string;
   topic: string;
   post: string;
+  item: string;
 }
 
 export const RULES: RulesStamp = Object.freeze({
@@ -50,6 +52,7 @@ export const RULES: RulesStamp = Object.freeze({
   binding: lock.files['generated/binding.js'],
   topic: lock.files['generated/topic.js'],
   post: lock.files['generated/post.js'],
+  item: lock.files['generated/item.js'],
 });
 
 /** Whether `stamp` names exactly the rule modules this build runs. */
@@ -122,6 +125,7 @@ export const topicRule = rule(topicModule, {});
 export const postRule = rule(postModule, {});
 export const grantRule = rule(grantModule, {});
 export const artifactRule = rule(artifactModule, {});
+export const itemRule = rule(itemModule, {});
 export const taskRule = rule(taskModule, {});
 export const personalGroupRule = (owner: number) => rule(groupModule, { owner, slots: SLOTS });
 

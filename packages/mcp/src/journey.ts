@@ -5,17 +5,18 @@ import { allows, type Actor } from './agents.ts';
 import { Refused, isRelay, type Command, type TaskMethod, type ToolData } from './commands.ts';
 import { Serial, type KeyValueStorage } from './storage.ts';
 import { relay, deleteArtifactBlobs, type BlobStore } from './relay.ts';
+import { library, isLibraryCommand, isLibraryArtifact, requireItem, visibleItem, type LibraryArtifact, type LibraryAccess, type LibraryCommand } from './library.ts';
 
 interface Identity { id: string; name: string }
 interface Project { id: string; name: string; purpose: string; rule: Snapshot }
 interface Agent { id: string; owner: string }
 interface Grant { id: string; need: JourneyNeed; resource: string; expiresAt: number; rule: Snapshot }
 interface Post { id: string; topic: number; body: string; rule: Snapshot }
-interface Artifact { id: string; name: string; type: string; size: number; rule: Snapshot }
+interface Artifact { id: string; name: string; type: string; size: number; rule: Snapshot; storage?: never }
 interface Task { id: string; name: string; assignee?: string; deadline: number; createdAt: number; updatedAt: number; rule: Snapshot }
 export interface JourneyState {
   id: string; name: string; rulesHash: RulesStamp; identities: Identity[]; membership: Snapshot;
-  projects: Project[]; agents: Agent[]; grants: Grant[]; artifacts: Artifact[]; tasks: Task[];
+  projects: Project[]; agents: Agent[]; grants: Grant[]; artifacts: (Artifact | LibraryArtifact)[]; tasks: Task[];
   topics: Snapshot; posts: Post[];
 }
 
@@ -71,6 +72,16 @@ export class JourneyHost {
   private requireCapability(state: JourneyState, actor: number, identity: Actor, capability: Capability): void {
     if (!this.can(state, actor, identity, capability)) throw new Refused(`Journey capability ${capability} refused`);
   }
+  private libraryAccess(state: JourneyState, actor: number, identity: Actor): LibraryAccess {
+    return { person: this.slot(state, identity.personId), read: this.can(state, actor, identity, 'read'), write: this.can(state, actor, identity, 'artifact.write'),
+      delete: this.can(state, actor, identity, 'artifact.delete'), guide: this.has(state, this.slot(state, identity.personId), 'guide') };
+  }
+  private async executeLibrary(state: JourneyState, command: LibraryCommand, access: LibraryAccess): Promise<ToolData> {
+    const result = await library(state, command, access, this.storage);
+    if (result.changed) await this.commit(state, result.writes);
+    if (result.deleted && this.blobs) await deleteArtifactBlobs(this.storage, this.blobs, state.id, result.deleted);
+    return result.data;
+  }
   private commandCapability(command: Command): Capability | undefined {
     switch (command.tool) {
       case 'journey_read': case 'project_join': case 'project_leave': case 'grant_use': return 'read';
@@ -102,7 +113,7 @@ export class JourneyHost {
       status: ['none', 'open', 'claimed', 'inRound', 'done', 'expired', 'cancelled'][scalar(task.rule, 'status')],
       roundsUsed: scalar(task.rule, 'roundsUsed'), maxRounds: scalar(task.rule, 'cap') };
   }
-  private view(state: JourneyState): ToolData {
+  private view(state: JourneyState, personId: string): ToolData {
     return {
       journeyId: state.id, name: state.name, rulesHash: state.rulesHash,
       policy: decodeChoice(JOURNEY.policy, scalar(state.membership, 'policy'), 'policy'),
@@ -117,7 +128,7 @@ export class JourneyHost {
       projects: state.projects.map((p) => ({ projectId: p.id, name: p.name, purpose: p.purpose, status: decodeChoice(PROJECT.status, scalar(p.rule, 'status'), 'project status'), members: state.identities.filter((_, i) => cell(p.rule, 'Members', i + 1) === 1).map((m) => m.id) })),
       agents: state.agents.map(a => ({ agentId: a.id, owner: a.owner, signed: false, read: false, write: false, grant: false })),
       grants: state.grants.map((g) => ({ grantId: g.id, need: g.need, resource: g.resource, expiresAt: g.expiresAt, status: ['unissued', 'live', 'revoked', 'ended'][scalar(g.rule, 'status')], usesLeft: scalar(g.rule, 'usesLeft') })),
-      artifacts: state.artifacts.map((a) => ({ artifactId: a.id, name: a.name, type: a.type, size: a.size, version: scalar(a.rule, 'version'), deleted: scalar(a.rule, 'at') === 2 })),
+      artifacts: state.artifacts.filter(a => !isLibraryArtifact(a) || visibleItem(a, this.slot(state, personId))).map((a) => ({ artifactId: a.id, name: a.name, type: a.type, size: a.size, version: scalar(a.rule, 'version'), deleted: scalar(a.rule, 'at') === 2 })),
       tasks: state.tasks.map((t) => this.taskView(state, t)),
     };
   }
@@ -163,10 +174,11 @@ export class JourneyHost {
       }, { highWaterMark: 16 });
     });
   }
-  private async commit(state: JourneyState): Promise<void> {
+  private async commit(state: JourneyState, writes: [string, string][] = []): Promise<void> {
     const before = await this.load();
     await this.storage.transaction(async (storage) => {
       await storage.put('journey', JSON.stringify(state));
+      for (const [key, value] of writes) await storage.put(key, value);
       await this.schedule(state, storage);
     });
     for (const [controller, personId] of this.watchers) {
@@ -237,14 +249,10 @@ export class JourneyHost {
         if (!state) throw new Refused('Journey not found');
         const actor = command.tool === 'agent_add' ? this.slot(state, personId) : this.actor(state, personId, command, resolved);
         const identity = resolved ?? { personId };
+        if (isLibraryCommand(command)) return this.executeLibrary(state, command, this.libraryAccess(state, actor, resolved ?? { personId }));
         if (isRelay(command) && !this.has(state, actor, 'read')) throw new Refused('A live readable member is required for relay');
-        const cap = this.commandCapability(command);
-        if (command.tool === 'artifact_delete') {
-          const artifact = state.artifacts.find(a => a.id === command.input.artifactId);
-          const creator = artifact ? scalar(artifact.rule, 'creator') : 0;
-          const creatorPerson = cell(state.membership, 'Members', creator) === 2 ? cell(state.membership, 'AddedBy', creator) : creator;
-          if (creatorPerson !== this.slot(state, personId) && !this.has(state, actor, 'guide')) throw new Refused('Only the artifact owner or guide may delete');
-        }
+        const libraryBlobDelete = command.tool === 'artifact_blob_delete' && state.artifacts.some(a => a.id === command.input.artifactId && isLibraryArtifact(a));
+        const cap = libraryBlobDelete ? 'artifact.delete' : this.commandCapability(command);
         // Own-agent removal uses its account capability; all other journey
         // operations intersect the catalogue capability with live journey authority.
         const ownRemoval = command.tool === 'journey_remove' && state.agents.some(a => a.id === command.input.memberId && a.owner === personId);
@@ -255,6 +263,8 @@ export class JourneyHost {
         if (command.tool === 'conversation_post') {
           const target = 'projectId' in command.input.target ? command.input.target.projectId : command.input.target.itemId;
           this.checkResource(state, target);
+          const targetArtifact = state.artifacts.find(a => a.id === target);
+          if (targetArtifact && isLibraryArtifact(targetArtifact)) requireItem(targetArtifact, this.slot(state, personId), this.can(state, actor, identity, 'read'));
           const targetSlot = this.resourceSlot(state, target);
           const next = topicRule.step(state.topics, { op: 1, slot: state.posts.length, target: targetSlot, actor, canTopic: 1, boardOpen: 1, guide: +this.has(state, actor, 'guide'), locked: 0 });
           const topic = scalar(next, 'selected') - 1;
@@ -271,7 +281,13 @@ export class JourneyHost {
           if (command.tool === 'artifact_blob_put' || command.tool === 'artifact_blob_get' || command.tool === 'artifact_blob_delete') {
             const artifact = state.artifacts.find(a => a.id === command.input.artifactId);
             if (!artifact || scalar(artifact.rule, 'at') !== 1 || ('version' in command.input && command.input.version > scalar(artifact.rule, 'version'))) throw new Refused('Live artifact version required');
-            if (command.tool !== 'artifact_blob_get' && !this.has(state, actor, 'write')) throw new Refused('Artifact ciphertext write refused');
+            if (isLibraryArtifact(artifact)) {
+              const access = this.libraryAccess(state, actor, identity);
+              requireItem(artifact, access.person, access.read || access.write || access.delete);
+              if (command.tool === 'artifact_blob_delete' && (scalar(artifact.rule, 'owner') !== access.person && !access.guide)) throw new Refused('Only the artifact owner or guide may delete ciphertext');
+              if (artifact.storage !== 'sealed') throw new Refused('Server artifacts do not accept ciphertext');
+            }
+            if (command.tool !== 'artifact_blob_get' && !libraryBlobDelete && !this.has(state, actor, 'write')) throw new Refused('Artifact ciphertext write refused');
           }
           const sender = resolved?.agent?.id ?? personId;
           return relay(this.storage, this.blobs, sender, command);
@@ -282,7 +298,23 @@ export class JourneyHost {
         }
         if (command.tool === 'journey_read') {
           if (!this.has(state, actor, 'read')) throw new Refused('Reading journey refused');
-          return this.view(state);
+          return this.view(state, personId);
+        }
+        if (command.tool === 'artifact_version' || command.tool === 'artifact_rename' || command.tool === 'artifact_delete') {
+          const artifact = state.artifacts.find(a => a.id === command.input.artifactId);
+          if (artifact && isLibraryArtifact(artifact)) {
+            const access = this.libraryAccess(state, actor, identity);
+            const id = artifact.id;
+            const mapped: LibraryCommand = command.tool === 'artifact_version' ? { tool: 'library_version', input: { itemId: id, baseVersion: command.input.baseVersion, size: command.input.size } }
+              : command.tool === 'artifact_rename' ? { tool: 'library_update', input: { itemId: id, name: command.input.name } } : { tool: 'library_delete', input: { itemId: id } };
+            await this.executeLibrary(state, mapped, access);
+            return access.read ? this.view(state, personId) : { journeyId: state.id, accepted: true };
+          }
+          if (command.tool === 'artifact_delete') {
+            const creator = artifact ? scalar(artifact.rule, 'creator') : 0;
+            const creatorPerson = cell(state.membership, 'Members', creator) === 2 ? cell(state.membership, 'AddedBy', creator) : creator;
+            if (creatorPerson !== this.slot(state, personId) && !this.has(state, actor, 'guide')) throw new Refused('Only the artifact owner or guide may delete');
+          }
         }
         this.apply(state, actor, personId, command, resolved);
         if (command.tool === 'artifact_delete' && this.blobs) await deleteArtifactBlobs(this.storage, this.blobs, state.id, command.input.artifactId);
@@ -292,7 +324,7 @@ export class JourneyHost {
       const identity = command.tool === 'agent_add' ? { personId } : resolved ?? { personId };
       const readerId = identity.agent?.id ?? personId;
       if (!this.can(state, this.slot(state, readerId), identity, 'read')) return { journeyId: state.id, accepted: true };
-      return this.view(state);
+      return this.view(state, personId);
     });
   }
   private apply(state: JourneyState, actor: number, personId: string, command: Command, resolved?: Actor): void {
