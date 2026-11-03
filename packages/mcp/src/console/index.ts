@@ -21,8 +21,7 @@ export function createConsole(config: ConsoleConfig) {
   const sessions = new ConsoleSessions(config.backend, config.secret, origin, now);
   // same-origin (not no-referrer): with no-referrer, browsers send `Origin: null` on form posts and the origin check refuses them.
   const headers = { 'Cache-Control': 'no-store', 'Referrer-Policy': 'same-origin', 'X-Content-Type-Options': 'nosniff',
-    // form-action also governs redirects after a form post, so sign-out's hop to the WorkOS logout endpoint must be listed.
-    'Content-Security-Policy': `default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; form-action 'self' https://api.workos.com; frame-ancestors 'none'; base-uri 'none'` };
+    'Content-Security-Policy': "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'" };
   const redirect = (location: string, cookies: string[] = []) => {
     const h = new Headers({ ...headers, Location: location });
     for (const c of cookies) h.append('Set-Cookie', c);

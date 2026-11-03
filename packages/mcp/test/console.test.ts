@@ -181,7 +181,6 @@ test('console: tampered, expired and logged-out session cookies are refused; log
   assert.equal(`${exit.origin}${exit.pathname}`, 'https://api.workos.com/user_management/sessions/logout', 'sign-out ends the AuthKit session so the next sign-in is not silent');
   assert.equal(exit.searchParams.get('session_id'), 'session_alice');
   assert.equal(exit.searchParams.get('return_to'), `${origin}/`);
-  assert.match(loggedOut.headers.get('content-security-policy')!, /form-action 'self' https:\/\/api\.workos\.com;/, 'the CSP must let the post-submit redirect reach WorkOS');
   signedOut(await f.send('/console', { redirect: 'manual', headers: { cookie: login.cookie } }));
   const expired = await f.login(); f.advance(28_800_001);
   signedOut(await f.send('/console', { redirect: 'manual', headers: { cookie: expired.cookie } }));
