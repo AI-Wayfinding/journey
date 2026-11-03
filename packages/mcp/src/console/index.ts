@@ -116,7 +116,8 @@ export function createConsole(config: ConsoleConfig) {
         if (path === '/console/authorize/start') {
           const change = changeSchema.parse(body.kind === 'card' ? { kind: body.kind, agentId: body.agentId, capabilities: body.capabilities ?? [] }
             : { kind: body.kind, clientId: body.clientId, agentId: body.agentId });
-          return new Response(confirmation(change, session.csrf), { headers: { ...headers, 'Content-Type': 'text/html; charset=utf-8' } });
+          const agent = await config.backend.execute(session.subject, parseCommand('agent_capabilities', { agentId: change.agentId }), session.clientId);
+          return new Response(confirmation(change, session.csrf, String(agent.name)), { headers: { ...headers, 'Content-Type': 'text/html; charset=utf-8' } });
         }
         if (['/console/agents/create', '/console/agents/narrow', '/console/agents/remove'].includes(path)) {
           const tool = path.endsWith('/create') ? 'agent_create' : path.endsWith('/narrow') ? 'agent_narrow' : 'agent_remove';
