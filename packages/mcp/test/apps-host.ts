@@ -82,7 +82,12 @@ export class AppsHost {
   send(message: Rpc, source: object = this.parent) { for (const listener of this.listeners) listener({ source, data: message }); }
   notify(method: string, params: Record<string, unknown>) { this.send({ jsonrpc: '2.0', method, params }); }
   async until(condition: () => boolean): Promise<void> {
-    for (let turn = 0; turn < 100; turn++) { await setImmediate(); if (condition()) { assert.deepEqual(this.errors, []); return; } }
+    // Spin on immediates first, then allow real time: slower CI runners need more than 100 turns.
+    const deadline = Date.now() + 5000;
+    for (let turn = 0; turn < 100 || Date.now() < deadline; turn++) {
+      if (turn < 100) await setImmediate(); else await new Promise(resolve => setTimeout(resolve, 10));
+      if (condition()) { assert.deepEqual(this.errors, []); return; }
+    }
     assert.fail(`Host condition not met; errors: ${JSON.stringify(this.errors)}; status: ${this.nodes.get('status')!.textContent}; messages: ${JSON.stringify(this.messages)}`);
   }
   click(id: string) { assert.equal(this.nodes.get(id)!.disabled, false); this.nodes.get(id)!.dispatch('click'); }
