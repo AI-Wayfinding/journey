@@ -66,10 +66,10 @@ export function createConsole(config: ConsoleConfig) {
         if (!response.ok) throw new Refused('Sign-in exchange refused');
         const result = z.object({ access_token: z.string().min(1).max(16384), token_type: z.string() }).parse(await response.json());
         if (result.token_type.toLowerCase() !== 'bearer') throw new Refused('Bearer token required');
-        const auth = await config.verifier.verifyAccessToken(result.access_token), subject = auth.extra?.['sub'];
+        const auth = await config.verifier.verifyAccessToken(result.access_token), subject = auth.extra?.['sub'], sid = auth.extra?.['sid'];
         if (auth.clientId !== clientId || typeof subject !== 'string') throw new Refused('Only the console client may sign in');
         await config.backend.execute(subject, { tool: 'account_read', input: {} }, clientId);
-        return redirect('/console', [await sessions.create(SESSION_COOKIE, { kind: 'session', subject, clientId, csrf: random(), expiresAt: now() + 28_800_000 }), cookie(OAUTH_COOKIE, '', 0)]);
+        return redirect('/console', [await sessions.create(SESSION_COOKIE, { kind: 'session', subject, clientId, csrf: random(), ...(typeof sid === 'string' ? { sid } : {}), expiresAt: now() + 28_800_000 }), cookie(OAUTH_COOKIE, '', 0)]);
       }
       // A page visit without a valid session goes to sign-in; POSTs stay refused.
       if (request.method === 'GET' && (await sessions.read(request, SESSION_COOKIE))?.kind !== 'session') return redirect('/console/login');
@@ -78,8 +78,11 @@ export function createConsole(config: ConsoleConfig) {
         const body = await formBody(request, session.csrf, origin), identity = { subject: session.subject, clientId: session.clientId };
         if (path === '/console/logout') {
           await sessions.read(request, SESSION_COOKIE, 'delete');
-          // Land on the signed-out home page: /console/login would bounce through AuthKit, whose own session signs the person straight back in.
-          return redirect('/', [cookie(SESSION_COOKIE, '', 0)]);
+          // End the AuthKit session too, or the next sign-in is silent; WorkOS then returns to the home page (its configured logout URI).
+          if (!session.sid) return redirect('/', [cookie(SESSION_COOKIE, '', 0)]);
+          const logout = new URL('https://api.workos.com/user_management/sessions/logout');
+          logout.search = new URLSearchParams({ session_id: session.sid, return_to: `${origin}/` }).toString();
+          return redirect(logout.href, [cookie(SESSION_COOKIE, '', 0)]);
         }
         if (path === '/console/passkeys/options') return Response.json(await config.backend.passkey(identity, { op: 'begin' }), { headers });
         if (path === '/console/passkeys/register') {

@@ -16,7 +16,7 @@ export type PasskeyOperation = z.infer<typeof passkeyOperation>;
 const text = z.string().min(1).max(200);
 export const consoleRecord = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('oauth'), state: text, verifier: text, expiresAt: z.number().int().nonnegative().safe() }).strict(),
-  z.object({ kind: z.literal('session'), subject: text, clientId: text, csrf: text, expiresAt: z.number().int().nonnegative().safe() }).strict(),
+  z.object({ kind: z.literal('session'), subject: text, clientId: text, csrf: text, sid: text.optional(), expiresAt: z.number().int().nonnegative().safe() }).strict(),
 ]);
 export type ConsoleRecord = z.infer<typeof consoleRecord>;
 export const recordOperation = z.discriminatedUnion('op', [
