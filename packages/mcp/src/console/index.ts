@@ -3,6 +3,7 @@ import { base64url } from '../agents.ts';
 import { Refused } from '../commands.ts';
 import type { ConsoleConfig } from './contract.ts';
 import { ConsoleSessions, SESSION_COOKIE, OAUTH_COOKIE, random, cookie } from './session.ts';
+const SIGNED_OUT_COOKIE = '__Host-wayfinding-signed-out';
 
 import { workspacePage } from './workspace.ts';
 import { home, agentPage, passkeysPage, confirmation, journeyPage, routeId } from './pages.ts';
@@ -52,6 +53,8 @@ export function createConsole(config: ConsoleConfig) {
         const destination = new URL('/oauth2/authorize', config.issuer);
         destination.search = new URLSearchParams({ client_id: clientId, redirect_uri: redirectUri, response_type: 'code', scope: 'openid profile email',
           resource: config.resource.href, state, code_challenge: challenge, code_challenge_method: 'S256' }).toString();
+        // After sign-out, ask AuthKit to show its sign-in page; otherwise its own session signs the person straight back in.
+        if ((request.headers.get('cookie') ?? '').split(';').some(c => c.trim() === `${SIGNED_OUT_COOKIE}=1`)) destination.searchParams.set('prompt', 'login');
         const response = redirect(destination.href, [await sessions.create(OAUTH_COOKIE, { kind: 'oauth', state, verifier, expiresAt: now() + 600_000 })]);
         return new Response(null, { status: 302, headers: response.headers });
       }
@@ -69,7 +72,7 @@ export function createConsole(config: ConsoleConfig) {
         const auth = await config.verifier.verifyAccessToken(result.access_token), subject = auth.extra?.['sub'];
         if (auth.clientId !== clientId || typeof subject !== 'string') throw new Refused('Only the console client may sign in');
         await config.backend.execute(subject, { tool: 'account_read', input: {} }, clientId);
-        return redirect('/console', [await sessions.create(SESSION_COOKIE, { kind: 'session', subject, clientId, csrf: random(), expiresAt: now() + 28_800_000 }), cookie(OAUTH_COOKIE, '', 0)]);
+        return redirect('/console', [await sessions.create(SESSION_COOKIE, { kind: 'session', subject, clientId, csrf: random(), expiresAt: now() + 28_800_000 }), cookie(OAUTH_COOKIE, '', 0), cookie(SIGNED_OUT_COOKIE, '', 0)]);
       }
       // A page visit without a valid session goes to sign-in; POSTs stay refused.
       if (request.method === 'GET' && (await sessions.read(request, SESSION_COOKIE))?.kind !== 'session') return redirect('/console/login');
@@ -79,7 +82,7 @@ export function createConsole(config: ConsoleConfig) {
         if (path === '/console/logout') {
           await sessions.read(request, SESSION_COOKIE, 'delete');
           // Land on the signed-out home page: /console/login would bounce through AuthKit, whose own session signs the person straight back in.
-          return redirect('/', [cookie(SESSION_COOKIE, '', 0)]);
+          return redirect('/', [cookie(SESSION_COOKIE, '', 0), cookie(SIGNED_OUT_COOKIE, '1', 600)]);
         }
         if (path === '/console/passkeys/options') return Response.json(await config.backend.passkey(identity, { op: 'begin' }), { headers });
         if (path === '/console/passkeys/register') {
