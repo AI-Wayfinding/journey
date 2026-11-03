@@ -78,7 +78,8 @@ export function createConsole(config: ConsoleConfig) {
         const body = await formBody(request, session.csrf, origin), identity = { subject: session.subject, clientId: session.clientId };
         if (path === '/console/logout') {
           await sessions.read(request, SESSION_COOKIE, 'delete');
-          return redirect('/console/login', [cookie(SESSION_COOKIE, '', 0)]);
+          // Land on the signed-out home page: /console/login would bounce through AuthKit, whose own session signs the person straight back in.
+          return redirect('/', [cookie(SESSION_COOKIE, '', 0)]);
         }
         if (path === '/console/passkeys/options') return Response.json(await config.backend.passkey(identity, { op: 'begin' }), { headers });
         if (path === '/console/passkeys/register') {

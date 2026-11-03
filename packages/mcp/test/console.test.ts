@@ -177,6 +177,7 @@ test('console: tampered, expired and logged-out session cookies are refused; log
   assert.equal((await f.send('/console/logout', { method: 'POST', headers: { cookie: login.cookie, origin, 'content-type': 'application/x-www-form-urlencoded' }, body: '' })).status, 403);
   const loggedOut = await f.send('/console/logout', { method: 'POST', headers: { cookie: login.cookie, origin, 'content-type': 'application/x-www-form-urlencoded' }, body: `csrf=${csrf}` });
   assert.equal(loggedOut.status, 303); assert.match(loggedOut.headers.get('set-cookie')!, /Max-Age=0/);
+  assert.equal(new URL(loggedOut.headers.get('location')!, origin).pathname, '/', 'sign-out lands on the home page, not the AuthKit sign-in that would sign straight back in');
   signedOut(await f.send('/console', { redirect: 'manual', headers: { cookie: login.cookie } }));
   const expired = await f.login(); f.advance(28_800_001);
   signedOut(await f.send('/console', { redirect: 'manual', headers: { cookie: expired.cookie } }));
