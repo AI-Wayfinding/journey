@@ -391,7 +391,7 @@ test('console: one stored session from an older schema does not lock out every s
   const { AccountsHost } = await import('../src/accounts.ts');
   const { MemoryStorage } = await import('../src/storage.ts');
   const storage = new MemoryStorage(), later = Date.now() + 600_000;
-  const good = { kind: 'oauth', state: 'good-state', verifier: 'good-verifier', expiresAt: later };
+  const good = { kind: 'oauth' as const, state: 'good-state', verifier: 'good-verifier', expiresAt: later };
   storage.data.set('console:records', JSON.stringify({ stale: { kind: 'session', subject: 'alice', clientId: 'c', csrf: 'x', sid: 'old-field', expiresAt: later }, good }));
   const host = new AccountsHost(storage, { async get() { return { name: 'Alice', email: 'alice@example.test' }; } });
   assert.deepEqual(await host.consoleRecord({ op: 'read', id: 'good' }), good);
