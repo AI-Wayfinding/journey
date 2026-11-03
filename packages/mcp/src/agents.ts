@@ -19,7 +19,8 @@ export type CardChange = z.infer<typeof changeSchema>;
 export interface ClientIdentity { subject: string; clientId: string }
 export interface AccountAgent { id: string; name: string; live: boolean; card: Snapshot }
 export interface Actor { personId: string; agent?: AccountAgent }
-export interface PasskeyCredential { id: string; publicKey: number[]; counter: number }
+/** aaguid names the provider (e.g. 1Password); name is the person's own label. Older records lack the optional fields. */
+export interface PasskeyCredential { id: string; publicKey: number[]; counter: number; aaguid?: string; name?: string; createdAt?: number; lastUsedAt?: number }
 export interface PendingAssertion { challenge: string; digest: string; expiresAt: number }
 export interface AgentAccount {
   agents: AccountAgent[]; clients: string[]; bindings: Snapshot; passkeys: PasskeyCredential[]; assertions: PendingAssertion[]; live: boolean;

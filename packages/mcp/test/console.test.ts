@@ -310,9 +310,9 @@ test('console: served browser script completes registration and assertion throug
     assert.equal(status.textContent, ''); assert.equal(button.disabled, false); assert.equal(navigations.length, 1);
     return navigations[0];
   }
-  assert.equal(await browser('register'), '/console/passkeys');
+  assert.equal(await browser('register'), '/console/passkeys?notice=registered');
   const agentId = String((await f.backend.execute('alice', parseCommand('agent_create', { name: 'Browser' }), clientId)).agentId);
-  assert.equal(await browser('assert', { kind: 'card', agentId, capabilities: ['post'] }), `/console/agents/${agentId}`);
+  assert.equal(await browser('assert', { kind: 'card', agentId, capabilities: ['post'] }), `/console/agents/${agentId}?notice=confirmed`);
   assert.deepEqual((await f.backend.execute('alice', parseCommand('agent_capabilities', { agentId }), clientId)).capabilities, ['post']);
 });
 
@@ -398,4 +398,26 @@ test('console: one stored session from an older schema does not lock out every s
   assert.equal(await host.consoleRecord({ op: 'read', id: 'stale' }), undefined);
   await host.consoleRecord({ op: 'put', id: 'fresh', record: { ...good, state: 'fresh-state' } });
   assert.equal((await host.consoleRecord({ op: 'read', id: 'fresh' }))?.kind, 'oauth');
+});
+
+test('console: passkeys show a label and last use instead of the raw id, can be renamed, and notices are fixed text', async () => {
+  const f = await fixture(), login = await f.login(), key = await authenticator();
+  const csrf = csrfOf(await (await f.send('/console', { headers: { cookie: login.cookie } })).text());
+  const post = (path: string, body: Record<string, unknown>) => f.send(path, { method: 'POST', headers: { cookie: login.cookie, origin, 'content-type': 'application/json' }, body: JSON.stringify({ csrf, ...body }) });
+  const options = await (await post('/console/passkeys/options', {})).json() as { challenge: string };
+  const registered = await post('/console/passkeys/register', { credential: key.register(options.challenge) });
+  assert.equal(registered.headers.get('location'), '/console/passkeys?notice=registered');
+  const page = (query = '') => f.send('/console/passkeys' + query, { headers: { cookie: login.cookie } }).then(r => r.text());
+  const first = await page('?notice=registered');
+  assert.match(first, /<strong>Passkey<\/strong>/);
+  assert.match(first, /Last used never/);
+  assert.match(first, /class="notice">Passkey added\./);
+  assert.doesNotMatch(first.replace(/<input type="hidden" name="id" value="[^"]*">/g, ''), new RegExp(key.id), 'raw id only in hidden form fields');
+  const renamed = await post('/console/passkeys/rename', { id: key.id, name: '  Work laptop  ' });
+  assert.equal(renamed.headers.get('location'), '/console/passkeys?notice=renamed');
+  assert.match(await page(), /<strong>Work laptop<\/strong>/);
+  assert.doesNotMatch(await page('?notice=%3Cscript%3E'), /<script>|class="notice"/, 'unknown notice values are ignored');
+  assert.equal((await post('/console/passkeys/rename', { id: 'not-mine', name: 'x' })).status, 403);
+  await post('/console/passkeys/rename', { id: key.id, name: '' });
+  assert.match(await page(), /<strong>Passkey<\/strong>/, 'an empty name falls back to the provider label');
 });

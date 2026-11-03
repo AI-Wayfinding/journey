@@ -209,7 +209,7 @@ export class AccountsHost {
         account.bindings = bindingRule.step(account.bindings, { op: change.kind === 'bind' ? 0 : 1, client, agent: account.agents.indexOf(agent) + 2, personAsserted: 1, agentIsOwnLive: 1, personLive: +account.live, boundAgentLive: +agent.live });
       }
       const credential = account.passkeys.find(c => c.id === verified.credentialId);
-      if (credential) credential.counter = verified.counter;
+      if (credential) { credential.counter = verified.counter; credential.lastUsedAt = this.now(); }
       account.assertions = account.assertions.filter(a => a !== pending);
       await this.storage.put('accounts', JSON.stringify(state)); return { accepted: true };
     });
@@ -220,7 +220,7 @@ export class AccountsHost {
       if (!account || this.resolve(account, identity.clientId).agent) throw new Refused('Only a live person manages passkeys');
       const operation = passkeyOperation.parse(supplied);
       const result = await managePasskey(account, state.accounts, this.storage, operation, this.now());
-      if (operation.op === 'finish' || operation.op === 'delete') await this.storage.put('accounts', JSON.stringify(state));
+      if (operation.op === 'finish' || operation.op === 'delete' || operation.op === 'rename') await this.storage.put('accounts', JSON.stringify(state));
       return result;
     });
   }

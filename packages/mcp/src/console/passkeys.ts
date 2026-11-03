@@ -3,10 +3,18 @@ import type { Account } from '../accounts.ts';
 import type { KeyValueStorage } from '../storage.ts';
 import { Refused, type ToolData } from '../commands.ts';
 import type { PasskeyOperation } from './contract.ts';
+import { providerName } from './providers.ts';
 
 export async function managePasskey(account: Account, accounts: Account[], storage: KeyValueStorage, operation: PasskeyOperation, now: number): Promise<ToolData> {
   const key = `passkey-registration:${account.personId}`;
-  if (operation.op === 'list') return { passkeys: account.passkeys.map(c => ({ id: c.id })) };
+  if (operation.op === 'list') return { passkeys: account.passkeys.map(c => ({ id: c.id, label: c.name || providerName(c.aaguid) || 'Passkey', provider: providerName(c.aaguid) ?? null,
+    name: c.name ?? null, createdAt: c.createdAt ?? null, lastUsedAt: c.lastUsedAt ?? null })) };
+  if (operation.op === 'rename') {
+    const credential = account.passkeys.find(c => c.id === operation.id);
+    if (!credential) throw new Refused('Unknown owned passkey');
+    if (operation.name) credential.name = operation.name; else delete credential.name;
+    return { renamed: true };
+  }
   if (operation.op === 'delete') {
     if (!account.passkeys.some(c => c.id === operation.id)) throw new Refused('Unknown owned passkey');
     account.passkeys = account.passkeys.filter(c => c.id !== operation.id); account.assertions = [];
@@ -32,7 +40,7 @@ export async function managePasskey(account: Account, accounts: Account[], stora
   const credential = verified.registrationInfo.credential;
   if (accounts.some(a => a.passkeys.some(c => c.id === credential.id))) throw new Refused('Passkey already registered');
   if (account.passkeys.length >= 16) throw new Refused('Passkey capacity reached');
-  account.passkeys.push({ id: credential.id, publicKey: [...credential.publicKey], counter: credential.counter });
+  account.passkeys.push({ id: credential.id, publicKey: [...credential.publicKey], counter: credential.counter, aaguid: verified.registrationInfo.aaguid, createdAt: now });
   await storage.put(key, 'null');
   return { registered: true };
 }

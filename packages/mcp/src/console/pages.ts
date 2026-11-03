@@ -37,7 +37,13 @@ export async function agentPage(backend: ConsoleBackend, identity: ClientIdentit
 }
 export async function passkeysPage(backend: ConsoleBackend, identity: ClientIdentity, csrf: string): Promise<string> {
   const keys = rows((await backend.passkey(identity, { op: 'list' })).passkeys);
-  return page('Passkeys', `<p>Passkeys confirm changes to cards and connected clients. Your first passkey is enrolled after AuthKit sign-in.</p><ul>${keys.map(k => `<li><code>${escape(k.id)}</code>${form('/console/passkeys/delete', csrf, hidden('id', k.id), 'Delete this passkey')}</li>`).join('') || '<li>No passkeys registered.</li>'}</ul><form method="post" action="/console/passkeys/register" data-ceremony="register" data-options="/console/passkeys/options">${hidden('csrf', csrf)}<button type="submit">Register a passkey</button></form>`, csrf);
+  const when = (value: unknown) => typeof value === 'number' ? new Date(value).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'UTC' }) + ' UTC' : null;
+  const item = (k: ToolData) => {
+    const facts = [k.name && k.provider ? escape(k.provider) : null, when(k.createdAt) ? `Added ${escape(when(k.createdAt))}` : null, `Last used ${escape(when(k.lastUsedAt) ?? 'never')}`].filter(Boolean).join(' · ');
+    const rename = `<details><summary>Rename</summary>${form('/console/passkeys/rename', csrf, hidden('id', k.id) + `<label>Name <input name="name" maxlength="60" value="${escape(k.name ?? '')}" placeholder="${escape(k.provider ?? 'Passkey')}"></label>`, 'Save name')}</details>`;
+    return `<li class="passkey"><strong>${escape(k.label)}</strong><span class="meta">${facts}</span>${rename}${form('/console/passkeys/delete', csrf, hidden('id', k.id), 'Delete')}</li>`;
+  };
+  return page('Passkeys', `<p>Passkeys confirm changes to agent permissions and connected clients.</p><ul class="passkeys">${keys.map(item).join('') || '<li>No passkeys registered.</li>'}</ul><form method="post" action="/console/passkeys/register" data-ceremony="register" data-options="/console/passkeys/options">${hidden('csrf', csrf)}<button type="submit">Register a passkey</button></form>`, csrf);
 }
 export function confirmation(change: CardChange, csrf: string): string {
   return page('Confirm permissions', `<p>Use your passkey to confirm this exact change.</p><dl><dt>Action</dt><dd>${escape(change.kind)}</dd><dt>Agent</dt><dd>${escape(change.agentId)}</dd>${change.kind === 'card' ? `<dt>Capabilities</dt><dd>${escape(change.capabilities.join(', ') || 'None')}</dd>` : `<dt>Client</dt><dd>${escape(change.clientId)}</dd>`}</dl><form method="post" action="/console/authorize/complete" data-ceremony="assert" data-options="/console/authorize/options">${hidden('csrf', csrf)}${hidden('change', JSON.stringify(change))}<button type="submit">Confirm with passkey</button></form><p><a href="/console">Cancel</a></p>`, csrf);

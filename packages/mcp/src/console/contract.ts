@@ -11,6 +11,7 @@ export const passkeyOperation = z.discriminatedUnion('op', [
   z.object({ op: z.literal('begin') }).strict(),
   z.object({ op: z.literal('finish'), credential: registration }).strict(),
   z.object({ op: z.literal('delete'), id: z.string().min(1).max(2048) }).strict(),
+  z.object({ op: z.literal('rename'), id: z.string().min(1).max(2048), name: z.string().trim().max(60) }).strict(),
 ]);
 export type PasskeyOperation = z.infer<typeof passkeyOperation>;
 const text = z.string().min(1).max(200);

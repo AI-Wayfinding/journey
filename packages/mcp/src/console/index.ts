@@ -14,6 +14,8 @@ import { formBody } from './forms.ts';
 import { landingPage } from './landing.ts';
 import { changeSchema, assertionSchema } from '../agents.ts';
 import { registration } from './contract.ts';
+
+const STATUS = '<p id="status" role="status" aria-live="polite"></p>';
 export function createConsole(config: ConsoleConfig) {
   const origin = config.resource.origin, clientId = `${origin}/console/client.json`, redirectUri = `${origin}/console/callback`;
   const now = config.now ?? Date.now, send = config.send ?? fetch.bind(globalThis);
@@ -87,7 +89,11 @@ export function createConsole(config: ConsoleConfig) {
         if (path === '/console/passkeys/options') return Response.json(await config.backend.passkey(identity, { op: 'begin' }), { headers });
         if (path === '/console/passkeys/register') {
           await config.backend.passkey(identity, { op: 'finish', credential: registration.parse(body.credential) });
-          return redirect('/console/passkeys');
+          return redirect('/console/passkeys?notice=registered');
+        }
+        if (path === '/console/passkeys/rename') {
+          await config.backend.passkey(identity, { op: 'rename', id: z.string().min(1).max(2048).parse(body.id), name: z.string().max(60).parse(body.name ?? '') });
+          return redirect('/console/passkeys?notice=renamed');
         }
         if (path === '/console/passkeys/delete') {
           await config.backend.passkey(identity, { op: 'delete', id: z.string().min(1).max(2048).parse(body.id) });
@@ -105,7 +111,7 @@ export function createConsole(config: ConsoleConfig) {
               allowCredentials: credentials.map(c => ({ type: 'public-key', id: c.id })) }, { headers });
           }
           await config.backend.completeAuthorization(identity, change, assertionSchema.parse(body.assertion));
-          return redirect(change.kind === 'card' ? `/console/agents/${encodeURIComponent(change.agentId)}` : '/console');
+          return redirect(change.kind === 'card' ? `/console/agents/${encodeURIComponent(change.agentId)}?notice=confirmed` : '/console?notice=confirmed');
         }
         if (path === '/console/authorize/start') {
           const change = changeSchema.parse(body.kind === 'card' ? { kind: body.kind, agentId: body.agentId, capabilities: body.capabilities ?? [] }
@@ -121,7 +127,11 @@ export function createConsole(config: ConsoleConfig) {
         return new Response('Not found', { status: 404, headers });
       }
       const identity = { subject: session.subject, clientId: session.clientId };
-      const html = (text: string) => new Response(text, { headers: { ...headers, 'Content-Type': 'text/html; charset=utf-8' } });
+      // A fixed notice after a redirect (never caller text) tells the person their passkey was just used or changed.
+      const notices: Record<string, string> = { confirmed: 'Confirmed with your passkey.', registered: 'Passkey added.', renamed: 'Passkey name saved.' };
+      const notice = notices[url.searchParams.get('notice') ?? ''];
+      const html = (text: string) => new Response(notice ? text.replace(STATUS, `<p id="status" role="status" aria-live="polite" class="notice">${notice}</p>`) : text,
+        { headers: { ...headers, 'Content-Type': 'text/html; charset=utf-8' } });
       if (path === '/console' || path === '/console/') return html(await home(config.backend, identity, session.csrf));
       if (path === '/console/passkeys') return html(await passkeysPage(config.backend, identity, session.csrf));
       if (path.startsWith('/console/agents/')) return html(await agentPage(config.backend, identity, routeId(path, '/console/agents/'), session.csrf));

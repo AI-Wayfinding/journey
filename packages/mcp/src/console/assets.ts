@@ -1,5 +1,5 @@
 // Same system-font, semantic form baseline as packages/apps/src/style.css.
-export const style = `:root{font:15px/1.5 system-ui,sans-serif;color-scheme:light dark}body{margin:0 auto;padding:1rem;max-width:60rem}p[role=note]{border:1px solid currentColor;padding:.65rem;font-size:.9rem}h1{font-size:1.5rem}h2{font-size:1.1rem}section,form{margin:1rem 0}label{display:block;margin:.5rem 0}input,select,button{font:inherit;padding:.35rem;max-width:100%;box-sizing:border-box}button{margin-right:.5rem}ul{padding-left:1.2rem}li{margin:.75rem 0;overflow-wrap:anywhere}fieldset{border:1px solid currentColor;margin:1rem 0}small{display:block;margin-left:1.5rem}nav{display:flex;gap:1rem;flex-wrap:wrap}pre{white-space:pre-wrap;overflow-wrap:anywhere}#status{min-height:1.5em}:focus-visible{outline:3px solid Highlight;outline-offset:3px}`;
+export const style = `:root{font:15px/1.5 system-ui,sans-serif;color-scheme:light dark}body{margin:0 auto;padding:1rem;max-width:60rem}p[role=note]{border:1px solid currentColor;padding:.65rem;font-size:.9rem}h1{font-size:1.5rem}h2{font-size:1.1rem}section,form{margin:1rem 0}label{display:block;margin:.5rem 0}input,select,button{font:inherit;padding:.35rem;max-width:100%;box-sizing:border-box}button{margin-right:.5rem}ul{padding-left:1.2rem}li{margin:.75rem 0;overflow-wrap:anywhere}fieldset{border:1px solid currentColor;margin:1rem 0}small{display:block;margin-left:1.5rem}nav{display:flex;gap:1rem;flex-wrap:wrap}pre{white-space:pre-wrap;overflow-wrap:anywhere}#status{min-height:1.5em}:focus-visible{outline:3px solid Highlight;outline-offset:3px}.notice{padding:.5rem .75rem;border-left:4px solid #2e7d32;background:color-mix(in srgb,#2e7d32 12%,transparent)}.passkeys{list-style:none;padding:0}.passkey{display:grid;gap:.25rem;padding:.75rem 0;border-bottom:1px solid color-mix(in srgb,currentColor 15%,transparent)}.passkey .meta{opacity:.75;font-size:.9em}`;
 export const webauthn = `
 const decode = text => Uint8Array.from(atob(text.replaceAll('-', '+').replaceAll('_', '/')), c => c.charCodeAt(0));
 const encode = buffer => btoa(String.fromCharCode(...new Uint8Array(buffer))).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
@@ -29,7 +29,7 @@ for (const form of document.querySelectorAll('form[data-ceremony]')) form.addEve
     const response = await post(form.action, registering ? { credential } : { change, assertion: credential });
     const destination = new URL(response.url);
     if (destination.origin !== location.origin) throw new Error('Unexpected response.');
-    location.assign(destination.pathname);
+    location.assign(destination.pathname + destination.search);
   } catch (error) { status.textContent = error instanceof Error ? error.message : 'Passkey confirmation failed.'; }
   finally { button.disabled = false; }
 });`;
