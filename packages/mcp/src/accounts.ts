@@ -35,8 +35,11 @@ export class AccountsHost {
     return this.serial.run(async () => {
       const operation = recordOperation.parse(supplied), raw = await this.storage.get('console:records');
       let records: Record<string, ConsoleRecord> = {};
-      try { records = raw === undefined ? {} : z.record(z.string(), consoleRecord).parse(JSON.parse(String(raw))); }
-      catch { throw new Refused('Invalid stored console sessions'); }
+      // Drop records that no longer match the schema (e.g. written by an older deploy) one by one; one bad record must not lock everyone out.
+      try {
+        const stored = raw === undefined ? {} : z.record(z.string(), z.unknown()).parse(JSON.parse(String(raw)));
+        for (const [id, value] of Object.entries(stored)) { const parsed = consoleRecord.safeParse(value); if (parsed.success) records[id] = parsed.data; }
+      } catch { records = {}; }
       const active = Object.fromEntries(Object.entries(records).filter(([, record]) => record.expiresAt > this.now()));
       const previous = active[operation.id];
       if (operation.op === 'put') {
