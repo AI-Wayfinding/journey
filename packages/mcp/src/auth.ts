@@ -61,8 +61,7 @@ export function createVerifier(options: VerifierOptions): OAuthTokenVerifier {
         scopes: scopesOf(payload),
         expiresAt: exp,
         resource: audienceFor(payload, options.resource),
-        // sid is the AuthKit session; the console needs it to end that session on sign-out.
-        extra: typeof payload['sid'] === 'string' && payload['sid'].length <= 200 ? { sub, sid: payload['sid'] } : { sub },
+        extra: { sub },
       };
     },
   };
