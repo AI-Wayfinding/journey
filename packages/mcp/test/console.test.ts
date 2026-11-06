@@ -61,11 +61,11 @@ test('console: OAuth metadata and PKCE login create an eight-hour hardened sessi
   const cookie = login.finish.headers.get('set-cookie')!;
   for (const flag of ['HttpOnly', 'Secure', 'SameSite=Lax', 'Max-Age=28800', 'Path=/']) assert.ok(cookie.includes(flag), flag);
   assert.doesNotMatch(cookie, /Domain=/i);
-  assert.match(await (await f.send('/console', { headers: { cookie: login.cookie } })).text(), /Journeys.*Agents.*Connected clients/s);
+  assert.match(await (await f.send('/console', { headers: { cookie: login.cookie } })).text(), /Journeys.*Agents.*Connect your agent/s);
 });
 
 
-test('console: passkey registration, exact card assertion and client binding use real WebAuthn', async () => {
+test('console: passkey registration and exact card assertions use real WebAuthn; legacy client binding is refused', async () => {
   const f = await fixture(), login = await f.login(), key = await authenticator();
   const home = await (await f.send('/console', { headers: { cookie: login.cookie } })).text();
   const csrf = csrfOf(home);
@@ -90,15 +90,9 @@ test('console: passkey registration, exact card assertion and client binding use
   assert.deepEqual((await f.backend.execute('alice', parseCommand('agent_capabilities', { agentId }), clientId)).capabilities, ['post']);
   assert.equal((await post('/console/authorize/complete', { change, assertion })).status, 403);
   const bind = { kind: 'bind', agentId, clientId: 'assistant' };
+  assert.equal((await post('/console/authorize/options', { change: bind })).status, 403, 'client binding only happens at OAuth consent');
   assert.equal((await post('/console/authorize/complete', { change: bind, assertion })).status, 403);
-  const binding = await (await post('/console/authorize/options', { change: bind })).json() as { challenge: string };
-  assert.equal((await post('/console/authorize/complete', { change: bind, assertion: await key.assert(binding.challenge, 2) })).status, 303);
-  assert.equal((await f.backend.execute('alice', parseCommand('client_list', {}), 'assistant')).actingAgent, agentId);
-  await assert.rejects(f.backend.execute('alice', parseCommand('account_read', {}), 'assistant'));
-  const unbind = { kind: 'unbind', agentId, clientId: 'assistant' };
-  const unbindOptions = await (await post('/console/authorize/options', { change: unbind })).json() as { challenge: string };
-  assert.equal((await post('/console/authorize/complete', { change: unbind, assertion: await key.assert(unbindOptions.challenge, 3) })).status, 303);
-  assert.equal((await f.backend.execute('alice', parseCommand('client_list', {}), 'assistant')).actingAgent, undefined);
+  assert.equal((await post('/console/authorize/start', bind)).status, 403);
   assert.equal((await post('/console/agents/narrow', { agentId, capabilities: ['post'] })).status, 303);
   assert.deepEqual((await f.backend.execute('alice', parseCommand('agent_capabilities', { agentId }), clientId)).capabilities, []);
   assert.equal((await post('/console/agents/remove', { agentId })).status, 303);
@@ -115,16 +109,15 @@ test('console: CSRF, foreign origins, oversized bodies and hostile form fields c
   assert.equal((await post(JSON.stringify({ csrf, name: 'x'.repeat(100_000) }))).status, 403);
   assert.equal((await post(`csrf=${csrf}&csrf=${csrf}&name=duplicate`, origin, 'application/x-www-form-urlencoded')).status, 403);
   assert.deepEqual((await f.backend.execute('alice', parseCommand('agent_list', {}), clientId)).agents, []);
-  assert.equal((await post(JSON.stringify({ csrf, name: 'Allowed', capabilities: ['read'], subject: 'mallory', live: true }))).status, 303);
-  const agents = (await f.backend.execute('alice', parseCommand('agent_list', {}), clientId)).agents as { name: string; capabilities: string[] }[];
-  assert.equal(agents[0]!.name, 'Allowed'); assert.deepEqual(agents[0]!.capabilities, []);
+  assert.equal((await post(JSON.stringify({ csrf, name: 'Allowed', capabilities: ['read'], subject: 'mallory', live: true }))).status, 404);
+  assert.deepEqual((await f.backend.execute('alice', parseCommand('agent_list', {}), clientId)).agents, [], 'the old create-agent route is gone');
   // Browsers that hide the origin send `Origin: null`; only a same-origin Sec-Fetch-Site makes that acceptable.
   const nullOrigin = (site?: string) => f.send('/console/agents/create', { method: 'POST', redirect: 'manual', headers: { cookie: login.cookie, origin: 'null', 'content-type': 'application/x-www-form-urlencoded', ...(site ? { 'sec-fetch-site': site } : {}) }, body: `csrf=${csrf}&name=Null+origin` });
   assert.equal((await nullOrigin()).status, 403);
   assert.equal((await nullOrigin('cross-site')).status, 403);
   assert.equal((await nullOrigin('same-site')).status, 403);
-  assert.equal((await nullOrigin('same-origin')).status, 303);
-  assert.match((await f.send('/console', { headers: { cookie: login.cookie } })).headers.get('referrer-policy')!, /^same-origin$/);
+  assert.equal((await nullOrigin('same-origin')).status, 404);
+  assert.equal((await f.send('/console', { headers: { cookie: login.cookie } })).headers.get('referrer-policy'), 'same-origin');
 });
 
 test('console: OAuth state is cookie-bound, expires, and a callback can be exchanged only once', async () => {
@@ -183,7 +176,7 @@ test('console: tampered, expired and logged-out session cookies are refused; log
   const marker = loggedOut.headers.getSetCookie().find(c => c.startsWith('__Host-wayfinding-signed-out=1'))!.split(';')[0]!;
   const again = new URL((await f.send('/console/login', { headers: { cookie: marker } })).headers.get('location')!);
   assert.equal(again.searchParams.get('prompt'), 'login', 'after sign-out AuthKit must ask again instead of signing straight back in');
-  assert.equal(new URL((await f.send('/console/login')).headers.get('location')!).searchParams.get('prompt'), null);
+  assert.equal(new URL((await f.send('/console/login')).headers.get('location')!).searchParams.get('prompt'), 'login');
   const expired = await f.login(); f.advance(28_800_001);
   signedOut(await f.send('/console', { redirect: 'manual', headers: { cookie: expired.cookie } }));
 });
@@ -422,7 +415,7 @@ test('console: passkeys show a label and last use instead of the raw id, can be 
   assert.match(await page(), /<strong>Passkey<\/strong>/, 'an empty name falls back to the provider label');
 });
 
-test('console: an invited person can accept from the console, sees how to connect an agent, and is told to add a passkey first', async () => {
+test('console: an invited person can accept from the console, sees consent-first connection steps, and needs a passkey only to widen later', async () => {
   const f = await fixture();
   const journeyId = String((await f.backend.execute('alice', parseCommand('journey_create', { name: 'Invite probe' }), clientId)).journeyId);
   await f.backend.execute('bob', parseCommand('account_read', {}), clientId);
@@ -432,15 +425,15 @@ test('console: an invited person can accept from the console, sees how to connec
   const home = await (await f.send('/console', { headers })).text();
   assert.match(home, /Invite probe<\/strong> · You are invited/);
   assert.doesNotMatch(home, /href="\/console\/journeys\//, 'an invitee cannot open the journey before accepting');
-  assert.match(home, /Connect your agent/); assert.match(home, /claude mcp add --transport http wayfinding/);
-  assert.match(home, /<a href="\/console\/passkeys">Add a passkey<\/a>/);
+  assert.match(home, /Connect your agent/); assert.match(home, /Name the agent and choose its capabilities and journeys/);
+  assert.doesNotMatch(home, /Add agent<|Bind with passkey/);
   const csrf = csrfOf(home), form = { ...headers, origin, 'content-type': 'application/x-www-form-urlencoded' };
   const joined = await f.send('/console/journeys/join', { method: 'POST', redirect: 'manual', headers: form, body: new URLSearchParams({ csrf, journeyId }).toString() });
   assert.equal(joined.status, 303); assert.equal(joined.headers.get('location'), '/console?notice=joined');
   const after = await (await f.send('/console?notice=joined', { headers })).text();
   assert.match(after, /You joined the journey\./); assert.match(after, new RegExp(`href="/console/journeys/${journeyId}">Invite probe`));
   const agentId = String((await f.backend.execute('bob', parseCommand('agent_create', { name: 'Helper' }), clientId)).agentId);
-  assert.match(await (await f.send(`/console/agents/${agentId}`, { headers })).text(), /You need a passkey to give this agent capabilities/);
+  assert.match(await (await f.send(`/console/agents/${agentId}`, { headers })).text(), /Widening needs your passkey/);
   const options = await f.send('/console/authorize/options', { method: 'POST', headers: { ...headers, origin, 'content-type': 'application/json' }, body: JSON.stringify({ csrf, change: { kind: 'card', agentId, capabilities: ['post'] } }) });
   assert.equal(options.status, 409); assert.match(String((await options.json() as { error: string }).error), /Add a passkey first/);
   const stranger = String((await f.backend.execute('alice', parseCommand('journey_create', { name: 'Not invited' }), clientId)).journeyId);

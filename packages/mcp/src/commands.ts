@@ -148,6 +148,8 @@ export type ToolData = Record<string, unknown>;
 export type TaskMethod = 'get' | 'update' | 'cancel';
 export interface CoordinationBackend {
   execute(subject: string, command: Command, clientId?: string): Promise<ToolData>;
+  oauth?(operation: import('./oauth-contract.ts').OAuthOperation): Promise<import('./oauth-contract.ts').OAuthResult>;
+  whoami?(subject: string, clientId: string): Promise<ToolData>;
   inbox?(subject: string, journeyId: string, clientId?: string): Promise<ToolData>;
   watchInbox?(subject: string, journeyId: string, clientId?: string): Promise<ReadableStream<Uint8Array>>;
   task?(subject: string, method: TaskMethod, taskId: string, clientId?: string): Promise<ToolData>;

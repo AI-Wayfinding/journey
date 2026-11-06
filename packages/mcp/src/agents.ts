@@ -5,7 +5,7 @@ import { cardRule, cell, scalar, type Snapshot } from './rules.ts';
 import { Refused } from './commands.ts';
 const natural = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const snapshotSchema = z.object({ scalars: z.record(z.string(), natural), maps: z.record(z.string(), z.array(z.tuple([natural, natural]))), defaults: z.record(z.string(), natural).optional() }).strict();
-export const actorSchema = z.object({ personId: z.string().min(1).max(200), agent: z.object({ id: z.string().min(1).max(200), name: z.string().max(4096), live: z.boolean(), card: snapshotSchema }).strict().optional() }).strict();
+export const actorSchema = z.object({ personId: z.string().min(1).max(200), agent: z.object({ id: z.string().min(1).max(200), name: z.string().max(4096), live: z.boolean(), card: snapshotSchema }).strip().optional() }).strict();
 export const assertionSchema = z.object({ id: z.string(), rawId: z.string(), type: z.literal('public-key'), clientExtensionResults: z.object({}).strip(),
   response: z.object({ clientDataJSON: z.string(), authenticatorData: z.string(), signature: z.string(), userHandle: z.string().optional() }).strict() }).strict();
 
@@ -17,7 +17,7 @@ export const changeSchema = z.discriminatedUnion('kind', [
 ]);
 export type CardChange = z.infer<typeof changeSchema>;
 export interface ClientIdentity { subject: string; clientId: string }
-export interface AccountAgent { id: string; name: string; live: boolean; card: Snapshot }
+export interface AccountAgent { id: string; name: string; live: boolean; card: Snapshot; clientId?: string; clientName?: string; createdAt?: number; lastUsedAt?: number; journeys?: string[]; authorizationPending?: boolean; pendingConsentId?: string }
 export interface Actor { personId: string; agent?: AccountAgent }
 /** aaguid names the provider (e.g. 1Password); name is the person's own label. Older records lack the optional fields. */
 export interface PasskeyCredential { id: string; publicKey: number[]; counter: number; aaguid?: string; name?: string; createdAt?: number; lastUsedAt?: number }

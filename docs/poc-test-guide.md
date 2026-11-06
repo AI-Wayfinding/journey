@@ -6,21 +6,25 @@ Wayfinding gives a team and its agents a shared journey: membership, tasks, arti
 
 ## What is new in v2
 
-The server now runs v2 state. Journeys created before the v2 deploy are not carried over; create a new one.
+This revision adds a Worker authorization server without replacing Durable Object classes or clearing existing journeys. It has not been deployed by this change. Existing MCP clients must sign in again after deployment; their AuthKit tokens no longer work at `/mcp`.
+
+### Connect and name an agent
+
+1. Add `https://poc.wayfinding.support/mcp` in your MCP client. In Claude Code, run `claude mcp add --transport http wayfinding https://poc.wayfinding.support/mcp`, then `/mcp` to sign in.
+2. Sign in through AuthKit. Wayfinding requires a sign-in from the past ten minutes. An older console session sends you through sign-in again.
+3. Name the agent (up to 60 characters). Read and post are suggested. Choose the capabilities and journeys it needs, then select **Allow**. Selecting **Deny** must return `access_denied` without creating an agent.
+4. Call `whoami`. Check the person ID and the acting agent's ID, name, capabilities and journeys. The connection always acts as that agent. It cannot become the person or choose somebody else's agent.
+5. Sign in again from the same client. The existing live agent must be pre-filled and updated, not duplicated.
 
 ### Console
 
-Open `https://poc.wayfinding.support/console` and sign in with the same Staging account. A signed-out visit redirects to sign-in. The console lists your journeys, agents and connected clients. It is the only place to:
+Open `https://poc.wayfinding.support/console` with the same Staging account. It lists your journeys and agents. Each agent shows its client, capabilities, journeys, creation and last-use times. Open an agent to rename it, change its journeys, narrow its card or delete it. Widening in the console requires a passkey. Initial access and reauthorisation use the fresh sign-in instead.
 
-- register a **passkey**;
-- **widen** an agent's card (add capabilities), confirmed with a fresh passkey assertion;
-- **bind** a connected client to an agent, so that client always acts as that agent.
-
-Narrowing a card or removing an agent needs no passkey. Each journey page links to its library, forum and rounds.
+There is no **Add agent** form or separate client binding step. `agent_create` and `agent_add` cannot be used by an MCP agent connection. `agent_list`, `agent_capabilities`, `agent_narrow` and `agent_remove` remain available. Removal immediately revokes its tokens and removes journey memberships. Narrowing applies on the next call.
 
 ### Agents and capabilities
 
-`agent_create` makes an account-level agent with an **empty card**. An agent can do nothing until you widen its card in the console. Capabilities are named, for example `artifact.write`, `post`, `topic.create`, `round.contribute` and `member.invite`; `agent_capabilities` shows them for one journey. An agent never holds more than its owner. `agent.add`, `client.bind`, `card.change`, `passkey.manage` and `grant.issue` are never assignable. Add the agent to a journey with `agent_add`, then act as it by passing `actingAgent`, or bind a client in the console.
+Capabilities include `artifact.write`, `post`, `topic.create`, `round.contribute` and `member.invite`. Journey roles and ownership still limit them. `agent.add`, `client.bind`, `card.change`, `passkey.manage` and `grant.issue` are never assignable. Select `journey.create` if the agent needs to create a journey. Sign into the console once before another person invites you by email. MCP connections do not expose the private `account_read` profile.
 
 ### Library
 
@@ -62,14 +66,15 @@ The earlier account provisioning blocker no longer occurs. This run found no app
 - Arrange two synthetic accounts in **WorkOS Staging**, with verified email and password sign-in. Use an unclaimed domain such as `test.wayfinding.support`. Avoid `example.com`: the Staging Test Organization claims it and changes the sign-in route.
 - Keep passwords out of chat, shell history and Git. An operator creating accounts needs the Staging API key; MCP users do not.
 
-The current endpoint is `https://poc.wayfinding.support/mcp`. Its sign-in issuer is `https://welcoming-folk-53-staging.authkit.app`.
+The MCP endpoint is `https://poc.wayfinding.support/mcp`. Its OAuth issuer is `https://poc.wayfinding.support`. AuthKit Staging (`https://welcoming-folk-53-staging.authkit.app`) handles only the upstream console sign-in.
 
 ### Server setup (deployment operator only)
 
-The Worker needs a **`WORKOS_API_KEY` secret** for account profile provisioning. It must be a Staging User Management key matching the Staging issuer, not a client token. Set it through Wrangler's hidden prompt from `packages/mcp` with `npx wrangler secret put WORKOS_API_KEY`. Never put its value in `wrangler.jsonc`, Git or a command argument. `npx wrangler secret list` shows names only. Changing a secret can publish a Worker version, so do not run the setup command during a no-deploy smoke test. An MCP client user needs no API key.
+The Worker still needs its existing **`WORKOS_API_KEY` secret** for Staging profile provisioning and **`CONSOLE_SECRET`** (at least 32 bytes) for console sessions. Keep the existing `AUTHKIT_ISSUER`, `AUTHKIT_AUTHORIZE_URL` and `MCP_RESOURCE` variables. No new secret or binding is required. `MCP_RESOURCE` determines the new issuer origin. Keep the current Accounts and Journey Durable Object classes and migrations unchanged. Do not reset data. Retain the AuthKit registration of `/console/client.json` with `/console/callback` as its redirect. Changing secrets can publish a Worker version, so this no-deploy change does not set any.
 
 ## Connect the local proxy
 
+The local proxy remains required to encrypt and decrypt sealed artifact content. Give its agent the account capability `device.keys` at Worker consent. It starts unchecked, including on reauthorization. Select it and confirm with a registered passkey; a fresh login alone cannot grant it. Ordinary remote coordination clients should leave it off. The automated tests cover proxy bootstrap and a sealed-content round-trip with a Worker agent token; this version has not had a live smoke test.
 Add this server to a client's local MCP configuration, for example Claude Code's `.mcp.json`. Replace both absolute paths; JSON arguments do not expand `~`.
 
 ```json
@@ -88,13 +93,13 @@ Add this server to a client's local MCP configuration, for example Claude Code's
 
 The default store is `~/.wayfinding` when `--store` is omitted. Use a new store per device and per test account. An existing directory must belong to you and have mode `0700`; its records use `0600`. Do not share a store between running proxies.
 
-The client launches the proxy. Open the **Sign in to Wayfinding** URL from its stderr log. Enter the synthetic email, continue to the password page, wait for it to load, then click exactly **Sign in**, not **Sign in with a passkey**. On consent, wait until **Allow access** is enabled and approve the loopback redirect you just started. Return to the MCP client after the callback says you are signed in. The first connection may take longer than the client's usual startup timeout.
+The client launches the proxy. Open the **Sign in to Wayfinding** URL from its stderr log and sign in with the synthetic account. On the Worker consent page, name the proxy agent, choose its journey capabilities and journeys, and select **Manage device keys and sealed content** (`device.keys`). Register a passkey through the page link if needed, then return to consent. Select **Allow** and confirm with that passkey. Return to the MCP client after the loopback callback says you are signed in. The first connection may take longer than the client's usual startup timeout.
 
 For a two-person test, use separate client processes and browser profiles. Add `"--port", "8721"` to A's arguments and `"--port", "8722"` to B's. Give each a separate absolute store path. The default loopback port is `8717`.
 
 ## Connect a remote client with Apps support
 
-In Claude or ChatGPT, add a custom MCP connector using `https://poc.wayfinding.support/mcp` and complete the Staging sign-in and consent. Availability and labels depend on the client's plan and version. An Apps-capable host can show the journey's embedded views.
+In pi, Claude Code or another remote MCP client, add `https://poc.wayfinding.support/mcp`. Follow sign-in, name the agent, choose its capabilities and journeys, then select **Allow**. Pi uses a Client ID Metadata Document; Claude Code uses dynamic client registration. Hosted clients and Apps support still need a live compatibility check.
 
 The remote connection offers coordination, metadata and encrypted relay tools. It does **not** decrypt content. Remote `artifact_create` is a metadata tool, unlike the local proxy's content tool with the same name. Use the local proxy for plaintext artifact creation, reading, copying and moving. This guide does not establish that any particular hosted client's connector or Apps UI works.
 

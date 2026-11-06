@@ -6,6 +6,11 @@ import type { Client } from '@modelcontextprotocol/client';
 type Rpc = { jsonrpc: string; id?: number; method?: string; params?: Record<string, unknown>; result?: unknown };
 type Listener = (event: { preventDefault(): void }) => void;
 class Element {
+  id = ''; className = ''; dataset: Record<string, string> = {}; attributes = new Map<string, string>();
+  ariaLabel: string | null = null; ariaPressed: string | null = null; ariaCurrent: string | null = null;
+  setAttribute(key: string, value: string) { this.attributes.set(key, value); }
+  prepend(...elements: Element[]) { this.children.unshift(...elements); }
+  descendants(): Element[] { return this.children.flatMap(c => [c, ...c.descendants()]); }
   ownText = '';
   children: Element[] = [];
   value = '';
@@ -15,6 +20,7 @@ class Element {
   get textContent(): string { return this.ownText + this.children.map((c) => c.textContent).join(' '); }
   append(...elements: Element[]) { this.children.push(...elements); }
   replaceChildren(...elements: Element[]) { this.ownText = ''; this.children = elements; }
+
   addEventListener(name: string, callback: Listener) { this.listeners.set(name, callback); }
   dispatch(name: string) { this.listeners.get(name)?.({ preventDefault() {} }); }
 }
@@ -34,8 +40,10 @@ export class AppsHost {
     void this.receive(message).catch((error: unknown) => { this.errors.push(error); });
   } };
   constructor(html: string, client: Client) {
-    for (const match of html.matchAll(/id="([^"]+)"/g)) this.nodes.set(match[1]!, new Element());
-    for (const form of html.matchAll(/<form id="([^"]+)">([\s\S]*?)<\/form>/g)) {
+    // IDs inside bundled JavaScript are not static DOM elements.
+    const markup = html.slice(0, html.indexOf('<script>'));
+    for (const match of markup.matchAll(/id="([^"]+)"/g)) this.nodes.set(match[1]!, new Element());
+    for (const form of markup.matchAll(/<form id="([^"]+)">([\s\S]*?)<\/form>/g)) {
       for (const field of form[2]!.matchAll(/name="([^"]+)"/g)) this.fields.set(`${form[1]}:${field[1]}`, new Element());
     }
     const kind = /data-view="([^"]+)"/.exec(html)![1]!;
@@ -48,9 +56,10 @@ export class AppsHost {
     const script = /<script>([\s\S]*?)<\/script>/.exec(html)![1]!;
     runInNewContext(script, { window, document: {
       body: { dataset: { view: kind } },
-      getElementById: (id: string) => this.nodes.get(id) ?? null,
+      getElementById: (id: string) => this.nodes.get(id) ?? this.nodes.get('overview')?.descendants().find(e => e.id === id) ?? null,
       createElement: () => new Element(),
-      querySelectorAll: () => [...html.matchAll(/<button[^>]*id="([^"]+)"/g)].map(m => this.nodes.get(m[1]!)!),
+      createElementNS: () => new Element(),
+      querySelectorAll: () => [...markup.matchAll(/<button[^>]*id="([^"]+)"/g)].map(m => this.nodes.get(m[1]!)!),
       querySelector: (selector: string) => { const m = /#([^ ]+) \[name="([^"]+)"\]/.exec(selector)!; return this.fields.get(`${m[1]}:${m[2]}`); },
     }, console: { debug() {}, warn() {}, error: (...args: unknown[]) => { this.errors.push(args); } },
     setTimeout: (callback: () => void, delay: number) => { const timer = setTimeout(() => { this.timers.delete(timer); callback(); }, delay); this.timers.add(timer); return timer; },

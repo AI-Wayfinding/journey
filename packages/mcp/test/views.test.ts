@@ -25,7 +25,7 @@ async function fixture(t: TestContext) {
   const journeyId = (await call(alice, 'journey_create', { name: 'Views journey', policy: 'open', defaultRole: 'write' })).journeyId;
   await call(bob, 'journey_join', { journeyId });
   async function host(kind: string, tool: string, args: Data) {
-    const resource = (await alice.readResource({ uri: `ui://wayfinding/${kind === 'forum' ? 'v3' : 'v2'}/${kind}.html` })).contents[0]!;
+    const resource = (await alice.readResource({ uri: `ui://wayfinding/${kind === 'forum' ? 'v4' : 'v3'}/${kind}.html` })).contents[0]!;
     assert.ok('text' in resource);
     assert.match(resource.text, /Your conversation goes to your AI provider/); assert.match(resource.text, /synthetic data only/i);
     const h = new AppsHost(resource.text, alice); t.after(() => h.dispose());
@@ -43,12 +43,29 @@ test('views: released URI bytes stay identical while new resources and app-only 
     ['ui://wayfinding/v1/project.html', '7e182e64d5b5e60d3d72417e65d5791b116d6ba0ac4bc45bad149efd32ddc0e7'],
     ['ui://wayfinding/v1/artifacts.html', '3781a3ece862f60510e88f83a2aef6949d886f09852c03457fe814e022cde6b0'],
     ['ui://wayfinding/v2/forum.html', '524ae7b42d7bfeaa3e7c8df1704c542c6f116d16681c7770c9646459058dfbc6'],
+    ['ui://wayfinding/v2/library.html', '739856fff80f11e19d8d9cbbd8fad897d57823a77e148ae76ff0271ced1a662d'],
+    ['ui://wayfinding/v3/forum.html', '682dc2eb38112274afc394b0ac7ca88d3a29fcbacc306deb4a4a0b210c261405'],
+    ['ui://wayfinding/v2/round.html', 'f55c84edd3919fbf18d4083c50680688529b54e941a08beb63826aa0c99cca27'],
+    ['ui://wayfinding/v2/agents.html', '2016fe4ecf8bfdf0bed3635c10ffe27b4c3f1c8905744cf8ee77d55fe1ea50c2'],
   ];
   for (const [uri, hash] of expected) assert.equal(createHash('sha256').update(releasedViews.find(v => v.uri === uri)!.html).digest('hex'), hash);
   const f = await fixture(t), resources = (await f.alice.listResources()).resources.map(r => r.uri);
   for (const uri of ['ui://wayfinding/v2/library.html', 'ui://wayfinding/v2/round.html', 'ui://wayfinding/v2/agents.html', 'ui://wayfinding/v3/forum.html']) assert.ok(resources.includes(uri), uri);
   const tools = (await f.alice.listTools()).tools;
   for (const name of ['apps_v2_library', 'apps_v2_round', 'apps_v2_interview_read', 'apps_v2_interview_write', 'apps_v2_interview_share', 'apps_v2_contribute', 'apps_v2_forum', 'apps_v2_reply', 'apps_v2_agents']) assert.deepEqual((tools.find(tool => tool.name === name)!._meta!.ui as { visibility: string[] }).visibility, ['app']);
+});
+
+test('views: tool launchers use the current successor URIs', async t => {
+  const f = await fixture(t), tools = (await f.alice.listTools()).tools;
+  const launchers = [
+    ['ui://wayfinding/v3/library.html', ['library_view', 'apps_v2_library']],
+    ['ui://wayfinding/v3/round.html', ['round_view', 'apps_v2_round', 'apps_v2_interview_read', 'apps_v2_interview_write', 'apps_v2_interview_share', 'apps_v2_contribute']],
+    ['ui://wayfinding/v3/agents.html', ['agent_capabilities_view', 'apps_v2_agents']],
+    ['ui://wayfinding/v4/forum.html', ['forum_view', 'forum_topic_create_view', 'forum_post_create_view', 'forum_view_v3', 'apps_v2_forum', 'apps_v2_topic', 'apps_v2_reply']],
+  ] as const;
+  for (const [uri, names] of launchers) for (const name of names) {
+    assert.equal((tools.find(tool => tool.name === name)?._meta?.ui as { resourceUri: string } | undefined)?.resourceUri, uri, name);
+  }
 });
 
 test('views: library filters, metadata detail and attached conversation run through the bundled host', async t => {
@@ -58,6 +75,13 @@ test('views: library filters, metadata detail and attached conversation run thro
   await f.call(f.alice, 'library_add', { journeyId: f.journeyId, name: 'Project-only', projectId: rows(project, 'projects')[0]!.projectId, text: 'x' });
   const h = await f.host('library', 'library_view', { journeyId: f.journeyId });
   assert.match(h.text, /<b>Heading<\/b>/); assert.doesNotMatch(h.text, /Project-only|ARTIFACT-SECRET/);
+  assert.equal(h.nodes.get('overview')!.descendants().find(e => e.dataset.kind === 'prompt')?.className, 'wf-card');
+  h.click('layout-list');
+  assert.equal(h.nodes.get('overview')!.descendants().find(e => e.id === 'library-grid')?.className, 'wf-grid wf-list');
+  assert.equal(h.nodes.get('layout-list')!.ariaPressed, 'true');
+  assert.equal(h.nodes.get('layout-grid')!.ariaPressed, 'false');
+  h.click('layout-grid');
+  assert.equal(h.nodes.get('overview')!.descendants().find(e => e.id === 'library-grid')?.className, 'wf-grid');
   h.submit('filters', { query: 'heading', kind: 'prompt', label: 'heading', projectId: '', includeProjects: 'false' });
   await h.until(() => h.messages.some(m => m.method === 'tools/call') && h.nodes.get('status')!.textContent === 'Up to date.');
   h.submit('item', { itemId: String(item.itemId) }); await h.until(() => h.text.includes('Conversation'));
@@ -75,6 +99,7 @@ test('views: round host shows lifecycle, own interview, sharing, contribution at
   await f.call(f.bob, 'interview_write', { roundId: round.roundId, text: 'BOB-PRIVATE' });
   const h = await f.host('round', 'round_view', { journeyId: f.journeyId, roundId: round.roundId });
   assert.match(h.text, /Listen carefully.*planned.*open.*synthesising.*closed/s); assert.doesNotMatch(h.text, /BOB-PRIVATE/);
+  assert.equal(h.nodes.get('overview')!.descendants().find(e => e.ariaCurrent === 'step')?.textContent, 'open');
   h.click('my-interview'); await h.until(() => h.text.includes('My interview'));
   h.submit('interview', { text: 'My private words' }); await h.until(() => h.text.includes('My private words'));
   assert.equal((await f.call(f.alice, 'interview_read', { roundId: round.roundId })).text, 'My private words');

@@ -30,7 +30,7 @@ export async function formBody(request: Request, csrf: string, origin: string): 
     body = {};
     for (const key of new Set(fields.keys())) {
       const values = fields.getAll(key);
-      if (key === 'capabilities') body[key] = values;
+      if (key === 'capabilities' || key === 'journeys') body[key] = values;
       else if (values.length === 1) body[key] = values[0];
       else throw new Refused('Duplicate form field');
     }

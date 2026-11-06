@@ -6,13 +6,15 @@ import { relay, decodeBytes, type BlobStore } from './relay.ts';
 import { bindingRule, cardRule, scalar } from './rules.ts';
 import { assertionSchema, changeSchema, changeDigest, base64url, cardCaps, stepCard, requireAccountCapability, WebAuthnVerifier, type AgentAccount, type Actor, type ClientIdentity, type CardChange, type PasskeyVerifier } from './agents.ts';
 import type { AuthenticationResponseJSON } from '@simplewebauthn/server';
+import { oauthOperation, type OAuthOperation, type OAuthResult, type OAuthState } from './oauth-contract.ts';
+import { oauthStep, tokenHash, randomToken } from './oauth-store.ts';
 
 import { recordOperation, consoleRecord, passkeyOperation, type RecordOperation, type ConsoleRecord, type PasskeyOperation } from './console/contract.ts';
 import { managePasskey } from './console/passkeys.ts';
 export interface Profile { name: string; email: string }
 export interface Profiles { get(subject: string): Promise<Profile> }
 export interface Account extends Profile, AgentAccount { subject: string; personId: string; nickname?: string; group: Snapshot; identities: { id: string; name: string; kind: 'device' | 'agent' }[] }
-interface AccountsState { rulesHash: RulesStamp; accounts: Account[]; journeys: string[] }
+interface AccountsState { rulesHash: RulesStamp; accounts: Account[]; journeys: string[]; oauth?: OAuthState }
 
 export class AccountsHost {
   private readonly serial = new Serial();
@@ -28,6 +30,14 @@ export class AccountsHost {
     if (typeof raw !== 'string') throw new Refused('Invalid stored accounts');
     const state = JSON.parse(raw) as AccountsState;
     if (!sameRules(state.rulesHash)) throw new Refused('Stored accounts use different rules');
+    if (state.rulesHash.card !== RULES.card) {
+      // Preserve every old capability, including sparse defaults, without inheriting new device authority.
+      for (const agent of state.accounts.flatMap(a => a.agents)) {
+        agent.card.maps.Caps = Array.from({ length: 20 }, (_, id): [number, number] => [id, cell(agent.card, 'Caps', id)]);
+        if (agent.card.defaults) delete agent.card.defaults.Caps;
+      }
+    }
+    state.rulesHash = RULES;
     return state;
   }
   /** Host-only bounded session registry; a single replacement makes take/delete atomic. */
@@ -48,6 +58,40 @@ export class AccountsHost {
       } else if (operation.op !== 'read') delete active[operation.id];
       if (operation.op !== 'read' || Object.keys(active).length !== Object.keys(records).length) await this.storage.put('console:records', JSON.stringify(active));
       return operation.op === 'read' || operation.op === 'take' ? previous : undefined;
+    });
+  }
+  oauth(supplied: OAuthOperation): Promise<OAuthResult> {
+    return this.serial.run(async () => {
+      const operation = oauthOperation.parse(supplied), state = await this.load();
+      let deviceAsserted = false;
+      if ((operation.op === 'consent-options' || operation.op === 'consent') && operation.consent.capabilities.includes('device.keys')) {
+        const account = state.accounts.find(a => a.subject === operation.subject && a.live);
+        const request = state.oauth?.requests.find(r => r.id === operation.id && r.request.expiresAt > this.now());
+        if (!account || !request) throw new Refused('Fresh authorization and account required');
+        // Domain-separated digest binds this person's exact pending OAuth request and proposed card.
+        const digest = await tokenHash(JSON.stringify(['device-consent', account.personId, request.id, request.request,
+          operation.consent.name, [...new Set(operation.consent.capabilities)].sort(), [...new Set(operation.consent.journeys)].sort()]));
+        if (operation.op === 'consent-options') {
+          if (!account.passkeys.length) throw new Refused('Register a passkey before authorizing device keys');
+          const challenge = randomToken();
+          account.assertions = account.assertions.filter(a => a.expiresAt > this.now() && a.digest !== digest).slice(-15);
+          account.assertions.push({ challenge, digest, expiresAt: Math.min(this.now() + 300_000, request.request.expiresAt) });
+          await this.storage.put('accounts', JSON.stringify(state));
+          return { kind: 'assertion', challenge, credentials: account.passkeys.map(c => c.id) };
+        }
+        const pending = account.assertions.find(a => a.digest === digest && a.expiresAt > this.now());
+        if (!pending || !operation.assertion) throw new Refused('Device keys require a fresh passkey assertion over this consent');
+        const verified = await this.verifier.verify(operation.assertion, pending.challenge, account.passkeys);
+        const credential = account.passkeys.find(c => c.id === verified.credentialId);
+        if (!credential) throw new Refused('Unknown passkey');
+        credential.counter = verified.counter; credential.lastUsedAt = this.now();
+        account.assertions = account.assertions.filter(a => a !== pending);
+        deviceAsserted = true;
+      }
+      const result = await oauthStep(state, operation, this.now(), deviceAsserted);
+      // Persist errors too: refresh reuse must revoke before the error is returned.
+      if (operation.op !== 'client' && !(operation.op === 'request' && !operation.request)) await this.storage.put('accounts', JSON.stringify(state));
+      return result;
     });
   }
   lookup(subject: string): Promise<Account | undefined> {
@@ -148,7 +192,7 @@ export class AccountsHost {
       const state = await this.load(), account = state.accounts.find(a => a.personId === personId);
       if (!account) throw new Refused('Account not found');
       const actor = this.resolve(account, clientId, 'actingAgent' in command.input ? command.input.actingAgent : undefined);
-      const view = (a: Account['agents'][number]) => ({ agentId: a.id, name: a.name, live: a.live, signed: scalar(a.card, 'signed') === 1, capabilities: cardCaps(a.card) });
+      const view = (a: Account['agents'][number]) => ({ agentId: a.id, name: a.name, live: a.live, signed: scalar(a.card, 'signed') === 1, capabilities: cardCaps(a.card), clientId: a.clientId, clientName: a.clientName, createdAt: a.createdAt, lastUsedAt: a.lastUsedAt, journeys: a.journeys ?? [] });
       switch (command.tool) {
         case 'client_list': return { clientId, actingAgent: actor.agent?.id, clients: account.clients.map((id, i) => ({ clientId: id, agentId: cell(account.bindings, 'Bound', i + 1) || cell(account.bindings, 'Revoked', i + 1) ? account.agents[cell(account.bindings, 'Agents', i + 1) - 2]?.id : undefined, bound: cell(account.bindings, 'Bound', i + 1) === 1, revoked: cell(account.bindings, 'Revoked', i + 1) === 1 })) };
         case 'agent_list': return { agents: account.agents.map(view) };
@@ -163,6 +207,11 @@ export class AccountsHost {
           if (command.tool === 'agent_capabilities') return view(agent);
           if (command.tool === 'agent_remove') {
             requireAccountCapability(actor, 'agent.remove'); agent.live = false; agent.card = stepCard(agent.card, 'withdraw');
+            if (state.oauth) {
+              state.oauth.access = state.oauth.access.filter(t => t.agentId !== agent.id);
+              state.oauth.refresh = state.oauth.refresh.filter(t => t.agentId !== agent.id);
+              state.oauth.codes = state.oauth.codes.filter(t => t.agentId !== agent.id);
+            }
             account.bindings = bindingRule.step(account.bindings, { op: 2, client: 0, agent: account.agents.indexOf(agent) + 2, personAsserted: 0, agentIsOwnLive: 0, personLive: +account.live, boundAgentLive: 0 });
           } else {
             const keep = command.tool === 'agent_card' ? [] : cardCaps(agent.card).filter(c => !command.input.remove.includes(c));

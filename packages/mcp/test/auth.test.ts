@@ -54,20 +54,20 @@ test('auth: a valid token on a foreign Host header is refused before the gate', 
   assert.equal(response.status, 403);
 });
 
-test('auth: protected resource metadata names the resource and AuthKit', async () => {
+test('auth: protected resource metadata names the resource and Worker authorization server', async () => {
   const response = await send(METADATA_URL);
   assert.equal(response.status, 200);
   const document = (await response.json()) as Record<string, unknown>;
   assert.equal(document['resource'], 'https://poc.wayfinding.support/mcp');
-  assert.deepEqual(document['authorization_servers'], ['https://welcoming-folk-53-staging.authkit.app']);
+  assert.deepEqual(document['authorization_servers'], ['https://poc.wayfinding.support']);
 });
 
-test('auth: the authorization server metadata mirror names AuthKit endpoints', async () => {
+test('auth: the authorization server metadata names Worker endpoints and S256', async () => {
   const response = await send('https://poc.wayfinding.support/.well-known/oauth-authorization-server');
   assert.equal(response.status, 200);
   const document = (await response.json()) as Record<string, unknown>;
-  assert.equal(document['issuer'], ISSUER);
-  assert.equal(document['token_endpoint'], `${ISSUER}/oauth2/token`);
+  assert.equal(document['issuer'], RESOURCE.origin);
+  assert.equal(document['token_endpoint'], `${RESOURCE.origin}/oauth/token`);
   assert.deepEqual(document['code_challenge_methods_supported'], ['S256']);
 });
 

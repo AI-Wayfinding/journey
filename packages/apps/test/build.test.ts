@@ -19,7 +19,8 @@ test('apps build: released resources are complete inline HTML without external s
   assert.deepEqual(releasedViews.map((view) => view.uri).sort(), [
     'ui://wayfinding/v1/artifacts.html', 'ui://wayfinding/v1/journey.html', 'ui://wayfinding/v1/project.html',
     'ui://wayfinding/v2/agents.html', 'ui://wayfinding/v2/forum.html', 'ui://wayfinding/v2/library.html', 'ui://wayfinding/v2/round.html', 'ui://wayfinding/v3/forum.html',
-  ]);
+    'ui://wayfinding/v3/agents.html', 'ui://wayfinding/v3/library.html', 'ui://wayfinding/v3/round.html', 'ui://wayfinding/v4/forum.html',
+  ].sort());
   for (const view of releasedViews) {
     assert.match(view.html, /^<!doctype html>/);
     assert.match(view.html, /Your conversation goes to your AI provider/);
