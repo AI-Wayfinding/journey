@@ -15,7 +15,10 @@ const namedState = z.object({
   members: z.array(z.object({ memberId: z.string(), name: z.string(), kind: z.enum(['person', 'agent']), role: z.enum(['read', 'write']), guide: z.boolean(), owner: z.string().optional() }).strict()),
   pending: z.array(z.object({ personId: z.string(), name: z.string(), status: z.string() }).strict()),
 });
-export interface AccountsPort {
+import type { OAuthPort, OAuthOperation, AgentConsent } from './oauth-contract.ts';
+import { agentConsent } from './oauth-contract.ts';
+import { cardCaps } from './agents.ts';
+export interface AccountsPort extends OAuthPort {
   consoleRecord(operation: RecordOperation): Promise<ConsoleRecord | undefined>;
   passkey(identity: ClientIdentity, operation: PasskeyOperation): Promise<ToolData>;
   provision(subject: string): Promise<Account>;
@@ -32,6 +35,7 @@ export interface AccountsPort {
   completeAuthorization(identity: ClientIdentity, change: CardChange, assertion: AuthenticationResponseJSON | undefined): Promise<ToolData>;
 }
 export interface JourneyPort {
+  syncAgent(personId: string, agentId: string, name: string, present: boolean): Promise<void>;
   requireGuide(personId: string, command: Command, actor?: Actor): Promise<void>;
   execute(personId: string, command: Command, journeyId?: string, actor?: Actor): Promise<ToolData>;
   summary(personId: string, actor?: Actor): Promise<ToolData | undefined>;
@@ -45,6 +49,54 @@ export class Backend implements CoordinationBackend {
   private readonly accounts: AccountsPort;
   private readonly journey: (id: string) => JourneyPort;
   constructor(accounts: AccountsPort, journey: (id: string) => JourneyPort) { this.accounts = accounts; this.journey = journey; }
+  oauth(operation: OAuthOperation) { return this.accounts.oauth(operation); }
+  async consentAgent(subject: string, id: string, supplied: AgentConsent): Promise<string> {
+    const consent = agentConsent.parse(supplied), account = await this.accounts.lookup(subject);
+    if (!account?.live) throw new Refused('Live account required');
+    await this.validateJourneys(account.personId, consent.journeys);
+    const result = await this.accounts.oauth({ op: 'consent', id, subject, consent });
+    if (result.kind !== 'agent') throw new Refused('Agent consent refused');
+    await this.syncAgentJourneys(account.personId, result.agentId, consent.name, consent.journeys);
+    await this.accounts.oauth({ op: 'manage', subject, agentId: result.agentId, journeys: consent.journeys });
+    return result.agentId;
+  }
+  private async validateJourneys(personId: string, selected: string[]) {
+    const ids = await this.accounts.directory();
+    for (const id of selected) {
+      if (!ids.includes(id)) throw new Refused('Journey membership required');
+      const summary = await this.journey(id).summary(personId);
+      if (!summary || summary.pending) throw new Refused('Journey membership required');
+    }
+  }
+  private async syncAgentJourneys(personId: string, agentId: string, name: string, selected: string[]) {
+    for (const id of await this.accounts.directory()) await this.journey(id).syncAgent(personId, agentId, name, selected.includes(id));
+  }
+  async manageAgent(identity: ClientIdentity, agentId: string, name: string, journeys: string[]): Promise<void> {
+    const account = await this.accounts.lookup(identity.subject);
+    if (!account || (await this.accounts.resolveActor(account.personId, identity.clientId)).agent) throw new Refused('Only a person manages agents');
+    const own = account.agents.find(a => a.id === agentId && a.live);
+    if (!own) throw new Refused('Owned live agent required');
+    const parsed = agentConsent.parse({ name, capabilities: cardCaps(own.card), journeys });
+    await this.validateJourneys(account.personId, parsed.journeys);
+    await this.syncAgentJourneys(account.personId, agentId, parsed.name, parsed.journeys);
+    await this.accounts.oauth({ op: 'manage', subject: identity.subject, agentId, name: parsed.name, journeys: parsed.journeys });
+  }
+  async whoami(subject: string, clientId: string): Promise<ToolData> {
+    const account = await this.accounts.lookup(subject);
+    if (!account) throw new Refused('Live account required');
+    const actor = await this.accounts.resolveActor(account.personId, clientId);
+    return { person: { id: account.personId, name: account.nickname ?? account.name }, agent: actor.agent ? { id: actor.agent.id, name: actor.agent.name, capabilities: cardCaps(actor.agent.card), journeys: await this.agentMemberships(account.personId, actor.agent.id) } : null };
+  }
+  private async agentMemberships(personId: string, agentId: string): Promise<string[]> {
+    const journeys: string[] = [];
+    for (const id of await this.accounts.directory()) {
+      const summary = await this.journey(id).summary(personId);
+      if (!summary || summary.pending) continue;
+      const view = await this.journey(id).execute(personId, parseCommand('journey_read', { journeyId: id }));
+      if (namedState.shape.members.parse(view.members).some(m => m.memberId === agentId)) journeys.push(id);
+    }
+    return journeys;
+  }
   consoleRecord(operation: RecordOperation) { return this.accounts.consoleRecord(operation); }
   passkey(identity: ClientIdentity, operation: PasskeyOperation) { return this.accounts.passkey(identity, operation); }
   beginAuthorization(identity: ClientIdentity, change: CardChange) { return this.accounts.beginAuthorization(identity, change); }
@@ -130,11 +182,21 @@ export class Backend implements CoordinationBackend {
         return this.namedForum(await this.journey(forumCommandJourney(command)).execute(account.personId, command, undefined, actor));
       case 'library_get': case 'library_version': case 'library_update': case 'library_delete':
         return this.journey(itemJourney(command.input.itemId)).execute(account.personId, command, undefined, actor);
-      case 'agent_create': case 'agent_list': case 'agent_narrow': case 'agent_remove': case 'agent_card': case 'client_list':
+      case 'agent_remove': {
+        const result = await this.accounts.agentCommand(account.personId, clientId, command);
+        await this.syncAgentJourneys(account.personId, command.input.agentId, '', []);
+        return result;
+      }
+      case 'agent_list': {
+        const data = await this.accounts.agentCommand(account.personId, clientId, command);
+        const agents = z.array(z.record(z.string(), z.unknown())).parse(data.agents);
+        return { agents: await Promise.all(agents.map(async agent => ({ ...agent, journeys: agent.live ? await this.agentMemberships(account.personId, String(agent.agentId)) : [] }))) };
+      }
+      case 'agent_create': case 'agent_narrow': case 'agent_card': case 'client_list':
         return this.accounts.agentCommand(account.personId, clientId, command);
       case 'agent_capabilities': {
         const data = await this.accounts.agentCommand(account.personId, clientId, command);
-        if (!command.input.journeyId) return data;
+        if (!command.input.journeyId) return { ...data, journeys: await this.agentMemberships(account.personId, command.input.agentId) };
         const target = await this.accounts.resolveActor(account.personId, 'trusted-host', command.input.agentId);
         return this.journey(command.input.journeyId).execute(account.personId, command, undefined, target);
       }

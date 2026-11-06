@@ -363,6 +363,10 @@ test('coordination: Durable Object adapter reloads stored rules and members afte
     // Recreate the actual DO adapter on every call, as if it had been evicted.
     const object = new Journey({ storage: store });
     return {
+      async syncAgent(personId, agentId, name, present) {
+        const response = await object.fetch(new Request('https://internal/', { method: 'POST', body: JSON.stringify({ action: 'syncAgent', personId, agentId, name, present }) }));
+        assert.equal(response.status, 200);
+      },
       async requireGuide(personId, command) {
         const response = await object.fetch(new Request('https://internal/', { method: 'POST', body: JSON.stringify({ action: 'requireGuide', personId, tool: command.tool, input: command.input }) }));
         assert.equal(response.status, 200);

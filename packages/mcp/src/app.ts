@@ -13,13 +13,16 @@ import { inboxJourney, InboxBus, subscriptionBody } from './inbox.ts';
 
 import { createConsole } from './console/index.ts';
 import type { ConsoleOptions } from './console/contract.ts';
+import { createOAuth, createOpaqueVerifier } from './oauth.ts';
 /** Inputs for {@link createApp}. Everything the Worker reads from its environment is passed in here. */
 export interface AppOptions {
-  /** Verifies AuthKit access tokens; tests inject one backed by a local key pair. */
+  /** Verifies upstream AuthKit tokens for console login only. */
   verifier: OAuthTokenVerifier;
+  /** Test seam for transport-only suites. Production always uses the opaque verifier. */
+  mcpVerifier?: OAuthTokenVerifier;
   /** The MCP endpoint, which is also the RFC 8707 resource identifier, e.g. `https://poc.wayfinding.support/mcp`. */
   resource: URL;
-  /** The AuthKit issuer, which is the authorization server. */
+  /** The upstream AuthKit issuer, never the MCP authorization server. */
   issuer: string;
   /** Hostnames accepted in the `Host` header of `/mcp` requests. */
   allowedHosts: string[];
@@ -29,46 +32,25 @@ export interface AppOptions {
   console?: ConsoleOptions;
 }
 
-/**
- * RFC 8414 metadata for AuthKit, mirrored at the resource origin for clients
- * that probe it directly. Paths match AuthKit's own discovery document.
- */
-export function authkitMetadata(issuer: string): OAuthMetadata {
+export function workerMetadata(issuer: string): OAuthMetadata {
   const at = (path: string) => new URL(path, issuer).href;
-  return {
-    issuer,
-    authorization_endpoint: at('/oauth2/authorize'),
-    token_endpoint: at('/oauth2/token'),
-    registration_endpoint: at('/oauth2/register'),
-    introspection_endpoint: at('/oauth2/introspection'),
-    jwks_uri: at('/oauth2/jwks'),
-    response_types_supported: ['code'],
-    response_modes_supported: ['query'],
-    grant_types_supported: ['authorization_code', 'refresh_token'],
-    code_challenge_methods_supported: ['S256'],
-    token_endpoint_auth_methods_supported: ['none', 'client_secret_post', 'client_secret_basic'],
-    scopes_supported: ['email', 'offline_access', 'openid', 'profile'],
-    client_id_metadata_document_supported: true,
-  };
+  return { issuer, authorization_endpoint: at('/oauth/authorize'), token_endpoint: at('/oauth/token'),
+    registration_endpoint: at('/oauth/register'), revocation_endpoint: at('/oauth/revoke'), response_types_supported: ['code'],
+    grant_types_supported: ['authorization_code', 'refresh_token'], code_challenge_methods_supported: ['S256'],
+    token_endpoint_auth_methods_supported: ['none'], client_id_metadata_document_supported: true };
 }
 
-/**
- * The Worker's request pipeline:
- * 1. the two OAuth discovery documents;
- * 2. `/mcp` only, behind Host validation and the bearer gate (no scopes are
- *    required: AuthKit tokens carry none for this resource);
- * 3. the SDK handler, serving 2026-07-28 per request and 2025-era clients
- *    statelessly from the same factory.
- */
+/** Worker discovery, same-origin console/OAuth routes, then opaque bearer authentication before the MCP handler. */
 export function createApp(options: AppOptions): { fetch(request: Request): Promise<Response> } {
   const console = options.console ? createConsole({ ...options.console, verifier: options.verifier, resource: options.resource, issuer: options.issuer }) : undefined;
+  const oauth = createOAuth({ backend: options.backend, console: options.console, resource: options.resource });
   const metadata = {
-    oauthMetadata: authkitMetadata(options.issuer),
+    oauthMetadata: workerMetadata(options.resource.origin),
     resourceServerUrl: options.resource,
     resourceName: 'AI Wayfinding',
   };
   const authenticate = requireBearerAuth({
-    verifier: options.verifier,
+    verifier: options.mcpVerifier ?? createOpaqueVerifier(options.backend, options.resource),
     expectedResource: options.resource,
     resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(options.resource),
   });
@@ -86,12 +68,18 @@ export function createApp(options: AppOptions): { fetch(request: Request): Promi
         if (new URL(request.url).origin !== options.resource.origin) return new Response('Console origin refused', { status: 403 });
         return console ? console.fetch(request) : new Response('Console is not configured', { status: 503 });
       }
+      if (path.startsWith('/oauth/')) {
+        const rejected = hostHeaderValidationResponse(request, options.allowedHosts);
+        if (rejected) return rejected;
+        if (new URL(request.url).origin !== options.resource.origin) return new Response('OAuth origin refused', { status: 403 });
+        return oauth.fetch(request);
+      }
       const document = oauthMetadataResponse(request, metadata);
       if (document !== undefined) return document;
 
       if (new URL(request.url).pathname === '/signin') {
         if (request.method !== 'GET') return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET' } });
-        const destination = new URL(options.signinUrl ?? metadata.oauthMetadata.authorization_endpoint!);
+        const destination = new URL(options.signinUrl ?? new URL('/oauth2/authorize', options.issuer).href);
         if (destination.protocol !== 'https:') return new Response('Sign-in is not configured', { status: 503 });
         return new Response(null, { status: 302, headers: { Location: destination.href, 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' } });
       }

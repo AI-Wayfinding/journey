@@ -16,8 +16,8 @@ export const passkeyOperation = z.discriminatedUnion('op', [
 export type PasskeyOperation = z.infer<typeof passkeyOperation>;
 const text = z.string().min(1).max(200);
 export const consoleRecord = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('oauth'), state: text, verifier: text, expiresAt: z.number().int().nonnegative().safe() }).strict(),
-  z.object({ kind: z.literal('session'), subject: text, clientId: text, csrf: text, expiresAt: z.number().int().nonnegative().safe() }).strict(),
+  z.object({ kind: z.literal('oauth'), state: text, verifier: text, returnTo: z.string().max(300).optional(), expiresAt: z.number().int().nonnegative().safe() }).strict(),
+  z.object({ kind: z.literal('session'), subject: text, clientId: text, csrf: text, signedInAt: z.number().int().nonnegative().safe().optional(), expiresAt: z.number().int().nonnegative().safe() }).strict(),
 ]);
 export type ConsoleRecord = z.infer<typeof consoleRecord>;
 export const recordOperation = z.discriminatedUnion('op', [
@@ -26,6 +26,9 @@ export const recordOperation = z.discriminatedUnion('op', [
 ]);
 export type RecordOperation = z.infer<typeof recordOperation>;
 export interface ConsoleBackend extends CoordinationBackend {
+  oauth(operation: import('../oauth-contract.ts').OAuthOperation): Promise<import('../oauth-contract.ts').OAuthResult>;
+  consentAgent(subject: string, id: string, consent: import('../oauth-contract.ts').AgentConsent): Promise<string>;
+  manageAgent(identity: ClientIdentity, agentId: string, name: string, journeys: string[]): Promise<void>;
   passkey(identity: ClientIdentity, operation: PasskeyOperation): Promise<ToolData>;
   consoleRecord(operation: RecordOperation): Promise<ConsoleRecord | undefined>;
   beginAuthorization(identity: ClientIdentity, change: CardChange): Promise<{ challenge: string }>;

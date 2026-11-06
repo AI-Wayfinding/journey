@@ -7,6 +7,7 @@ import { actorSchema, assertionSchema, changeSchema, type Actor } from './agents
 import type { KeyValueStorage } from './storage.ts';
 import type { BlobStore } from './relay.ts';
 
+import { oauthOperation } from './oauth-contract.ts';
 import { passkeyOperation, recordOperation, type ConsoleRecord } from './console/contract.ts';
 interface ObjectState { storage: KeyValueStorage }
 interface Stub { fetch(request: Request): Promise<Response> }
@@ -46,6 +47,7 @@ export class Journey {
       const actor = body['actor'] === undefined ? undefined : actorSchema.parse(body['actor']);
       if (body['action'] === 'watchInbox') return new Response(await this.host.watchInbox(personId, actor), { headers: { 'content-type': 'application/x-ndjson' } });
       return respond(async () => {
+        if (body['action'] === 'syncAgent') return this.host.syncAgent(personId, field(body, 'agentId'), z.string().max(60).parse(body['name']), z.boolean().parse(body['present']));
         if (body['action'] === 'requireGuide') return this.host.requireGuide(personId, command(body), actor);
         if (body['action'] === 'summary') return this.host.summary(personId, actor);
         if (body['action'] === 'inbox') return this.host.inbox(personId, actor);
@@ -68,6 +70,7 @@ export class Accounts {
     return respond(async () => {
       if (request.method !== 'POST') throw new Refused('Internal requests must be POST');
       const body = record(await request.json());
+      if (body['action'] === 'oauth') return this.host.oauth(oauthOperation.parse(body['operation']));
       if (body['action'] === 'consoleRecord') return this.host.consoleRecord(recordOperation.parse(body['operation']));
       if (body['action'] === 'passkey') return this.host.passkey({ subject: field(body, 'subject'), clientId: field(body, 'clientId') }, passkeyOperation.parse(body['operation']));
       if (body['action'] === 'observeClient') return this.host.observeClient(field(body, 'personId'), field(body, 'clientId'));
@@ -108,6 +111,7 @@ async function watch(namespace: ObjectNamespace, id: string, personId: string, a
 }
 export function durableBackend(env: ObjectBindings): Backend {
   const accounts: AccountsPort = {
+    oauth: operation => call(env.ACCOUNTS, 'accounts', { action: 'oauth', operation }),
     consoleRecord: (operation) => call<ConsoleRecord | undefined>(env.ACCOUNTS, 'accounts', { action: 'consoleRecord', operation }),
     passkey: (identity, operation) => call(env.ACCOUNTS, 'accounts', { action: 'passkey', subject: identity.subject, clientId: identity.clientId, operation }),
     provision: (subject) => call<Account>(env.ACCOUNTS, 'accounts', { action: 'provision', subject }),
@@ -124,6 +128,7 @@ export function durableBackend(env: ObjectBindings): Backend {
     completeAuthorization: (identity, change, assertion) => call(env.ACCOUNTS, 'accounts', { action: 'completeAuthorization', subject: identity.subject, clientId: identity.clientId, change, assertion }),
   };
   return new Backend(accounts, (id): JourneyPort => ({
+    syncAgent: (personId, agentId, name, present) => call(env.JOURNEYS, id, { action: 'syncAgent', personId, agentId, name, present }),
     requireGuide: (personId, command, actor) => call<void>(env.JOURNEYS, id, { action: 'requireGuide', personId, tool: command.tool, input: command.input, actor }),
     execute: (personId, command, journeyId, actor) => call<ToolData>(env.JOURNEYS, id, { personId, journeyId, tool: command.tool, input: command.input, actor }),
     summary: (personId, actor) => call<ToolData | undefined>(env.JOURNEYS, id, { action: 'summary', personId, actor }),
