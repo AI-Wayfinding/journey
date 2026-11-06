@@ -74,7 +74,7 @@ The Worker still needs its existing **`WORKOS_API_KEY` secret** for Staging prof
 
 ## Connect the local proxy
 
-**Legacy encryption flow:** the local proxy requires person-only device and key-package operations. It is not compatible with the new agent-only MCP tokens yet. The instructions and two-person walkthrough below describe the earlier synthetic run, not a verified flow under the new authorization server. Use a direct remote MCP connection to test this change.
+The local proxy remains required to encrypt and decrypt sealed artifact content. Give its agent the account capability `device.keys` at Worker consent. It starts unchecked, including on reauthorization. Select it and confirm with a registered passkey; a fresh login alone cannot grant it. Ordinary remote coordination clients should leave it off. The automated tests cover proxy bootstrap and a sealed-content round-trip with a Worker agent token; this version has not had a live smoke test.
 Add this server to a client's local MCP configuration, for example Claude Code's `.mcp.json`. Replace both absolute paths; JSON arguments do not expand `~`.
 
 ```json
@@ -93,7 +93,7 @@ Add this server to a client's local MCP configuration, for example Claude Code's
 
 The default store is `~/.wayfinding` when `--store` is omitted. Use a new store per device and per test account. An existing directory must belong to you and have mode `0700`; its records use `0600`. Do not share a store between running proxies.
 
-The client launches the proxy. Open the **Sign in to Wayfinding** URL from its stderr log. Enter the synthetic email, continue to the password page, wait for it to load, then click exactly **Sign in**, not **Sign in with a passkey**. On consent, wait until **Allow access** is enabled and approve the loopback redirect you just started. Return to the MCP client after the callback says you are signed in. The first connection may take longer than the client's usual startup timeout.
+The client launches the proxy. Open the **Sign in to Wayfinding** URL from its stderr log and sign in with the synthetic account. On the Worker consent page, name the proxy agent, choose its journey capabilities and journeys, and select **Manage device keys and sealed content** (`device.keys`). Register a passkey through the page link if needed, then return to consent. Select **Allow** and confirm with that passkey. Return to the MCP client after the loopback callback says you are signed in. The first connection may take longer than the client's usual startup timeout.
 
 For a two-person test, use separate client processes and browser profiles. Add `"--port", "8721"` to A's arguments and `"--port", "8722"` to B's. Give each a separate absolute store path. The default loopback port is `8717`.
 

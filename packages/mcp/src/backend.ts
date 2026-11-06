@@ -1,7 +1,7 @@
 import * as z from 'zod';
 import { AccountsHost, type Account, type Profiles } from './accounts.ts';
 import { Refused, parseCommand, isRelay, type Command, type CoordinationBackend, type TaskMethod, type ToolData } from './commands.ts';
-import { allows, requireAccountCapability, type Actor, type ClientIdentity, type CardChange, type PasskeyVerifier } from './agents.ts';
+import { assertionSchema, allows, requireAccountCapability, type Actor, type ClientIdentity, type CardChange, type PasskeyVerifier } from './agents.ts';
 import type { AuthenticationResponseJSON } from '@simplewebauthn/server';
 import { JourneyHost } from './journey.ts';
 import { itemJourney } from './library.ts';
@@ -50,11 +50,11 @@ export class Backend implements CoordinationBackend {
   private readonly journey: (id: string) => JourneyPort;
   constructor(accounts: AccountsPort, journey: (id: string) => JourneyPort) { this.accounts = accounts; this.journey = journey; }
   oauth(operation: OAuthOperation) { return this.accounts.oauth(operation); }
-  async consentAgent(subject: string, id: string, supplied: AgentConsent): Promise<string> {
+  async consentAgent(subject: string, id: string, supplied: AgentConsent, assertion?: AuthenticationResponseJSON): Promise<string> {
     const consent = agentConsent.parse(supplied), account = await this.accounts.lookup(subject);
     if (!account?.live) throw new Refused('Live account required');
     await this.validateJourneys(account.personId, consent.journeys);
-    const result = await this.accounts.oauth({ op: 'consent', id, subject, consent });
+    const result = await this.accounts.oauth({ op: 'consent', id, subject, consent, assertion: assertionSchema.optional().parse(assertion) });
     if (result.kind !== 'agent') throw new Refused('Agent consent refused');
     await this.syncAgentJourneys(account.personId, result.agentId, consent.name, consent.journeys);
     await this.accounts.oauth({ op: 'manage', subject, agentId: result.agentId, journeys: consent.journeys });
@@ -151,12 +151,12 @@ export class Backend implements CoordinationBackend {
     try { actor = await this.accounts.resolveActor(account.personId, clientId, 'actingAgent' in command.input ? command.input.actingAgent : undefined); }
     catch (error) { if (command.tool === 'journey_invite') throw new Refused('Only guides may invite'); throw error; }
     if (command.tool === 'mls_key_package_publish' || command.tool === 'mls_key_package_fetch') {
-      if (actor.agent) throw new Refused('Only a person manages device key packages');
+      requireAccountCapability(actor, 'device.keys');
       return this.accounts.group(account.personId, command);
     }
     if (isRelay(command)) {
       if (command.input.groupId.startsWith('personal_')) {
-        if (actor.agent) throw new Refused('Personal relay requires a person connection');
+        requireAccountCapability(actor, 'device.keys');
         return this.accounts.group(account.personId, command);
       }
       return this.journey(command.input.groupId).execute(account.personId, command, undefined, actor);
@@ -168,7 +168,7 @@ export class Backend implements CoordinationBackend {
     }
     switch (command.tool) {
       case 'account_read':
-        if (actor.agent) throw new Refused('Only a person reads the private account profile');
+        requireAccountCapability(actor, 'device.keys');
         return this.accountView(account);
       case 'account_update': {
         requireAccountCapability(actor, 'account.nickname');
@@ -213,7 +213,7 @@ export class Backend implements CoordinationBackend {
         return { journeys: summaries.filter(s => s !== undefined) };
       }
       case 'personal_group_add': case 'personal_group_read': case 'personal_group_remove':
-        if (actor.agent) throw new Refused('Only a person manages personal group identities');
+        requireAccountCapability(actor, 'device.keys');
         return this.accounts.group(account.personId, command);
       case 'journey_invite': {
         const journey = this.journey(command.input.journeyId);

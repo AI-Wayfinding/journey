@@ -9,6 +9,10 @@ import { AccountsHost } from '../src/accounts.ts';
 import { Accounts } from '../src/objects.ts';
 import { MemoryStorage } from '../src/storage.ts';
 import { bridge, ISSUER, keyPair, RESOURCE, token, listToolsRequest } from './helpers.ts';
+import { authenticator } from './console-authenticator.ts';
+import { runInNewContext } from 'node:vm';
+import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
+import { WayfindingProxy } from '../../proxy/src/proxy.ts';
 
 const signer = await keyPair('oauth-as');
 const origin = RESOURCE.origin, consoleClient = `${origin}/console/client.json`;
@@ -281,4 +285,157 @@ test('oauth AS: Accounts eviction preserves old accounts, single-use codes and r
   assert.deepEqual(await host().oauth({ op: 'verify', token: rotated.tokens.access_token }), { kind: 'error', error: 'invalid_token' });
   now += 30 * 86400_000 + 1;
   assert.deepEqual(await host().oauth({ op: 'refresh', clientId, token: rotated.tokens.refresh_token }), { kind: 'error', error: 'invalid_grant' });
+});
+
+
+test('oauth AS: device.keys is unchecked and fresh login alone cannot grant it or change state', async () => {
+  const f = await fixture(), cookie = await f.login();
+  const path = (await f.authorize()).headers.get('location')!;
+  const html = await (await f.send(path, { headers: { cookie } })).text();
+  assert.match(html, /value="device.keys"(?! checked)/);
+  assert.match(html, /passkey/i);
+  const before = f.backend.snapshot();
+  const denied = await f.post('/oauth/consent', { request: new URL(path, origin).searchParams.get('request'), csrf: csrfOf(html), decision: 'allow', name: 'Device', capabilities: ['device.keys'], journeys: [] }, cookie);
+  assert.equal(denied.status, 403);
+  assert.equal(f.backend.snapshot(), before);
+});
+
+
+async function deviceConsentFixture() {
+  const f = await fixture(), cookie = await f.login(), key = await authenticator();
+  const identity = { subject: 'alice', clientId: consoleClient };
+  const options = await f.backend.passkey(identity, { op: 'begin' });
+  await f.backend.passkey(identity, { op: 'finish', credential: key.register(String(options.challenge)) });
+  async function pending() {
+    const path = (await f.authorize()).headers.get('location')!;
+    const html = await (await f.send(path, { headers: { cookie } })).text();
+    assert.match(html, /value="device.keys"(?! checked)/);
+    return { request: new URL(path, origin).searchParams.get('request')!, csrf: csrfOf(html), decision: 'allow', name: 'Encryption proxy', capabilities: ['device.keys'], journeys: [] as string[] };
+  }
+  return { ...f, cookie, key, pending };
+}
+
+test('oauth AS: device.keys passkey is bound to the pending authorization, exact card, person and expiry; cannot replay', async () => {
+  const f = await deviceConsentFixture(), body = await f.pending();
+  const optionsResponse = await f.post('/oauth/consent/options', body, f.cookie);
+  assert.equal(optionsResponse.status, 200);
+  const options = await optionsResponse.json() as { challenge: string; userVerification: string };
+  assert.equal(options.userVerification, 'required');
+  const assertion = await f.key.assert(options.challenge);
+  const other = await f.pending();
+  // Another person's consent cannot consume Alice's assertion.
+  await f.backend.execute('bob', parseCommand('account_read', {}));
+  const bob = { subject: 'bob', clientId: consoleClient };
+  const bobKey = await authenticator();
+  const registration = await f.backend.passkey(bob, { op: 'begin' });
+  await f.backend.passkey(bob, { op: 'finish', credential: bobKey.register(String(registration.challenge)) });
+  const consent = { name: body.name, capabilities: ['device.keys' as const], journeys: [] };
+  await f.backend.oauth({ op: 'consent-options', subject: 'bob', id: body.request, consent });
+  const personBefore = f.backend.snapshot();
+  await assert.rejects(f.backend.consentAgent('bob', body.request, consent, assertion));
+  assert.equal(f.backend.snapshot(), personBefore);
+  const before = f.backend.snapshot();
+  for (const changed of [ { ...body, request: other.request }, { ...body, capabilities: ['device.keys', 'journey.create'] }, { ...body, name: 'Changed' }, { ...body, journeys: ['foreign'] } ]) {
+    assert.equal((await f.post('/oauth/consent', { ...changed, assertion }, f.cookie)).status, 403);
+    assert.equal(f.backend.snapshot(), before);
+  }
+  const foreignOrigin = await f.key.assert(options.challenge, 1, 'https://evil.test');
+  assert.equal((await f.post('/oauth/consent', { ...body, assertion: foreignOrigin }, f.cookie)).status, 403);
+  assert.equal(f.backend.snapshot(), before);
+  assert.equal((await f.post('/oauth/consent', { ...body, assertion }, f.cookie)).status, 303);
+  assert.equal((await f.post('/oauth/consent', { ...body, assertion }, f.cookie)).status, 403);
+  // A newly displayed reauthorization must default off even for an existing device card.
+  const next = await f.pending();
+  assert.equal((await f.post('/oauth/consent', next, f.cookie)).status, 403);
+  const nextOptions = await (await f.post('/oauth/consent/options', next, f.cookie)).json() as { challenge: string };
+  const expired = await f.key.assert(nextOptions.challenge, 2);
+  f.advance(300_001);
+  const beforeExpiry = f.backend.snapshot();
+  assert.equal((await f.post('/oauth/consent', { ...next, assertion: expired }, f.cookie)).status, 403);
+  assert.equal(f.backend.snapshot(), beforeExpiry);
+});
+
+test('oauth AS: device.keys agent token bootstraps real proxy and round-trips sealed content; removing capability refuses every private path unchanged', async t => {
+  const f = await deviceConsentFixture(), body = await f.pending();
+  const options = await (await f.post('/oauth/consent/options', body, f.cookie)).json() as { challenge: string };
+  const allowed = await f.post('/oauth/consent', { ...body, assertion: await f.key.assert(options.challenge) }, f.cookie);
+  assert.equal(allowed.status, 303);
+  const tokens = await (await f.exchange(new URL(allowed.headers.get('location')!).searchParams.get('code')!)).json() as { access_token: string };
+  const remote = new Client({ name: 'real-encryption-proxy', version: '1' });
+  await remote.connect(new StreamableHTTPClientTransport(RESOURCE, { fetch: (url, init) => f.send(new URL(String(url)).pathname, init), requestInit: { headers: { authorization: `Bearer ${tokens.access_token}` } } }));
+  t.after(() => remote.close());
+  const records = new Map<string, string>();
+  const store = { async read(name: string) { return records.get(name); }, async write(name: string, value: string) { records.set(name, value); } };
+  const proxy = await WayfindingProxy.open(remote, store);
+  await proxy.createGroup(proxy.personalGroupId);
+  const artifact = await proxy.createArtifact({ groupId: proxy.personalGroupId, name: 'Synthetic private document', type: 'text/plain', content: 'SEALED-DEVICE-KEYS-ROUNDTRIP' });
+  assert.equal((await proxy.readArtifact(proxy.personalGroupId, artifact.artifactId)).content, 'SEALED-DEVICE-KEYS-ROUNDTRIP');
+  assert.equal(f.backend.snapshot().includes('SEALED-DEVICE-KEYS-ROUNDTRIP'), false);
+  const second = await WayfindingProxy.open(remote, { async read() { return undefined; }, async write() {} });
+  const prepared = await second.prepareGroup(proxy.personalGroupId);
+  await proxy.addMember(proxy.personalGroupId, second.personId, prepared.deviceId);
+  assert.equal((await second.readArtifact(proxy.personalGroupId, artifact.artifactId)).content, 'SEALED-DEVICE-KEYS-ROUNDTRIP');
+  const account = (await f.backend.accountsHost.lookup('alice'))!;
+  await f.backend.execute('alice', parseCommand('agent_narrow', { agentId: account.agents[0]!.id, remove: ['device.keys'] }), consoleClient);
+  const calls: [string, Record<string, unknown>][] = [
+    ['account_read', {}], ['personal_group_read', {}], ['personal_group_add', { name: 'No', kind: 'device' }], ['personal_group_remove', { memberId: prepared.deviceId }],
+    ['mls_key_package_publish', { deviceId: prepared.deviceId, data: 'AQ==' }], ['mls_key_package_fetch', { personId: account.personId, deviceId: prepared.deviceId }],
+    ['mls_message_fetch', { groupId: proxy.personalGroupId }], ['mls_message_post', { groupId: proxy.personalGroupId, epoch: 0, kind: 'application', data: 'AQ==' }],
+    ['artifact_blob_put', { groupId: proxy.personalGroupId, artifactId: artifact.artifactId, version: 2, data: 'AQ==' }],
+    ['artifact_blob_get', { groupId: proxy.personalGroupId, artifactId: artifact.artifactId, version: 1 }], ['artifact_blob_delete', { groupId: proxy.personalGroupId, artifactId: artifact.artifactId }],
+  ];
+  for (const [tool, input] of calls) {
+    const before = f.backend.snapshot();
+    await assert.rejects(f.backend.execute('alice', parseCommand(tool, input), f.client.client_id), /device.keys/);
+    assert.equal(f.backend.snapshot(), before, tool);
+  }
+  await assert.rejects(WayfindingProxy.open(remote, store), /device.keys/);
+});
+
+
+test('oauth AS: served consent browser script signs and submits the same frozen fields through the native form redirect', async () => {
+  const f = await deviceConsentFixture(), body = await f.pending();
+  const script = await (await f.send('/console/webauthn.js')).text();
+  let handler: ((event: { preventDefault(): void; submitter: { value: string } }) => Promise<void>) | undefined;
+  const elements = Object.entries(body).filter(([name]) => name !== 'decision').flatMap(([name, value]) => (Array.isArray(value) ? value : [value]).map(value => ({ name, value, disabled: false })));
+  const status = { textContent: '' }, button = { disabled: false };
+  let posted: Promise<Response> | undefined;
+  class Form {
+    elements = elements;
+    dataset = { ceremony: 'consent', options: '/oauth/consent/options' };
+    action = '/oauth/consent';
+    querySelector() { return button; }
+    addEventListener(_name: string, callback: typeof handler) { handler = callback; }
+    append(element: typeof elements[number]) { elements.push(element); }
+    submit() {
+      posted = f.send(this.action, { method: 'POST', headers: { cookie: f.cookie, origin, 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(elements.filter(e => !e.disabled).map(e => [e.name, String(e.value)] as [string, string])).toString() });
+    }
+  }
+  const form = new Form();
+  const decode = (value: string) => Buffer.from(value, 'base64url');
+  runInNewContext(script, {
+    document: { querySelectorAll: () => [form], getElementById: () => status, createElement: () => ({ name: '', value: '', disabled: false }) },
+    FormData: class {
+      entries = elements.filter(e => !e.disabled).map(e => [e.name, e.value] as const);
+      get(name: string) { return this.entries.find(([key]) => key === name)?.[1]; }
+      getAll(name: string) { return this.entries.filter(([key]) => key === name).map(([, value]) => value); }
+      has(name: string) { return this.entries.some(([key]) => key === name); }
+      [Symbol.iterator]() { return this.entries[Symbol.iterator](); }
+    },
+    HTMLFormElement: Form, window: { PublicKeyCredential: {} },
+    navigator: { credentials: { async get(options: { publicKey: { challenge: Uint8Array } }) {
+      // Edits during the OS prompt must not change what the server receives after signing.
+      elements.find(e => e.name === 'name')!.value = 'Changed while prompting';
+      const result = await f.key.assert(Buffer.from(options.publicKey.challenge).toString('base64url'));
+      return { id: result.id, rawId: decode(result.rawId), response: { clientDataJSON: decode(result.response.clientDataJSON), authenticatorData: decode(result.response.authenticatorData), signature: decode(result.response.signature) } };
+    } } },
+    Uint8Array, atob, btoa, URL,
+    fetch: (path: string, init: RequestInit) => f.send(path, { ...init, headers: { ...Object.fromEntries(new Headers(init.headers)), cookie: f.cookie, origin } }),
+  }, { timeout: 3000 });
+  assert.ok(handler);
+  await handler({ preventDefault() {}, submitter: { value: 'allow' } });
+  assert.equal(status.textContent, '');
+  assert.ok(posted);
+  assert.equal((await posted).status, 303);
+  assert.equal((await f.backend.accountsHost.lookup('alice'))!.agents[0]!.name, 'Encryption proxy');
 });

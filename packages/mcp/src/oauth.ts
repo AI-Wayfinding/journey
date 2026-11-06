@@ -7,6 +7,7 @@ import { ConsoleSessions, SESSION_COOKIE } from './console/session.ts';
 import { formBody } from './console/forms.ts';
 import { page, escape, form, capabilityFields } from './console/pages.ts';
 import { agentConsent, authorizationRequest, clientMetadata, oauthId, type OAuthClient } from './oauth-contract.ts';
+import { assertionSchema } from './agents.ts';
 import { randomToken } from './oauth-store.ts';
 
 const headers = { 'Cache-Control': 'no-store', 'Pragma': 'no-cache', 'Referrer-Policy': 'same-origin', 'X-Content-Type-Options': 'nosniff' };
@@ -90,7 +91,7 @@ export function createOAuth(config: { backend?: CoordinationBackend; console?: C
     const url = new URL(request.url), path = url.pathname;
     if (!backend?.oauth) return oauthError('temporarily_unavailable', 503);
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: { ...headers, Allow: 'GET, POST, OPTIONS' } });
-    const consentRoute = path === '/oauth/consent';
+    const consentRoute = path === '/oauth/consent' || path === '/oauth/consent/options';
     try {
       if (path === '/oauth/authorize' && request.method === 'GET') {
         const p = params(url.search.slice(1)), id = oauthId.parse(p.get('client_id'));
@@ -125,9 +126,15 @@ export function createOAuth(config: { backend?: CoordinationBackend; console?: C
           if (body.decision === 'deny') { await backend.oauth({ op: 'deny', id }); destination.searchParams.set('error', 'access_denied'); return finish(); }
           if (body.decision !== 'allow') throw new Refused('Consent decision required');
           // Never copy posted subject, clientId, agentId or authority flags into storage.
-          if (Object.keys(body).some(k => !['csrf', 'request', 'decision', 'name', 'capabilities', 'journeys'].includes(k))) throw new Refused('Unknown consent field');
+          if (Object.keys(body).some(k => !['csrf', 'request', 'decision', 'name', 'capabilities', 'journeys', 'assertion'].includes(k))) throw new Refused('Unknown consent field');
           const consent = agentConsent.parse({ name: body.name, capabilities: body.capabilities ?? [], journeys: body.journeys ?? [] });
-          const agentId = await config.console.backend.consentAgent(session.subject, id, consent);
+          if (path.endsWith('/options')) {
+            const result = await backend.oauth({ op: 'consent-options', subject: session.subject, id, consent });
+            if (result.kind !== 'assertion') throw new Refused('Passkey options refused');
+            return json({ challenge: result.challenge, rpId: 'poc.wayfinding.support', userVerification: 'required', timeout: 60000, allowCredentials: result.credentials.map(id => ({ type: 'public-key', id })) });
+          }
+          const assertion = typeof body.assertion === 'string' ? JSON.parse(body.assertion) : body.assertion;
+          const agentId = await config.console.backend.consentAgent(session.subject, id, consent, assertionSchema.optional().parse(assertion));
           const code = await backend.oauth({ op: 'code', id, subject: session.subject, agentId });
           if (code.kind !== 'code') throw new Refused('Authorization code refused');
           destination.searchParams.set('code', code.code); return finish();
@@ -135,11 +142,11 @@ export function createOAuth(config: { backend?: CoordinationBackend; console?: C
         const [agents, clients, journeys] = await Promise.all(['agent_list', 'client_list', 'journey_list'].map(tool => backend.execute(session.subject, parseCommand(tool, {}), session.clientId)));
         const bound = rows(clients!.clients).find(c => c.clientId === r.clientId && c.bound);
         const agent = bound ? rows(agents!.agents).find(a => a.agentId === bound.agentId && a.live) : undefined;
-        const caps = agent ? z.array(z.string()).parse(agent.capabilities) : ['read', 'post'];
+        const caps = (agent ? z.array(z.string()).parse(agent.capabilities) : ['read', 'post']).filter(c => c !== 'device.keys');
         const selected = agent ? z.array(z.string()).parse(agent.journeys ?? []) : [];
         const fields = hidden('request', id) + `<p>Connect <strong>${escape(r.clientName)}</strong> as your agent. Its access is always limited by your live authority.</p><label>Agent name <input name="name" value="${escape(agent?.name ?? r.clientName)}" maxlength="60" required></label>`
-          + capabilityFields(caps) + `<fieldset><legend>Journeys</legend>${rows(journeys!.journeys).filter(j => !j.pending).map(j => `<label><input type="checkbox" name="journeys" value="${escape(j.journeyId)}"${selected.includes(String(j.journeyId)) ? ' checked' : ''}> ${escape(j.name)}</label>`).join('')}</fieldset>`;
-        const html = page('Allow agent access', `<form method="post" action="/oauth/consent">${hidden('csrf', session.csrf)}${fields}<button name="decision" value="allow">Allow</button><button name="decision" value="deny">Deny</button></form>`, session.csrf);
+          + capabilityFields(caps) + '<p>Device keys let the local encryption proxy read your private profile, manage device key packages and access your personal sealed content. This is off by default and always requires a registered passkey, even after sign-in. <a href="/console/passkeys" target="_blank">Register a passkey</a> before allowing it.</p>' + `<fieldset><legend>Journeys</legend>${rows(journeys!.journeys).filter(j => !j.pending).map(j => `<label><input type="checkbox" name="journeys" value="${escape(j.journeyId)}"${selected.includes(String(j.journeyId)) ? ' checked' : ''}> ${escape(j.name)}</label>`).join('')}</fieldset>`;
+        const html = page('Allow agent access', `<form method="post" action="/oauth/consent" data-ceremony="consent" data-options="/oauth/consent/options">${hidden('csrf', session.csrf)}${fields}<button name="decision" value="allow">Allow</button><button name="decision" value="deny">Deny</button></form>`, session.csrf);
         return new Response(html, { headers: { ...headers, 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': `default-src 'none'; style-src 'self'; script-src 'self'; form-action 'self' ${destination.origin}; frame-ancestors 'none'; base-uri 'none'` } });
       }
       if (path === '/oauth/register' && request.method === 'POST') {

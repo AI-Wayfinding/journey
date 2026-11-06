@@ -41,6 +41,7 @@ export class JourneyHost {
     if (typeof raw !== 'string') throw new Refused('Invalid stored journey');
     const state = JSON.parse(raw) as JourneyState;
     if (!sameRules(state.rulesHash)) throw new Refused('Stored journey uses different rules');
+    state.rulesHash = RULES; // Persist the accepted predecessor stamp only on the next successful write.
     return state;
   }
   private slot(state: JourneyState, id: string, allocate = false): number {

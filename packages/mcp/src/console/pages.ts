@@ -10,7 +10,7 @@ const segment = (id: unknown) => encodeURIComponent(z.string().min(1).max(200).p
 const hidden = (name: string, value: unknown) => `<input type="hidden" name="${escape(name)}" value="${escape(value)}">`;
 export const form = (action: string, csrf: string, fields: string, button: string) => `<form method="post" action="${action}">${hidden('csrf', csrf)}${fields}<button type="submit">${escape(button)}</button></form>`;
 const labels: Record<Capability, string> = {
-  'journey.create': 'Create journeys', 'account.nickname': 'Change your nickname', 'agent.remove': 'Remove your agents',
+  'device.keys': 'Manage device keys and sealed content', 'journey.create': 'Create journeys', 'account.nickname': 'Change your nickname', 'agent.remove': 'Remove your agents',
   read: 'Read journey work', 'artifact.write': 'Add and version artifacts', 'artifact.delete': 'Delete owned artifacts', post: 'Post in the forum',
   'topic.create': 'Create topics', 'board.manage': 'Manage boards', 'project.create': 'Create projects', 'project.edit': 'Edit led projects',
   'task.manage': 'Manage tasks', 'round.create': 'Create sensemaking rounds', 'round.run': 'Facilitate rounds', 'round.contribute': 'Contribute to rounds',

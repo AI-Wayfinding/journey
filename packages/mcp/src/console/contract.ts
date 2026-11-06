@@ -27,7 +27,7 @@ export const recordOperation = z.discriminatedUnion('op', [
 export type RecordOperation = z.infer<typeof recordOperation>;
 export interface ConsoleBackend extends CoordinationBackend {
   oauth(operation: import('../oauth-contract.ts').OAuthOperation): Promise<import('../oauth-contract.ts').OAuthResult>;
-  consentAgent(subject: string, id: string, consent: import('../oauth-contract.ts').AgentConsent): Promise<string>;
+  consentAgent(subject: string, id: string, consent: import('../oauth-contract.ts').AgentConsent, assertion?: AuthenticationResponseJSON): Promise<string>;
   manageAgent(identity: ClientIdentity, agentId: string, name: string, journeys: string[]): Promise<void>;
   passkey(identity: ClientIdentity, operation: PasskeyOperation): Promise<ToolData>;
   consoleRecord(operation: RecordOperation): Promise<ConsoleRecord | undefined>;

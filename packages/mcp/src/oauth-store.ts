@@ -7,7 +7,7 @@ export const randomToken = () => base64url(crypto.getRandomValues(new Uint8Array
 export const tokenHash = async (value: string) => base64url(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))));
 
 /** Runs inside AccountsHost's serial turn; its caller atomically replaces accounts, including these records. */
-export async function oauthStep(state: OAuthAccounts, op: OAuthOperation, now: number): Promise<OAuthResult> {
+export async function oauthStep(state: OAuthAccounts, op: OAuthOperation, now: number, deviceAsserted = false): Promise<OAuthResult> {
   const db = state.oauth ??= { clients: [], requests: [], codes: [], access: [], refresh: [] };
   db.requests = db.requests.filter(r => r.request.expiresAt > now);
   db.codes = db.codes.filter(r => r.expiresAt > now);
@@ -49,11 +49,13 @@ export async function oauthStep(state: OAuthAccounts, op: OAuthOperation, now: n
       return { kind: 'request', request: db.requests.find(r => r.id === op.id)?.request };
     }
     case 'deny': db.requests = db.requests.filter(r => r.id !== op.id); return { kind: 'ok' };
+    case 'consent-options': throw new Refused('Passkey options require the Accounts host');
     case 'consent': {
       const request = db.requests.find(r => r.id === op.id)?.request;
       const account = state.accounts.find(a => a.subject === op.subject && a.live);
       if (!request || !account) throw new Refused('Fresh authorization and account required');
       const caps = assignable(op.consent.capabilities);
+      if (caps.includes('device.keys') && !deviceAsserted) throw new Refused('Device keys require a passkey assertion');
       let client = account.clients.indexOf(request.clientId) + 1;
       let agent = cell(account.bindings, 'Bound', client) === 1 ? account.agents[cell(account.bindings, 'Agents', client) - 2] : undefined;
       // Do not let overlapping consent submissions race their cross-object journey updates.
