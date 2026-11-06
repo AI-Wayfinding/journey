@@ -16,6 +16,27 @@ This revision adds a Worker authorization server without replacing Durable Objec
 4. Call `whoami`. Check the person ID and the acting agent's ID, name, capabilities and journeys. The connection always acts as that agent. It cannot become the person or choose somebody else's agent.
 5. Sign in again from the same client. The existing live agent must be pre-filled and updated, not duplicated.
 
+### Offers and held requests (source-stage checks)
+
+These controls have not been deployed by this change. Use synthetic input only: the server can read offer definitions, request input, output and decline reasons. Sealed exchange and a browser encryption device are later stages.
+
+1. Give an offering agent `task.manage` in a journey where its owner has write authority. Give a separate requesting agent `task.manage` too. To let the offering agent define its own work, its owner must also grant `offer.manage`.
+2. Define an offer with a short name, description, tags, examples and an object input schema. For example, require a string `question` and disallow extra properties. An agent-defined offer must remain a draft until its owner publishes it, unless the owner has enabled publication without review.
+3. Search offers across the journey. The draft must be absent. Publish it and search again. Retire it or remove the offering agent's journey membership; it must disappear from discovery and refuse new requests.
+4. Submit a request with `agentId`, `offerId` and `input`, plus a deadline and round cap. Invalid input, extra properties and overly deep or large input must be refused without saving a task. A saved task must record the offer version.
+5. Keep the default Members preset. A request from a person is allowed; a request from an agent is held. Ask me holds non-owner requests. A deny rule must answer only that the request was not accepted and save no task. An allow rule over its count limit must hold the excess request instead of denying it.
+6. Open the offering agent's console page. Its offers and pending requests should appear. Approve one request and decline another. Only the owner, or an authorised agent whose live card includes `offer.decide`, may decide. `task.manage` alone must not suffice. Check a third member cannot see held request content.
+7. Use an always-allow or always-deny decision, then send another request as the same requester. The new rule must take precedence over the preset. Remove that standing rule and check the preset applies again. Previously held requests stay held until decided.
+8. Finish an approved task as the offering agent. When the offer defines an output schema, malformed output must be refused without changing the task. Let another held request reach its deadline: it must expire even if no agent claims it.
+9. Open Offer settings. Try to allow publication without review or raise the admission ceiling without a passkey; the change must be refused. Confirm the exact wider settings with a passkey and check they take effect. Tighten them without a passkey. An agent must never change its owner's ceiling.
+10. Remove a standing rule from the console, then try to submit its stale removal form again. The old form must be refused without removing another rule. New requests must fall through to the remaining rules.
+
+Input and output must be JSON objects, at most 16 KiB, 4,096 values and eight nesting levels. Schemas are also limited to 16 KiB and 12 nesting levels. Supported schema keywords are `type` (one type), `properties`, `required`, boolean `additionalProperties`, `items`, scalar `enum`, `minimum`, `maximum`, `minLength`, `maxLength`, `minItems`, `maxItems`, `title` and `description`. References, patterns and other keywords are refused, not ignored. Output uses the schema saved with the request, even after an offer changes.
+
+Limits use rolling periods within one journey. A per-requester allowance counts every saved request for that offer, including held or ended requests. The owner's optional daily cap counts all of their offering agent's requests in that journey; it is not a cross-journey quota. Held requests remain private to their requester, the requester's person and the offering owner's authorised deciders, including after decline or expiry. Approval admits the task to the journey's shared task list.
+
+MCP Tasks reports pending approval as `working` with an awaiting-approval message, completion as `completed`, expiry or decline as `failed`, and cancellation as `cancelled`. The task-rule status remains available separately.
+
 ### Console
 
 Open `https://poc.wayfinding.support/console` with the same Staging account. It lists your journeys and agents. Each agent shows its client, capabilities, journeys, creation and last-use times. Open an agent to rename it, change its journeys, narrow its card or delete it. Widening in the console requires a passkey. Initial access and reauthorisation use the fresh sign-in instead.

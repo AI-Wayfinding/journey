@@ -1,4 +1,6 @@
 import * as z from 'zod';
+import { type OfferAgent, type StandingDecision } from './offers.ts';
+const standingSchema = z.object({ id: z.string().min(1).max(200), owner: z.string().min(1).max(200), agentId: z.string().min(1).max(200), offerId: z.string().min(1).max(200), who: z.union([z.object({ person: z.string().min(1).max(200) }).strict(), z.object({ agent: z.string().min(1).max(200) }).strict()]), decision: z.enum(['allow', 'deny']) }).strict();
 import { AccountsHost, WorkOSProfiles, type Account } from './accounts.ts';
 import { Backend, type AccountsPort, type JourneyPort } from './backend.ts';
 import { Refused, parseCommand, type Command, type ToolData } from './commands.ts';
@@ -37,7 +39,9 @@ async function respond(operation: () => Promise<unknown>): Promise<Response> {
 /** DO adapters keep rules and writes in the serial, tested host. */
 export class Journey {
   private readonly host: JourneyHost;
-  constructor(state: ObjectState, env?: Pick<ObjectBindings, 'BLOBS'>, now: () => number = Date.now) { this.host = new JourneyHost(state.storage, now, env?.BLOBS); }
+  constructor(state: ObjectState, env?: Pick<ObjectBindings, 'BLOBS'> & Partial<Pick<ObjectBindings, 'ACCOUNTS'>>, now: () => number = Date.now) {
+    this.host = new JourneyHost(state.storage, now, env?.BLOBS, env?.ACCOUNTS ? { directory: () => call<OfferAgent[]>(env.ACCOUNTS!, 'accounts', { action: 'offerDirectory' }), stand: decision => call<void>(env.ACCOUNTS!, 'accounts', { action: 'standingDecision', decision }) } : undefined);
+  }
   alarm(): Promise<void> { return this.host.alarm(); }
   async fetch(request: Request): Promise<Response> {
     try {
@@ -70,6 +74,8 @@ export class Accounts {
     return respond(async () => {
       if (request.method !== 'POST') throw new Refused('Internal requests must be POST');
       const body = record(await request.json());
+      if (body['action'] === 'offerDirectory') return this.host.offerDirectory();
+      if (body['action'] === 'standingDecision') return this.host.standingDecision(standingSchema.parse(body['decision']));
       if (body['action'] === 'oauth') return this.host.oauth(oauthOperation.parse(body['operation']));
       if (body['action'] === 'consoleRecord') return this.host.consoleRecord(recordOperation.parse(body['operation']));
       if (body['action'] === 'passkey') return this.host.passkey({ subject: field(body, 'subject'), clientId: field(body, 'clientId') }, passkeyOperation.parse(body['operation']));
@@ -111,6 +117,8 @@ async function watch(namespace: ObjectNamespace, id: string, personId: string, a
 }
 export function durableBackend(env: ObjectBindings): Backend {
   const accounts: AccountsPort = {
+    offerDirectory: () => call<OfferAgent[]>(env.ACCOUNTS, 'accounts', { action: 'offerDirectory' }),
+    standingDecision: decision => call<void>(env.ACCOUNTS, 'accounts', { action: 'standingDecision', decision }),
     oauth: operation => call(env.ACCOUNTS, 'accounts', { action: 'oauth', operation }),
     consoleRecord: (operation) => call<ConsoleRecord | undefined>(env.ACCOUNTS, 'accounts', { action: 'consoleRecord', operation }),
     passkey: (identity, operation) => call(env.ACCOUNTS, 'accounts', { action: 'passkey', subject: identity.subject, clientId: identity.clientId, operation }),

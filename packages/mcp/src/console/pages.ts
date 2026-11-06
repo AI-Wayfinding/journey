@@ -14,6 +14,7 @@ const labels: Record<Capability, string> = {
   read: 'Read journey work', 'artifact.write': 'Add and version artifacts', 'artifact.delete': 'Delete owned artifacts', post: 'Post in the forum',
   'topic.create': 'Create topics', 'board.manage': 'Manage boards', 'project.create': 'Create projects', 'project.edit': 'Edit led projects',
   'task.manage': 'Manage tasks', 'round.create': 'Create sensemaking rounds', 'round.run': 'Facilitate rounds', 'round.contribute': 'Contribute to rounds',
+  'offer.manage': 'Manage offers', 'offer.decide': 'Decide offer requests',
   'member.invite': 'Invite people', 'member.admit': 'Admit people', 'member.remove': 'Remove members', 'journey.policy': 'Manage journey policy', 'grant.issue': 'Issue grants (person only)',
 };
 export function capabilityFields(assigned: readonly string[]): string {
@@ -39,13 +40,44 @@ export async function home(backend: ConsoleBackend, identity: ClientIdentity, cs
 }
 function when(value: unknown): string { return typeof value === 'number' ? escape(new Date(value).toISOString()) : 'Not recorded'; }
 function rowsCapabilities(value: unknown): Capability[] { return z.array(z.enum(capabilities.map(c => c.name))).parse(value); }
+async function agentOffers(backend: ConsoleBackend, identity: ClientIdentity, agentId: string, journeys: ToolData[], csrf: string): Promise<string> {
+  const call = (tool: string, input: Record<string, unknown>) => backend.execute(identity.subject, parseCommand(tool, input), identity.clientId);
+  const listed = await call('offer_list', { agentId });
+  const offers = rows(listed.offers);
+  const settings = z.object({ publishWithoutReview: z.boolean(), maxAdmission: z.enum(['hold', 'allow']), maxRequestsPerDay: z.number().int().min(0).max(1000) }).parse(listed.settings);
+  const taskGroups = await Promise.all(journeys.map(async j => ({ journey: j, tasks: rows((await call('journey_read', { journeyId: j.journeyId })).tasks) })));
+  const pending = taskGroups.flatMap(({ journey, tasks }) => tasks.filter(t => t.status === 'requested' && (t.assignee === agentId || t.claimant === agentId)).map(task => ({ journey, task })));
+  const settingsForm = `<details><summary>Offer settings</summary><p>You set this agent's ceiling. Saving tighter settings needs no passkey. Wider permission requires your passkey.</p><form method="post" action="/console/offers/settings">${hidden('csrf', csrf)}${hidden('agentId', agentId)}${hidden('kind', 'offer_settings')}<label>Publish without review <select name="publishWithoutReview"><option value="false"${!settings.publishWithoutReview ? ' selected' : ''}>Review drafts</option><option value="true"${settings.publishWithoutReview ? ' selected' : ''}>Allowed</option></select></label><label>Agent admission ceiling <select name="maxAdmission"><option value="hold"${settings.maxAdmission === 'hold' ? ' selected' : ''}>Hold or deny</option><option value="allow"${settings.maxAdmission === 'allow' ? ' selected' : ''}>May allow requests</option></select></label><label>Requests per day (0 means unlimited) <input name="maxRequestsPerDay" type="number" min="0" max="1000" required value="${settings.maxRequestsPerDay}"></label><button type="submit">Save tighter settings</button><button type="submit" formaction="/console/authorize/start">Review and confirm wider settings</button></form></details>`;
+  const offerForms = (offer: ToolData) => {
+    const fields = hidden('agentId', agentId) + hidden('offerId', offer.id);
+    const standingRules = rows(offer.admission && typeof offer.admission === 'object' ? (offer.admission as ToolData).rules : []);
+    const standing = standingRules.flatMap((rule, index) => {
+      if (!rule.who || typeof rule.who !== 'object') return [];
+      const who = rule.who as ToolData;
+      const requester = typeof who.person === 'string' ? `person ${who.person}` : typeof who.agent === 'string' ? `agent ${who.agent}` : undefined;
+      if (!requester) return [];
+      return [`<li>${escape(rule.decision === 'allow' ? 'Always allowed' : rule.decision === 'deny' ? 'Always denied' : 'Always held')}: ${escape(requester)}${form('/console/offers/rule-remove', csrf, fields + hidden('version', offer.version) + hidden('ruleIndex', index), 'Remove standing rule')}</li>`];
+    }).join('');
+    return (offer.status === 'draft' ? form('/console/offers/publish', csrf, fields, 'Publish offer') : '')
+      + (offer.status === 'published' ? form('/console/offers/retire', csrf, fields, 'Retire offer') : '')
+      + (standing ? `<ul>${standing}</ul>` : '');
+  };
+  const decision = (journey: ToolData, task: ToolData, action: 'approve' | 'decline') => form('/console/offers/decide', csrf,
+    hidden('agentId', agentId) + hidden('journeyId', journey.journeyId) + hidden('taskId', task.taskId) + hidden('action', action)
+      + (action === 'decline' ? '<label>Reason (optional) <input name="reason" maxlength="1000"></label>' : '')
+      + `<label><input type="checkbox" name="standing" value="${action === 'approve' ? 'always_allow' : 'always_deny'}"> Always ${action === 'approve' ? 'allow' : 'deny'} this requester</label>`,
+    action === 'approve' ? 'Approve request' : 'Decline request');
+  return `<section><h2>Offers</h2><p>Agent-defined offers stay in draft until you publish them, unless you permit publication without review. The server can read offer and request content in this stage. Use synthetic data only.</p>${settingsForm}<ul>${offers.map(o => `<li><h3>${escape(o.name)}</h3><p>${escape(o.description)}</p><p>${escape(o.status)} · Version ${escape(o.version)}</p><ul class="chips">${z.array(z.string()).parse(o.tags ?? []).map(t => `<li>${escape(t)}</li>`).join('')}</ul><details><summary>Input schema</summary><pre>${escape(JSON.stringify(o.inputSchema, null, 2))}</pre></details>${offerForms(o)}</li>`).join('') || '<li>No offers yet. Ask this agent to define one with offer_set.</li>'}</ul></section>
+    <section><h2>Pending requests</h2><ul>${pending.map(({journey, task}) => `<li><h3>${escape(task.name)}</h3><p>${escape(journey.name)} · Requester: ${escape(task.creator)} · Offer: ${escape(task.offerId)} · Version ${escape(task.offerVersion)}</p><pre>${escape(JSON.stringify(task.input ?? {}, null, 2))}</pre>${decision(journey, task, 'approve')}${decision(journey, task, 'decline')}</li>`).join('') || '<li>No pending requests.</li>'}</ul></section>`;
+}
 export async function agentPage(backend: ConsoleBackend, identity: ClientIdentity, agentId: string, csrf: string): Promise<string> {
   const agent = await backend.execute(identity.subject, parseCommand('agent_capabilities', { agentId }), identity.clientId);
   const assigned = rowsCapabilities(agent.capabilities);
   const journeyRows = rows((await backend.execute(identity.subject, parseCommand('journey_list', {}), identity.clientId)).journeys).filter(j => !j.pending);
   const selected = z.array(z.string()).parse(agent.journeys ?? []);
   const journeyFields = `<fieldset><legend>Journeys</legend>${journeyRows.map(j => `<label><input type="checkbox" name="journeys" value="${escape(j.journeyId)}"${selected.includes(String(j.journeyId)) ? ' checked' : ''}> ${escape(j.name)}</label>`).join('')}</fieldset>`;
-  return page(String(agent.name), `<p>Client: ${escape(agent.clientName ?? clientLabel(agent.clientId ?? 'Not connected'))} · Created: ${when(agent.createdAt)} · Last used: ${when(agent.lastUsedAt)}</p><p>Permissions apply only while you and this agent remain live. Journey roles, ownership and facilitator authority still apply. Agents never issue grants.</p><h2>Name and journeys</h2>${form('/console/agents/update', csrf, hidden('agentId', agentId) + `<label>Agent name <input name="name" value="${escape(agent.name)}" maxlength="60" required></label>` + journeyFields, 'Save name and journeys')}<h2>Set capabilities</h2><p>Widening needs your passkey. Removing capabilities below does not.</p>${form('/console/authorize/start', csrf, hidden('kind', 'card') + hidden('agentId', agentId) + capabilityFields(assigned), 'Review and confirm with passkey')}<h2>Remove capabilities now</h2>${form('/console/agents/narrow', csrf, hidden('agentId', agentId) + assigned.map(c => `<label><input type="checkbox" name="capabilities" value="${escape(c)}"> Remove ${escape(labels[c])}</label>`).join(''), 'Remove selected capabilities')}<h2>Delete agent</h2>${form('/console/agents/remove', csrf, hidden('agentId', agentId), 'Delete agent and revoke access')}`, csrf);
+  const offerSections = await agentOffers(backend, identity, agentId, journeyRows, csrf);
+  return page(String(agent.name), `<p>Client: ${escape(agent.clientName ?? clientLabel(agent.clientId ?? 'Not connected'))} · Created: ${when(agent.createdAt)} · Last used: ${when(agent.lastUsedAt)}</p><p>Permissions apply only while you and this agent remain live. Journey roles, ownership and facilitator authority still apply. Agents never issue grants.</p><h2>Name and journeys</h2>${form('/console/agents/update', csrf, hidden('agentId', agentId) + `<label>Agent name <input name="name" value="${escape(agent.name)}" maxlength="60" required></label>` + journeyFields, 'Save name and journeys')}<h2>Set capabilities</h2><p>Widening needs your passkey. Removing capabilities below does not.</p>${form('/console/authorize/start', csrf, hidden('kind', 'card') + hidden('agentId', agentId) + capabilityFields(assigned), 'Review and confirm with passkey')}<h2>Remove capabilities now</h2>${form('/console/agents/narrow', csrf, hidden('agentId', agentId) + assigned.map(c => `<label><input type="checkbox" name="capabilities" value="${escape(c)}"> Remove ${escape(labels[c])}</label>`).join(''), 'Remove selected capabilities')}${offerSections}<h2>Delete agent</h2>${form('/console/agents/remove', csrf, hidden('agentId', agentId), 'Delete agent and revoke access')}`, csrf);
 }
 export async function passkeysPage(backend: ConsoleBackend, identity: ClientIdentity, csrf: string): Promise<string> {
   const keys = rows((await backend.passkey(identity, { op: 'list' })).passkeys);
@@ -58,7 +90,11 @@ export async function passkeysPage(backend: ConsoleBackend, identity: ClientIden
   return page('Passkeys', `<p>A passkey confirms wider agent permissions in this console. Naming an agent and choosing its initial access happens when you connect your client.</p><ul class="passkeys">${keys.map(item).join('') || '<li>No passkeys registered.</li>'}</ul><form method="post" action="/console/passkeys/register" data-ceremony="register" data-options="/console/passkeys/options">${hidden('csrf', csrf)}<button type="submit">Register a passkey</button></form>`, csrf);
 }
 export function confirmation(change: CardChange, csrf: string, agentName?: string): string {
-  return page('Confirm permissions', `<p>Use your passkey to confirm this exact change.</p><dl class="facts"><dt>Action</dt><dd>${escape(change.kind === 'card' ? 'Set agent permissions' : change.kind === 'bind' ? 'Make a client act as this agent' : 'Stop a client acting as this agent')}</dd><dt>Agent</dt><dd>${escape(agentName ?? change.agentId)}</dd>${change.kind === 'card' ? `<dt>Capabilities</dt><dd>${change.capabilities.length ? `<ul class="chips">${change.capabilities.map(c => `<li>${escape(labels[c as Capability] ?? c)}</li>`).join('')}</ul>` : 'None'}</dd>` : `<dt>Client</dt><dd>${escape(change.clientId)}</dd>`}</dl><form method="post" action="/console/authorize/complete" data-ceremony="assert" data-options="/console/authorize/options">${hidden('csrf', csrf)}${hidden('change', JSON.stringify(change))}<button type="submit">Confirm with passkey</button></form><p><a href="/console">Cancel</a></p>`, csrf);
+  const action = change.kind === 'card' ? 'Set agent permissions' : change.kind === 'offer_settings' ? 'Set offer permissions' : change.kind === 'bind' ? 'Make a client act as this agent' : 'Stop a client acting as this agent';
+  const details = change.kind === 'card' ? `<dt>Capabilities</dt><dd>${change.capabilities.length ? `<ul class="chips">${change.capabilities.map(c => `<li>${escape(labels[c as Capability] ?? c)}</li>`).join('')}</ul>` : 'None'}</dd>`
+    : change.kind === 'offer_settings' ? `<dt>Publish without review</dt><dd>${change.settings.publishWithoutReview === undefined ? 'Unchanged' : change.settings.publishWithoutReview ? 'Allowed' : 'Review drafts'}</dd><dt>Agent admission ceiling</dt><dd>${escape(change.settings.maxAdmission ?? 'Unchanged')}</dd><dt>Requests per day</dt><dd>${escape(change.settings.maxRequestsPerDay ?? 'Unchanged')}</dd>`
+    : `<dt>Client</dt><dd>${escape(change.clientId)}</dd>`;
+  return page('Confirm permissions', `<p>Use your passkey to confirm this exact change.</p><dl class="facts"><dt>Action</dt><dd>${escape(action)}</dd><dt>Agent</dt><dd>${escape(agentName ?? change.agentId)}</dd>${details}</dl><form method="post" action="/console/authorize/complete" data-ceremony="assert" data-options="/console/authorize/options">${hidden('csrf', csrf)}${hidden('change', JSON.stringify(change))}<button type="submit">Confirm with passkey</button></form><p><a href="/console">Cancel</a></p>`, csrf);
 }
 export function journeyNav(journeyId: string): string {
   const root = `/console/journeys/${segment(journeyId)}`;

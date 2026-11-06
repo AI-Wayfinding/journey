@@ -471,7 +471,7 @@ test('tasks: Durable Object alarm expires an in-round task after eviction using 
   await new Journey({ storage: store }, undefined, () => 4000).alarm();
   assert.equal(store.alarmAt, undefined);
   const expired = await f.alice.request({ method: 'tasks/get', params: { taskId } }, z.record(z.string(), z.unknown()));
-  assert.equal(expired.status, 'completed'); assert.equal((expired.result as Data).isError, true);
+  assert.equal(expired.status, 'failed'); assert.equal((expired.result as Data).isError, true);
 });
 
 test('tasks: capabilities reflect live person and card limits without allowing agent grants', async (t) => {

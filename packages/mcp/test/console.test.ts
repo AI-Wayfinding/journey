@@ -37,6 +37,102 @@ async function fixture() {
   return { backend, send, exchanges, login, advance: (ms: number) => { now += ms; }, access: (value: string) => { accessToken = value; } };
 }
 
+test('console: an agent page shows its offers and pending requests', async () => {
+  const f = await fixture(), login = await f.login();
+  const agentId = String((await f.backend.execute('alice', parseCommand('agent_create', { name: 'Offer helper' }), clientId)).agentId);
+  const response = await f.send(`/console/agents/${encodeURIComponent(agentId)}`, { headers: { cookie: login.cookie } });
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /<h2[^>]*>Offers<\/h2>/);
+  assert.match(html, /<h2[^>]*>Pending requests<\/h2>/);
+  assert.match(html, /No offers yet/);
+  assert.match(html, /No pending requests/);
+});
+test('console: owners publish offers and decide held requests through CSRF-protected forms', async () => {
+  const f = await fixture(), login = await f.login(), key = await authenticator();
+  const csrf = csrfOf(await (await f.send('/console', { headers: { cookie: login.cookie } })).text());
+  const post = (path: string, body: Record<string, unknown>, sentCsrf = csrf) => f.send(path, { method: 'POST', headers: { cookie: login.cookie, origin, 'content-type': 'application/json' }, body: JSON.stringify({ ...body, csrf: sentCsrf }) });
+  const call = (subject: string, tool: string, input: Record<string, unknown>) => f.backend.execute(subject, parseCommand(tool, input), subject === 'alice' ? clientId : 'trusted-other-person');
+  const journeyId = String((await call('alice', 'journey_create', { name: 'Offer test journey', policy: 'open', defaultRole: 'write' })).journeyId);
+  const agentId = String((await call('alice', 'agent_create', { name: 'Offering helper' })).agentId);
+  const registration = await (await post('/console/passkeys/options', {})).json() as { challenge: string };
+  assert.equal((await post('/console/passkeys/register', { credential: key.register(registration.challenge) })).status, 303);
+  const change = { kind: 'card', agentId, capabilities: ['read', 'task.manage'] };
+  const authorization = await (await post('/console/authorize/options', { change })).json() as { challenge: string };
+  assert.equal((await post('/console/authorize/complete', { change, assertion: await key.assert(authorization.challenge) })).status, 303);
+  await call('alice', 'agent_add', { journeyId, agentId });
+  await call('bob', 'journey_join', { journeyId });
+  await call('charlie', 'journey_join', { journeyId });
+  await call('alice', 'offer_set', { agentId, offer: { id: 'review', name: '<script>Review</script>', description: 'Synthetic review', tags: ['review'], inputSchema: { type: 'object', properties: { question: { type: 'string' } }, required: ['question'], additionalProperties: false }, admission: { rules: [], default: 'hold' } } });
+  const readPage = async () => {
+    const response = await f.send(`/console/agents/${agentId}`, { headers: { cookie: login.cookie } });
+    assert.equal(response.status, 200);
+    return response.text();
+  };
+  const draft = await readPage();
+  assert.equal(draft.includes('&lt;script&gt;Review&lt;/script&gt;'), true);
+  assert.equal(draft.includes('<script>Review</script>'), false);
+  assert.equal(draft.includes('Publish offer'), true);
+  assert.equal((await post('/console/offers/publish', { agentId, offerId: 'review' }, 'wrong')).status, 403);
+  assert.equal((await post('/console/offers/publish', { agentId, offerId: 'review' })).status, 303);
+  const request = async (subject: string, question: string) => {
+    await call(subject, 'task_create', { journeyId, name: 'Review request', agentId, offerId: 'review', input: { question }, deadline: Date.now() + 3_600_000, maxRounds: 2 });
+    const view = await call('alice', 'journey_read', { journeyId });
+    return (view.tasks as { taskId: string; creator: string; status: string; input?: { question: string } }[]).find(t => t.input?.question === question)!;
+  };
+  const first = await request('bob', '<img src=x onerror=alert(1)>');
+  assert.equal(first.status, 'requested');
+  const pending = await readPage();
+  assert.equal(pending.includes('&lt;img src=x onerror=alert(1)&gt;'), true);
+  assert.equal(pending.includes('<img src=x onerror=alert(1)>'), false);
+  assert.equal(pending.includes('Approve request'), true);
+  assert.equal(pending.includes('Decline request'), true);
+  assert.equal((await post('/console/offers/decide', { agentId, journeyId, taskId: first.taskId, action: 'approve' }, 'wrong')).status, 403);
+  assert.equal((await post('/console/offers/decide', { agentId, journeyId, taskId: first.taskId, action: 'approve', standing: 'always_allow', isDecider: true, actingAgent: 'fake' })).status, 303);
+  const second = await request('bob', 'A second question');
+  assert.equal(second.status, 'claimed', 'the standing rule was applied by the backend');
+  const third = await request('charlie', 'A different requester');
+  assert.equal(third.status, 'requested');
+  assert.equal((await post('/console/offers/decide', { agentId, journeyId, taskId: third.taskId, action: 'decline', reason: 'Not this time' })).status, 303);
+  const view = await call('alice', 'journey_read', { journeyId });
+  const tasks = view.tasks as { taskId: string; status: string; reason?: string }[];
+  assert.equal(tasks.find(t => t.taskId === first.taskId)?.status, 'claimed');
+  assert.equal(tasks.find(t => t.taskId === third.taskId)?.status, 'declined');
+  assert.equal(tasks.find(t => t.taskId === third.taskId)?.reason, 'Not this time');
+  assert.equal((await readPage()).includes('No pending requests.'), true);
+  const beforeRemoval = (await call('alice', 'offer_list', { agentId })).offers as { version: number; admission: { rules: { who: unknown }[] } }[];
+  const version = beforeRemoval[0]!.version;
+  assert.equal((await readPage()).includes('Always allowed'), true);
+  assert.equal((await post('/console/offers/rule-remove', { agentId, offerId: 'review', version: version - 1, ruleIndex: 0 })).status, 403);
+  assert.equal((await post('/console/offers/rule-remove', { agentId, offerId: 'review', version, ruleIndex: 0 })).status, 303);
+  assert.equal((await post('/console/offers/rule-remove', { agentId, offerId: 'review', version, ruleIndex: 0 })).status, 403, 'stale form cannot remove a different rule');
+  const fourth = await request('bob', 'Back to the group rule');
+  assert.equal(fourth.status, 'requested');
+  assert.equal((await post('/console/offers/retire', { agentId, offerId: 'review' })).status, 303);
+  const offers = (await call('alice', 'offer_list', { agentId })).offers as { status: string }[];
+  assert.equal(offers[0]?.status, 'retired');
+});
+test('console: wider offer settings require the exact passkey change and tighter settings do not', async () => {
+  const f = await fixture(), login = await f.login(), key = await authenticator();
+  const csrf = csrfOf(await (await f.send('/console', { headers: { cookie: login.cookie } })).text());
+  const post = (path: string, body: Record<string, unknown>) => f.send(path, { method: 'POST', headers: { cookie: login.cookie, origin, 'content-type': 'application/json' }, body: JSON.stringify({ csrf, ...body }) });
+  const call = (tool: string, input: Record<string, unknown>) => f.backend.execute('alice', parseCommand(tool, input), clientId);
+  const agentId = String((await call('agent_create', { name: 'Settings helper' })).agentId);
+  const options = await (await post('/console/passkeys/options', {})).json() as { challenge: string };
+  assert.equal((await post('/console/passkeys/register', { credential: key.register(options.challenge) })).status, 303);
+  const settings = { publishWithoutReview: true, maxAdmission: 'allow', maxRequestsPerDay: 10 };
+  const change = { kind: 'offer_settings', agentId, settings };
+  assert.equal((await post('/console/offers/settings', { agentId, ...settings })).status, 403, 'a plain form cannot widen publication permission');
+  const review = await post('/console/authorize/start', { kind: 'offer_settings', agentId, ...settings });
+  assert.equal(review.status, 200);
+  assert.match(await review.text(), /Publish without review.*Allowed.*Requests per day.*10/s);
+  const authorization = await (await post('/console/authorize/options', { change })).json() as { challenge: string };
+  assert.equal((await post('/console/authorize/complete', { change, assertion: await key.assert(authorization.challenge) })).status, 303);
+  assert.deepEqual((await call('offer_settings', { agentId })).settings, settings);
+  assert.equal((await post('/console/offers/settings', { agentId, publishWithoutReview: 'false', maxAdmission: 'hold', maxRequestsPerDay: '5' })).status, 303);
+  assert.deepEqual((await call('offer_settings', { agentId })).settings, { publishWithoutReview: false, maxAdmission: 'hold', maxRequestsPerDay: 5 });
+});
+
 test('console: OAuth metadata and PKCE login create an eight-hour hardened session', async () => {
   const f = await fixture();
   const metadata = await f.send('/console/client.json');

@@ -1,4 +1,5 @@
 import * as z from 'zod';
+import { settingsSchema, type Offer, type OwnerOfferSettings } from './offers.ts';
 import { verifyAuthenticationResponse, type AuthenticationResponseJSON } from '@simplewebauthn/server';
 import { capabilities, type Capability } from '../../rules/src/capabilities.ts';
 import { cardRule, cell, scalar, type Snapshot } from './rules.ts';
@@ -13,11 +14,12 @@ export const capabilitySchema = z.enum(capabilities.map(c => c.name));
 const id = z.string().min(1).max(200);
 export const changeSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('card'), agentId: id, capabilities: z.array(capabilitySchema).max(capabilities.length) }).strict(),
+  z.object({ kind: z.literal('offer_settings'), agentId: id, settings: settingsSchema.partial() }).strict(),
   z.object({ kind: z.enum(['bind', 'unbind']), clientId: id, agentId: id }).strict(),
 ]);
 export type CardChange = z.infer<typeof changeSchema>;
 export interface ClientIdentity { subject: string; clientId: string }
-export interface AccountAgent { id: string; name: string; live: boolean; card: Snapshot; clientId?: string; clientName?: string; createdAt?: number; lastUsedAt?: number; journeys?: string[]; authorizationPending?: boolean; pendingConsentId?: string }
+export interface AccountAgent { id: string; name: string; live: boolean; card: Snapshot; clientId?: string; clientName?: string; createdAt?: number; lastUsedAt?: number; journeys?: string[]; authorizationPending?: boolean; pendingConsentId?: string; offers?: Offer[]; offerSettings?: OwnerOfferSettings; standingReceipts?: string[] }
 export interface Actor { personId: string; agent?: AccountAgent }
 /** aaguid names the provider (e.g. 1Password); name is the person's own label. Older records lack the optional fields. */
 export interface PasskeyCredential { id: string; publicKey: number[]; counter: number; aaguid?: string; name?: string; createdAt?: number; lastUsedAt?: number }
@@ -58,7 +60,7 @@ export function requireAccountCapability(actor: Actor, cap: Capability): void {
   if (!allows(actor, cap, true)) throw new Refused(`Account capability ${cap} refused`);
 }
 export async function changeDigest(personId: string, change: CardChange): Promise<string> {
-  const canonical = change.kind === 'card' ? [personId, 'card', change.agentId, assignable(change.capabilities)] : [personId, change.kind, change.clientId, change.agentId];
+  const canonical = change.kind === 'card' ? [personId, 'card', change.agentId, assignable(change.capabilities)] : change.kind === 'offer_settings' ? [personId, change.kind, change.agentId, change.settings.publishWithoutReview, change.settings.maxAdmission, change.settings.maxRequestsPerDay] : [personId, change.kind, change.clientId, change.agentId];
   return base64url(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(canonical)))));
 }
 export function base64url(bytes: Uint8Array): string { return btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', ''); }

@@ -219,6 +219,14 @@ Dan's brief for v2 was to write the spec, build what seems best, and refine late
 - **Supersedes:** decision 28's reset policy for this additive card change, and decision 31's login-only confirmation for `device.keys`.
 - **Source:** `packages/mcp/src/accounts.ts`, `packages/mcp/src/oauth.ts`, `packages/mcp/src/rules.ts`; regression tests in `packages/mcp/test/oauth-as.test.ts` and `packages/mcp/test/device-compatibility.test.ts`.
 
+### 33. Offers turn advertised work into bounded requests
+
+- **Decided by:** Dan approved the offer model; this agent chose the server-stage details.
+- **What:** an agent advertises named offers with bounded descriptions, examples and input/output schemas. A request validates input before any task is saved and records the offer version. Ordered admission rules allow, hold or deny; a deny leaves no task. Per-requester limits hold excess requests. The default Members preset allows people and holds agents. Open allows members; Ask me holds everyone except the owner.
+- **Authority:** only the owner edits by default. `offer.manage` permits an agent to define its own offers, as drafts unless the owner permits publication without review. The owner sets an admission ceiling and an optional rolling 24-hour request cap across that agent’s offers in each journey. Raising that ceiling requires a passkey; an agent cannot raise it. Only the owner or an authorised agent with `offer.decide` may approve or decline a held request. These decisions never widen a card. Every request has a deadline and round cap.
+- **Boundary:** this stage stores content separately from routing and admission metadata, but does not encrypt it. Task exchange, sealed offers/cards and a browser MLS device are later stages. Use synthetic data only. Released MCP Apps views remain byte-for-byte unchanged; only the console gains offer and approval controls.
+- **Source:** `.work/drafts/offers.md`; `packages/mcp/src/offers.ts` and offer regression tests.
+
 ## Open
 
 - **Stage 6, cloud-client opt-in:** not built.

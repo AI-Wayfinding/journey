@@ -61,14 +61,15 @@ export const RULES: RulesStamp = Object.freeze({
   round: lock.files['generated/round.js'],
 });
 
-// The sole accepted predecessor adds no state fields; capability ids 0–19 retain their meaning.
+// Accepted predecessors add capabilities without changing existing state fields or ids.
 export const PRE_DEVICE_CARD_HASH = 'bcc89603e3ea46b30d1d4acd3f19abf380e652cab1fd195ebfa37b99ae3eb0a3';
-/** Accept the current rule modules or the explicit, data-compatible card predecessor. */
+export const PRE_OFFERS_CARD_HASH = '872d857a51fd9e80df54264533d1a42b43bce52f5bd576fa0249114f8e4b1933';
+/** Accept the current modules or either explicit, data-compatible card predecessor. */
 export function sameRules(stamp: unknown): boolean {
   if (typeof stamp !== 'object' || stamp === null) return false;
   const given = stamp as Record<string, unknown>;
   return (Object.keys(RULES) as (keyof RulesStamp)[]).every(key =>
-    given[key] === RULES[key] || (key === 'card' && given.card === PRE_DEVICE_CARD_HASH));
+    given[key] === RULES[key] || (key === 'card' && (given.card === PRE_DEVICE_CARD_HASH || given.card === PRE_OFFERS_CARD_HASH)));
 }
 
 /**

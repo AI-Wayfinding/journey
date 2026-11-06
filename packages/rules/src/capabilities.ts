@@ -25,6 +25,8 @@ export const capabilities = [
   {id: 18, name: 'journey.policy', scope: 'journey', authority: 'guide'},
   {id: 19, name: 'grant.issue', scope: 'journey', authority: 'member'},
   {id: 20, name: 'device.keys', scope: 'account', authority: 'member'},
+  {id: 21, name: 'offer.manage', scope: 'account', authority: 'member'},
+  {id: 22, name: 'offer.decide', scope: 'journey', authority: 'member'},
 ] as const satisfies readonly {id: number, name: string, scope: CapabilityScope, authority: BaseAuthority}[]
 export type Capability = typeof capabilities[number]['name']
 export const capabilityCount = capabilities.length
