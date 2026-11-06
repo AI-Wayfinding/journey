@@ -47,7 +47,11 @@ test('apps: versioned resources and app-only tools use official metadata', async
     ['ui://wayfinding/v2/library.html', 'text/html;profile=mcp-app'],
     ['ui://wayfinding/v2/round.html', 'text/html;profile=mcp-app'],
     ['ui://wayfinding/v3/forum.html', 'text/html;profile=mcp-app'],
-  ]);
+    ['ui://wayfinding/v3/agents.html', 'text/html;profile=mcp-app'],
+    ['ui://wayfinding/v3/library.html', 'text/html;profile=mcp-app'],
+    ['ui://wayfinding/v3/round.html', 'text/html;profile=mcp-app'],
+    ['ui://wayfinding/v4/forum.html', 'text/html;profile=mcp-app'],
+  ].sort());
   const tools = (await client.listTools()).tools;
   assert.deepEqual(tools.filter((tool) => tool.name.startsWith('apps_')).map((tool) => [tool.name, (tool._meta?.ui as { visibility: string[] }).visibility]).sort(), [
     ['apps_artifact_rename', ['app']], ['apps_artifacts_refresh', ['app']],
@@ -136,7 +140,7 @@ test('apps: adding a later release still serves and executes the original v1 URI
   const client = new Client({ name: 'release-host', version: '1.0.0' });
   await client.connect(new StreamableHTTPClientTransport(RESOURCE, { fetch: bridge(target) }));
   t.after(() => client.close());
-  assert.equal((await client.listResources()).resources.length, 9);
+  assert.equal((await client.listResources()).resources.length, 13);
   const v1 = (await client.readResource({ uri: 'ui://wayfinding/v1/journey.html' })).contents[0]!;
   const v2 = (await client.readResource({ uri: 'ui://wayfinding/v2/journey.html' })).contents[0]!;
   assert.ok('text' in v1 && 'text' in v2);
