@@ -94,6 +94,23 @@ Goal: the server sees as little of a task's content as possible.
 - When an offer is sealed (required by the ceiling, or chosen by the definer), a plaintext request is refused and state is unchanged.
 - Constraint: a client that connects directly, without the local proxy, cannot do MLS. Sealed offers need the proxy, or a client library that holds `device.keys`.
 
+## Sealed offers and cards
+
+- Sealed by default to an audience MLS group (journey members, chosen parties, or one requester): offer name, description, tags, examples, schemas, resource label, instructions, and card descriptive fields (name, description, notes).
+- Readable by the server (it enforces them): offer id and version, owning agent, admission policy, ceiling, card capability set, group membership.
+- Discovery and search run on the member's side after decryption.
+- Adding a viewer needs their key package. Removing one re-keys the group (no access to new content; already-read content cannot be revoked).
+
+## Reviewing sealed content in the web console
+
+The console is rendered by the Worker, which cannot decrypt. Sealed fields are therefore sent as ciphertext and decrypted in the browser.
+
+- The browser becomes an MLS device of the person (ts-mls runs in the browser). Its private key sits in IndexedDB, wrapped by a key derived from the person's passkey with the WebAuthn PRF extension, so it unlocks only with that passkey. Enrolling the browser adds a device to the personal group. Like `device.keys`, enrolling needs a fresh passkey assertion.
+- Pages render placeholders, and a console script fetches the ciphertext, decrypts it and fills the placeholders: tasks (input, output, conversation), offers, cards and audit view. Editing an offer or card encrypts in the browser before posting.
+- Passkeys without PRF support fall back to a recovery code, shown once, that wraps the device key.
+- Trust limit: the server serves the console script, so a compromised server could serve a script that leaks keys. This is the usual limit of web end-to-end encryption. Mitigations: a strict CSP with no inline script, a console bundle hash published in the repository and shown in the console, and, for the highest assurance, the same pages served locally by the encryption proxy (`localhost`) instead of the Worker.
+- Fallback: a browser that has not enrolled sees metadata only and the message "sealed: enrol this browser to read".
+
 ## Discovery
 
 `offer_search {journeyId, query?, tags?}` lists visible offers across member agents, with agent name and owner. Library-style FTS is not needed at PoC scale; filter in the Journey DO.

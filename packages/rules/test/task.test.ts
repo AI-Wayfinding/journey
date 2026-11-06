@@ -37,6 +37,41 @@ test('held request decisions, cancellation and deadline expiry are live-authorit
     assert.deepEqual(task.decode(after), {status, creator: 2, claimant: 7, roundsUsed: 0, cap: 0})
   }
 })
+
+test('the generated rule enforces held-request transitions and declined finality', () => {
+  const ops = ['create', 'claim', 'startRound', 'endRound', 'finish', 'cancel', 'expire', 'request', 'approve', 'decline'] as const
+  const params = task.encodeParams({})
+  const input = {actor: 2, agent: 7, isDecider: false, actorIsLive: true, deadlinePassed: false, maxRounds: 3}
+  for (const run of [task.interpreter(), generated]) {
+    const initial = run.init(params)
+    assert.deepEqual(run.step(params, initial, task.encodeInput({...input, op: 'request', actorIsLive: false})), initial)
+    const requested = run.step(params, initial, task.encodeInput({...input, op: 'request'}))
+    assert.deepEqual(task.decode(requested), {status: 'requested', creator: 2, claimant: 7, roundsUsed: 0, cap: 3})
+    for (const op of ['create', 'request', 'claim', 'startRound', 'endRound', 'finish'] as const) {
+      assert.deepEqual(run.step(params, requested, task.encodeInput({...input, op, actor: 7, isDecider: true})), requested, op)
+    }
+    for (const op of ['approve', 'decline'] as const) {
+      assert.deepEqual(run.step(params, requested, task.encodeInput({...input, op})), requested, op)
+      assert.deepEqual(run.step(params, requested, task.encodeInput({...input, op, isDecider: true, actorIsLive: false})), requested, op)
+    }
+    assert.deepEqual(run.step(params, requested, task.encodeInput({...input, op: 'approve', isDecider: true, deadlinePassed: true})), requested)
+    const approved = run.step(params, requested, task.encodeInput({...input, op: 'approve', actor: 4, isDecider: true}))
+    assert.deepEqual(task.decode(approved), {status: 'claimed', creator: 2, claimant: 7, roundsUsed: 0, cap: 3})
+    const declined = run.step(params, requested, task.encodeInput({...input, op: 'decline', actor: 4, isDecider: true}))
+    assert.deepEqual(task.decode(declined), {status: 'declined', creator: 2, claimant: 7, roundsUsed: 0, cap: 3})
+    for (const op of ops) {
+      assert.deepEqual(run.step(params, declined, task.encodeInput({...input, op, actor: 7, isDecider: true})), declined, op)
+    }
+    for (const [op, status] of [['cancel', 'cancelled'], ['expire', 'expired']] as const) {
+      const after = run.step(params, requested, task.encodeInput({...input, op, deadlinePassed: true}))
+      assert.deepEqual(task.decode(after), {status, creator: 2, claimant: 7, roundsUsed: 0, cap: 3})
+    }
+    // Immediate admission still takes the original create + claim path.
+    const open = run.step(params, initial, task.encodeInput({...input, op: 'create'}))
+    const claimed = run.step(params, open, task.encodeInput({...input, op: 'claim', actor: 7}))
+    assert.deepEqual(task.decode(claimed), {status: 'claimed', creator: 2, claimant: 7, roundsUsed: 0, cap: 3})
+  }
+})
 test('every law of task is proven from any stored state', () => {
   const v = proveSteps(task, laws, stepLaws, {from: 'any'})
   assert.equal(v.proven, true, `not proven: ${v.goal} (${v.stuck})`)
@@ -81,8 +116,8 @@ test('crossCheck agrees with the proven expressions', () => {
 test('the generated module steps to the same states as the interpreter', () => {
   const rand = seeded(11)
   const run = task.interpreter()
-  const ops = ['create', 'claim', 'startRound', 'endRound', 'finish', 'cancel', 'expire'] as const
-  const draw = () => ({op: ops[rand(7)]!, actor: rand(3), actorIsLive: rand(4) > 0, deadlinePassed: rand(8) === 0, maxRounds: rand(5)})
+  const ops = ['create', 'claim', 'startRound', 'endRound', 'finish', 'cancel', 'expire', 'request', 'approve', 'decline'] as const
+  const draw = () => ({op: ops[rand(ops.length)]!, actor: rand(3), actorIsLive: rand(4) > 0, deadlinePassed: rand(8) === 0, maxRounds: rand(5), agent: rand(3), isDecider: rand(2) === 0})
   let steps = 0
   for (let trial = 0; trial < 300; trial++) {
     const params = task.encodeParams({})
@@ -102,6 +137,6 @@ test('the generated module steps to the same states as the interpreter', () => {
 
 test('the generated module refuses values at 2^53', () => {
   const params = task.encodeParams({})
-  const input = task.encodeInput({op: 'create', actor: 1, actorIsLive: true, deadlinePassed: false, maxRounds: 3})
+  const input = task.encodeInput({op: 'create', actor: 1, actorIsLive: true, deadlinePassed: false, maxRounds: 3, agent: 0, isDecider: false})
   assert.throws(() => generated.step(params, generated.init(params), {...input, actor: 2 ** 53}), RangeError)
 })

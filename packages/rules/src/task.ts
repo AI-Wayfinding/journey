@@ -1,19 +1,19 @@
 import {all, any, bool, nat, no, oneOf, rule, same, when, yes} from 'gdp-wired'
 
-// Task: one piece of work in a journey that a person or agent claims and works
-// on in rounds. A task is open until someone claims it; the claimant works in
-// rounds (in-round) and finishes it (done). It can also end because its time
-// ran out or its rounds were used up (expired), or because its creator
-// cancelled it. Done, expired and cancelled are final.
+// Task: one piece of journey work. An open task can be claimed immediately;
+// a held offer request waits in requested with its intended agent as claimant.
+// A live decider approves it into claimed or declines it. The claimant works
+// in rounds and finishes it. Done, expired, cancelled and declined are final.
 //
-// Every task ends: it has a fixed number of rounds and a deadline, both set
-// when it is made. The rule never reads a clock. The host compares the time
-// with the deadline and passes the outcome in (`deadlinePassed`); it also
-// checks that the actor is a live journey member (`actorIsLive`) and interns
-// people and agents to small integers.
+// Every task has a fixed round budget and a deadline. The host computes
+// `deadlinePassed` and live journey membership (`actorIsLive`), and interns
+// people and agents to small integers. Held requests expire only at the
+// deadline, not at the round cap, since they cannot consume rounds yet.
 //
 // Inputs: `op` what is asked; `actor` who asks; `actorIsLive` and
-// `deadlinePassed` the host's checks; `maxRounds` the round cap given at create.
+// `deadlinePassed` the host's checks; `maxRounds` the cap at create/request;
+// `agent` the intended claimant at request; `isDecider` the host's check that
+// the actor owns the offered agent or holds offer.decide.
 // State: `status`; `creator`; `claimant`; `roundsUsed`; `cap` the round cap.
 export const Status = oneOf('none', 'open', 'claimed', 'inRound', 'done', 'expired', 'cancelled', 'requested', 'declined')
 
@@ -64,9 +64,15 @@ export const taskRule = (bug?: TaskBug) => rule('task')
     const roundsLeft = bug === 'starts a round past the cap' ? yes : roundsUsed.lt(cap)
     return {
       creates: all(op.is('create'), status.is('none'), actorIsLive),
-      requests: all(op.is('request'), status.is('none'), actorIsLive),
-      approves: all(op.is('approve'), status.is('requested'), isDecider, actorIsLive, deadlinePassed.not()),
-      declines: all(op.is('decline'), status.is('requested'), isDecider, actorIsLive),
+      requests: bug === 'refuses every request' ? no : all(op.is('request'), status.is('none'), bug === 'lets a removed member request' ? yes : actorIsLive),
+      approves: bug === 'refuses every approval' ? no : all(
+        bug === 'approves on claim' ? op.is('claim') : op.is('approve'), status.is('requested'),
+        bug === 'lets a non-decider approve' ? yes : isDecider,
+        bug === 'lets a removed decider approve' ? yes : actorIsLive,
+        bug === 'approves after the deadline' ? yes : deadlinePassed.not()),
+      declines: bug === 'refuses every decline' ? no : all(op.is('decline'), status.is('requested'),
+        bug === 'lets a non-decider decline' ? yes : isDecider,
+        bug === 'lets a removed decider decline' ? yes : actorIsLive),
       claims: bug === 'refuses every claim' ? no : all(op.is('claim'), status.is('open'), actorIsLive, deadlinePassed.not()),
       starts: bug === 'refuses every round' ? no : all(op.is('startRound'),
         bug === 'enters a round from an open task' ? status.is('claimed').or(status.is('open')) : status.is('claimed'),
@@ -76,18 +82,20 @@ export const taskRule = (bug?: TaskBug) => rule('task')
       cancels: bug === 'refuses to cancel' ? no : all(op.is('cancel'), active,
         bug === 'lets anyone cancel' ? yes : actor.eq(creator).and(actorIsLive)),
       expires: bug === 'refuses to expire' ? no : all(op.is('expire'), active,
-        bug === 'expires a task before its time' ? yes : deadlinePassed.or(status.is('requested').not().and(status.is('inRound').not()).and(roundsUsed.atLeast(cap)))),
-      reopens: bug === 'reopens a finished task' ? op.is('claim').and(status.is('done')) : no,
+        bug === 'expires a task before its time' ? yes : deadlinePassed.or(all(bug === 'expires a request at the round cap' ? yes : status.is('requested').not(), status.is('inRound').not(), roundsUsed.atLeast(cap)))),
+      reopens: bug === 'reopens a finished task' ? op.is('claim').and(status.is('done')) : bug === 'reopens a declined task' ? op.is('claim').and(status.is('declined')) : no,
     }
   })
   .step(({op, actor, agent, maxRounds, status, creator, claimant, roundsUsed, cap, creates, requests, approves, declines, claims, starts, ends, finishes, cancels, expires, reopens}) => ({
     status: when(requests, 'requested', when(creates.or(reopens), 'open', when(claims.or(approves), 'claimed', when(starts, 'inRound', when(ends, 'claimed',
       when(finishes, 'done', when(cancels, 'cancelled', when(expires, 'expired', when(declines, 'declined', status))))))))),
     creator: when(creates.or(requests), actor, creator),
-    claimant: when(requests, agent, when(claims, actor, claimant)),
-    roundsUsed: when(requests, 0, when(creates, bug === 'creates with rounds already used' ? 1 : 0,
+    claimant: when(requests, bug === 'records the wrong requested agent' ? actor : agent,
+      when(claims.or(approves.and(bug === 'assigns approval to the decider' ? yes : no)), actor, claimant)),
+    roundsUsed: when(approves.and(bug === 'counts a round on approve' ? yes : no), roundsUsed.plus(1),
+      when(requests, bug === 'requests with rounds already used' ? 1 : 0, when(creates, bug === 'creates with rounds already used' ? 1 : 0,
       when(starts, roundsUsed.plus(bug === 'counts a round twice' ? 2 : bug === 'starts a round without counting it' ? 0 : 1),
-        when(ends.and(bug === 'gives back a round' ? yes : no), roundsUsed.minus(1), roundsUsed)))),
+        when(ends.and(bug === 'gives back a round' ? yes : no), roundsUsed.minus(1), roundsUsed))))),
     cap: when(requests, maxRounds, when(bug === 'writes the cap on a refused create' ? op.is('create') : creates, bug === 'records the wrong cap' ? maxRounds.plus(1) : maxRounds, when(starts.and(bug === 'changes the round cap' ? yes : no), cap.plus(1), cap))),
   }))
 
@@ -191,6 +199,22 @@ export const stepLaws = taskStepLaws()
 // Each broken variant and the laws it must break. The tests assert every one
 // is refused, and that every law above is broken by at least one of them.
 export const brokenVariants: {bug: TaskBug, breaks: string[]}[] = [
+  {bug: 'requests with rounds already used', breaks: ['a requested task has used no rounds']},
+  {bug: 'records the wrong requested agent', breaks: ['a new request records its creator agent and cap without rounds']},
+  {bug: 'lets a removed member request', breaks: ['only a live requester makes a held request']},
+  {bug: 'refuses every request', breaks: ['a new request records its creator agent and cap without rounds']},
+  {bug: 'lets a non-decider approve', breaks: ['only a live decider approves a request in time for its intended agent', 'only the creator or a decider leaves requested except expiry']},
+  {bug: 'lets a removed decider approve', breaks: ['only a live decider approves a request in time for its intended agent']},
+  {bug: 'approves after the deadline', breaks: ['only a live decider approves a request in time for its intended agent']},
+  {bug: 'approves on claim', breaks: ['only a live decider approves a request in time for its intended agent']},
+  {bug: 'assigns approval to the decider', breaks: ['only a live decider approves a request in time for its intended agent']},
+  {bug: 'counts a round on approve', breaks: ['rounds used never pass the cap']},
+  {bug: 'refuses every approval', breaks: ['a live decider can approve a request in time']},
+  {bug: 'lets a non-decider decline', breaks: ['only a live decider declines a request']},
+  {bug: 'lets a removed decider decline', breaks: ['only a live decider declines a request']},
+  {bug: 'refuses every decline', breaks: ['a live decider can decline a request']},
+  {bug: 'reopens a declined task', breaks: ['a finished task never changes']},
+  {bug: 'expires a request at the round cap', breaks: ['a task expires only at its deadline or round cap']},
   {bug: 'starts a round past the cap', breaks: ['rounds used never pass the cap']},
   {bug: 'starts a round after the deadline', breaks: ['a round starts only within the cap and before the deadline']},
   {bug: 'reopens a finished task', breaks: ['a finished task never changes']},
