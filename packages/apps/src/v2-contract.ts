@@ -18,4 +18,4 @@ export const v2View = z.discriminatedUnion('view', [
 export type V2View = z.output<typeof v2View>;
 export type V2Kind = V2View['view'];
 export const CONSOLE_URL = 'https://poc.wayfinding.support/console';
-export const v2Uris: Record<V2Kind, string> = { library: 'ui://wayfinding/v2/library.html', forum: 'ui://wayfinding/v3/forum.html', round: 'ui://wayfinding/v2/round.html', agents: 'ui://wayfinding/v2/agents.html' };
+export const v2Uris: Record<V2Kind, string> = { library: 'ui://wayfinding/v3/library.html', forum: 'ui://wayfinding/v4/forum.html', round: 'ui://wayfinding/v3/round.html', agents: 'ui://wayfinding/v3/agents.html' };
