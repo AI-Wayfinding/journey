@@ -72,6 +72,7 @@ test('the generated rule enforces held-request transitions and declined finality
     assert.deepEqual(task.decode(claimed), {status: 'claimed', creator: 2, claimant: 7, roundsUsed: 0, cap: 3})
   }
 })
+
 test('every law of task is proven from any stored state', () => {
   const v = proveSteps(task, laws, stepLaws, {from: 'any'})
   assert.equal(v.proven, true, `not proven: ${v.goal} (${v.stuck})`)
@@ -80,6 +81,7 @@ test('every law of task is proven from any stored state', () => {
 })
 
 test('each step law is proven on its own from any stored state', () => {
+  assert.ok(stepLaws.length > 0, 'step-law proof must not be vacuous')
   for (const law of stepLaws) {
     const v = proveSteps(task, laws, [law], {from: 'any'})
     assert.ok(v.proven && v.checked && !v.assumes, law.name)
@@ -87,6 +89,8 @@ test('each step law is proven on its own from any stored state', () => {
 })
 
 test('every broken variant is refused at the law it breaks', () => {
+  assert.ok(brokenVariants.length > 0, 'negative controls must not be empty')
+  assert.ok(brokenVariants.every(({breaks}) => breaks.length > 0), 'each negative control must target a law')
   for (const {bug, breaks} of brokenVariants) {
     const r = taskRule(bug)
     const rLaws = taskLaws(r), rSteps = taskStepLaws(r)
@@ -103,6 +107,7 @@ test('every broken variant is refused at the law it breaks', () => {
 })
 
 test('every law and step law is broken by at least one broken variant', () => {
+  assert.ok(laws.length > 0 && stepLaws.length > 0, 'law coverage must not be vacuous')
   const broken = new Set(brokenVariants.flatMap((b) => b.breaks))
   for (const law of [...laws, ...stepLaws]) assert.ok(broken.has(law.name), `no broken variant for: ${law.name}`)
 })
@@ -139,4 +144,6 @@ test('the generated module refuses values at 2^53', () => {
   const params = task.encodeParams({})
   const input = task.encodeInput({op: 'create', actor: 1, actorIsLive: true, deadlinePassed: false, maxRounds: 3, agent: 0, isDecider: false})
   assert.throws(() => generated.step(params, generated.init(params), {...input, actor: 2 ** 53}), RangeError)
+  const request = task.encodeInput({op: 'request', actor: 1, actorIsLive: true, deadlinePassed: false, maxRounds: 3, agent: 7, isDecider: false})
+  assert.throws(() => generated.step(params, generated.init(params), {...request, agent: 2 ** 53}), RangeError)
 })
