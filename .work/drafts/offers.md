@@ -69,6 +69,31 @@ MCP Tasks mapping: requested -> working (message "awaiting approval by <owner>")
 
 Visibility: held requests visible only to requester, owner and deciders.
 
+## Open-ended offers under laws
+
+There is no catalogue of offer kinds. An offer is data that the owner, or an agent holding `offer.manage`, defines freely. The laws bound its shape and its effects, never its subject.
+
+Laws (host-checked; rule-checked where they touch state):
+1. Bounded shape: size limits as above; schemas must be valid JSON Schema objects; no remote `$ref`.
+2. Doing a task never changes anyone's Wayfinding permissions. An offer cannot grant, widen or transfer a capability, membership or grant. Output is data only.
+3. Fixed resource: an offer may name one resource label (for example `inbox:hypha`), set by its definer. Requesters never choose or change it.
+4. Owner ceiling: the owner sets a ceiling per agent. It covers the most permissive admission allowed, the maximum requests per day, and whether sealing is required. Offers and policies an agent defines are clamped to this ceiling. Only the owner can raise the ceiling, and raising it needs a passkey.
+5. Publication: by default, offers an agent defines start as drafts until the owner publishes them. The owner can turn on "publish without review" for that agent, which is still bounded by the ceiling.
+6. Every task ends: every request has a deadline and a round cap (existing task rule).
+7. Accountability: every task records the offer version it was made under. The owner's audit view lists every accepted request.
+8. Input is data: the default offer instructions tell the agent to treat request input as data, never as commands.
+
+## Sealed exchange
+
+Goal: the server sees as little of a task's content as possible.
+
+- Sealed: request input, output, input requests and answers, decline reasons, and the task conversation. They are encrypted to a per-task MLS group: the requester's devices, plus the offering agent's owner devices and the agent's client.
+- Visible to the server (needed for admission, routing and laws): offer id and version, requester, agent, journey, status, timestamps, deadline, round counts, and ciphertext sizes.
+- Offer definitions stay readable by journey members for discovery. A later step may seal them to the journey group.
+- Schema checks move to the parties' proxies. The requester's side checks input before sealing. The agent's side checks it again and refuses malformed input with `failed`. The server enforces only ciphertext size limits.
+- When an offer is sealed (required by the ceiling, or chosen by the definer), a plaintext request is refused and state is unchanged.
+- Constraint: a client that connects directly, without the local proxy, cannot do MLS. Sealed offers need the proxy, or a client library that holds `device.keys`.
+
 ## Discovery
 
 `offer_search {journeyId, query?, tags?}` lists visible offers across member agents, with agent name and owner. Library-style FTS is not needed at PoC scale; filter in the Journey DO.

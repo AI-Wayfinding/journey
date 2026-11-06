@@ -15,7 +15,7 @@ import {all, any, bool, nat, no, oneOf, rule, same, when, yes} from 'gdp-wired'
 // Inputs: `op` what is asked; `actor` who asks; `actorIsLive` and
 // `deadlinePassed` the host's checks; `maxRounds` the round cap given at create.
 // State: `status`; `creator`; `claimant`; `roundsUsed`; `cap` the round cap.
-export const Status = oneOf('none', 'open', 'claimed', 'inRound', 'done', 'expired', 'cancelled')
+export const Status = oneOf('none', 'open', 'claimed', 'inRound', 'done', 'expired', 'cancelled', 'requested', 'declined')
 
 export type TaskBug =
   | 'starts a round past the cap'
@@ -36,18 +36,37 @@ export type TaskBug =
   | 'refuses every round'
   | 'refuses to expire'
   | 'refuses to cancel'
+  | 'requests with rounds already used'
+  | 'records the wrong requested agent'
+  | 'lets a removed member request'
+  | 'refuses every request'
+  | 'lets a non-decider approve'
+  | 'lets a removed decider approve'
+  | 'approves after the deadline'
+  | 'approves on claim'
+  | 'assigns approval to the decider'
+  | 'counts a round on approve'
+  | 'refuses every approval'
+  | 'lets a non-decider decline'
+  | 'lets a removed decider decline'
+  | 'refuses every decline'
+  | 'reopens a declined task'
+  | 'expires a request at the round cap'
 
 // The rule, or with `bug` one of its broken variants (kept for the tests).
 export const taskRule = (bug?: TaskBug) => rule('task')
-  .inputs({op: oneOf('create', 'claim', 'startRound', 'endRound', 'finish', 'cancel', 'expire'), actor: nat, actorIsLive: bool, deadlinePassed: bool, maxRounds: nat})
+  .inputs({op: oneOf('create', 'claim', 'startRound', 'endRound', 'finish', 'cancel', 'expire', 'request', 'approve', 'decline'), actor: nat, actorIsLive: bool, deadlinePassed: bool, maxRounds: nat, isDecider: bool, agent: nat})
   .state({status: Status.from('none'), creator: 0, claimant: 0, roundsUsed: 0, cap: 0})
-  .flags(({op, actor, actorIsLive, deadlinePassed, status, creator, claimant, roundsUsed, cap}) => {
-    const active = any(status.is('open'), status.is('claimed'), status.is('inRound'))
+  .flags(({op, actor, actorIsLive, isDecider, deadlinePassed, status, creator, claimant, roundsUsed, cap}) => {
+    const active = any(status.is('open'), status.is('claimed'), status.is('inRound'), status.is('requested'))
     const isClaimant = bug === 'lets another member work a claimed task' ? actorIsLive : actor.eq(claimant).and(actorIsLive)
     const inTime = bug === 'starts a round after the deadline' ? yes : deadlinePassed.not()
     const roundsLeft = bug === 'starts a round past the cap' ? yes : roundsUsed.lt(cap)
     return {
       creates: all(op.is('create'), status.is('none'), actorIsLive),
+      requests: all(op.is('request'), status.is('none'), actorIsLive),
+      approves: all(op.is('approve'), status.is('requested'), isDecider, actorIsLive, deadlinePassed.not()),
+      declines: all(op.is('decline'), status.is('requested'), isDecider, actorIsLive),
       claims: bug === 'refuses every claim' ? no : all(op.is('claim'), status.is('open'), actorIsLive, deadlinePassed.not()),
       starts: bug === 'refuses every round' ? no : all(op.is('startRound'),
         bug === 'enters a round from an open task' ? status.is('claimed').or(status.is('open')) : status.is('claimed'),
@@ -57,19 +76,19 @@ export const taskRule = (bug?: TaskBug) => rule('task')
       cancels: bug === 'refuses to cancel' ? no : all(op.is('cancel'), active,
         bug === 'lets anyone cancel' ? yes : actor.eq(creator).and(actorIsLive)),
       expires: bug === 'refuses to expire' ? no : all(op.is('expire'), active,
-        bug === 'expires a task before its time' ? yes : deadlinePassed.or(status.is('inRound').not().and(roundsUsed.atLeast(cap)))),
+        bug === 'expires a task before its time' ? yes : deadlinePassed.or(status.is('requested').not().and(status.is('inRound').not()).and(roundsUsed.atLeast(cap)))),
       reopens: bug === 'reopens a finished task' ? op.is('claim').and(status.is('done')) : no,
     }
   })
-  .step(({op, actor, maxRounds, status, creator, claimant, roundsUsed, cap, creates, claims, starts, ends, finishes, cancels, expires, reopens}) => ({
-    status: when(creates.or(reopens), 'open', when(claims, 'claimed', when(starts, 'inRound', when(ends, 'claimed',
-      when(finishes, 'done', when(cancels, 'cancelled', when(expires, 'expired', status))))))),
-    creator: when(creates, actor, creator),
-    claimant: when(claims, actor, claimant),
-    roundsUsed: when(creates, bug === 'creates with rounds already used' ? 1 : 0,
+  .step(({op, actor, agent, maxRounds, status, creator, claimant, roundsUsed, cap, creates, requests, approves, declines, claims, starts, ends, finishes, cancels, expires, reopens}) => ({
+    status: when(requests, 'requested', when(creates.or(reopens), 'open', when(claims.or(approves), 'claimed', when(starts, 'inRound', when(ends, 'claimed',
+      when(finishes, 'done', when(cancels, 'cancelled', when(expires, 'expired', when(declines, 'declined', status))))))))),
+    creator: when(creates.or(requests), actor, creator),
+    claimant: when(requests, agent, when(claims, actor, claimant)),
+    roundsUsed: when(requests, 0, when(creates, bug === 'creates with rounds already used' ? 1 : 0,
       when(starts, roundsUsed.plus(bug === 'counts a round twice' ? 2 : bug === 'starts a round without counting it' ? 0 : 1),
-        when(ends.and(bug === 'gives back a round' ? yes : no), roundsUsed.minus(1), roundsUsed))),
-    cap: when(bug === 'writes the cap on a refused create' ? op.is('create') : creates, bug === 'records the wrong cap' ? maxRounds.plus(1) : maxRounds, when(starts.and(bug === 'changes the round cap' ? yes : no), cap.plus(1), cap)),
+        when(ends.and(bug === 'gives back a round' ? yes : no), roundsUsed.minus(1), roundsUsed)))),
+    cap: when(requests, maxRounds, when(bug === 'writes the cap on a refused create' ? op.is('create') : creates, bug === 'records the wrong cap' ? maxRounds.plus(1) : maxRounds, when(starts.and(bug === 'changes the round cap' ? yes : no), cap.plus(1), cap))),
   }))
 
 export const task = taskRule()
@@ -83,16 +102,44 @@ export const taskLaws = (r: Task = task) => [
     status.is('none').implies(all(creator.eq(0), claimant.eq(0), roundsUsed.eq(0), cap.eq(0)))),
   // Law: an open task has not used any rounds yet.
   r.law('an open task has used no rounds', ({status, roundsUsed}) => status.is('open').implies(roundsUsed.eq(0))),
+  // Law: waiting for an admission decision never consumes a round.
+  r.law('a requested task has used no rounds', ({status, roundsUsed}) => status.is('requested').implies(roundsUsed.eq(0))),
   // Law: a task in a round has used at least that round.
   r.law('a task in a round has used at least one round', ({status, roundsUsed}) => status.is('inRound').implies(roundsUsed.atLeast(1))),
 ]
 
 export const taskStepLaws = (r: Task = task) => [
-  // Step law: done, expired and cancelled are final: nothing about such a task
+  // Step law: a live requester records the intended agent and the fixed budget.
+  r.stepLaw('a new request records its creator agent and cap without rounds', ({actor, agent, maxRounds}, after) =>
+    all(after.status.is('requested'), after.creator.eq(actor), after.claimant.eq(agent), after.cap.eq(maxRounds), after.roundsUsed.eq(0)),
+    ({op, status, actorIsLive}) => all(op.is('request'), status.is('none'), actorIsLive)),
+  // Step law: a held request can only be made by a live member.
+  r.stepLaw('only a live requester makes a held request', ({op, status, actorIsLive}, after) =>
+    status.is('requested').not().and(after.status.is('requested')).implies(all(op.is('request'), status.is('none'), actorIsLive))),
+  // Step law: approval needs a live decider, in time, and keeps the intended agent.
+  r.stepLaw('only a live decider approves a request in time for its intended agent', ({op, status, isDecider, actorIsLive, deadlinePassed, claimant}, after) =>
+    status.is('requested').and(after.status.is('claimed')).implies(all(op.is('approve'), isDecider, actorIsLive, deadlinePassed.not(), after.claimant.eq(claimant)))),
+  // Step law: a permitted approval must work, not merely refuse every request.
+  r.stepLaw('a live decider can approve a request in time', ({claimant, roundsUsed}, after) =>
+    all(after.status.is('claimed'), after.claimant.eq(claimant), after.roundsUsed.eq(roundsUsed)),
+    ({op, status, isDecider, actorIsLive, deadlinePassed}) => all(op.is('approve'), status.is('requested'), isDecider, actorIsLive, deadlinePassed.not())),
+  // Step law: only a live decider can decline a request.
+  r.stepLaw('only a live decider declines a request', ({op, status, isDecider, actorIsLive}, after) =>
+    status.is('declined').not().and(after.status.is('declined')).implies(all(op.is('decline'), status.is('requested'), isDecider, actorIsLive))),
+  // Step law: a live decider can decline even after the deadline has passed.
+  r.stepLaw('a live decider can decline a request', (_, after) => after.status.is('declined'),
+    ({op, status, isDecider, actorIsLive}) => all(op.is('decline'), status.is('requested'), isDecider, actorIsLive)),
+  // Step law: leaving a held request needs its live creator or a live decider,
+  // except for deadline expiry, which needs no actor authority.
+  r.stepLaw('only the creator or a decider leaves requested except expiry', ({op, status, creator, actor, isDecider, actorIsLive, deadlinePassed}, after) =>
+    status.is('requested').and(after.status.is('requested').not()).implies(any(
+      all(op.is('expire'), after.status.is('expired'), deadlinePassed),
+      actorIsLive.and(any(actor.eq(creator), isDecider))))),
+  // Step law: done, expired, cancelled and declined are final: nothing about such a task
   // ever changes again.
   r.stepLaw('a finished task never changes', ({status, creator, claimant, roundsUsed, cap}, after) =>
     all(same(after.status, status), after.creator.eq(creator), after.claimant.eq(claimant), after.roundsUsed.eq(roundsUsed), after.cap.eq(cap)),
-    ({status}) => any(status.is('done'), status.is('expired'), status.is('cancelled'))),
+    ({status}) => any(status.is('done'), status.is('expired'), status.is('cancelled'), status.is('declined'))),
   // Step law: a round starts only while rounds used are below the cap and the
   // deadline has not passed.
   r.stepLaw('a round starts only within the cap and before the deadline', ({status, roundsUsed, cap, deadlinePassed}, after) =>
@@ -119,7 +166,7 @@ export const taskStepLaws = (r: Task = task) => [
   // Step law: a task expires only once its deadline has passed or its rounds are
   // used up outside a round.
   r.stepLaw('a task expires only at its deadline or round cap', ({status, roundsUsed, cap, deadlinePassed}, after) =>
-    status.is('expired').not().and(after.status.is('expired')).implies(deadlinePassed.or(status.is('inRound').not().and(roundsUsed.atLeast(cap))))),
+    status.is('expired').not().and(after.status.is('expired')).implies(deadlinePassed.or(all(status.is('requested').not(), status.is('inRound').not(), roundsUsed.atLeast(cap))))),
   // Step law: a live member can claim an open task before its deadline.
   r.stepLaw('a live member can claim an open task in time', ({actor}, after) => after.status.is('claimed').and(after.claimant.eq(actor)),
     ({op, status, actorIsLive, deadlinePassed}) => all(op.is('claim'), status.is('open'), actorIsLive, deadlinePassed.not())),
@@ -132,10 +179,10 @@ export const taskStepLaws = (r: Task = task) => [
   // Step law: once the deadline has passed, any task that is still going can be
   // expired, so every task reaches an end.
   r.stepLaw('a task still going can be expired once its deadline passes', (_, after) => after.status.is('expired'),
-    ({op, status, deadlinePassed}) => all(op.is('expire'), any(status.is('open'), status.is('claimed'), status.is('inRound')), deadlinePassed)),
+    ({op, status, deadlinePassed}) => all(op.is('expire'), any(status.is('open'), status.is('claimed'), status.is('inRound'), status.is('requested')), deadlinePassed)),
   // Step law: the live creator can cancel a task that is still going.
   r.stepLaw('the live creator can cancel a task still going', (_, after) => after.status.is('cancelled'),
-    ({op, status, actor, creator, actorIsLive}) => all(op.is('cancel'), any(status.is('open'), status.is('claimed'), status.is('inRound')), actor.eq(creator), actorIsLive)),
+    ({op, status, actor, creator, actorIsLive}) => all(op.is('cancel'), any(status.is('open'), status.is('claimed'), status.is('inRound'), status.is('requested')), actor.eq(creator), actorIsLive)),
 ]
 
 export const laws = taskLaws()
