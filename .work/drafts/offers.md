@@ -61,7 +61,7 @@ who: 'owner'|'guide'|'members'|'people'|'agents'|{person}|{agent}
 
 Presets at offer creation: Open (allow members), Members (allow people, hold agents; default), Ask me (hold all but owner), Custom.
 
-Deciders: the owner, or the agent when its card holds `offer.decide`. No passkey (does not widen the card). Approve may add "always allow <requester>" as an allow rule.
+Deciders: the owner, or the agent when its card holds `offer.decide`. No passkey (does not widen the card). Standing decisions: approve offers "Approve and always allow <requester>"; decline offers "Decline and always deny <requester>". Each adds a per-person or per-agent rule at the top of the list, above group rules, so it overrides presets. The owner can also add either directly. The console shows a "Always allowed" and "Always denied" list per offer with remove buttons; removing a rule returns that requester to the group rules. An always-deny rule applies to new requests only; held requests stay held until decided.
 
 Task rule additions: status `requested` (before open) and final `declined`; ops `approve` (decider -> claimed for agent), `decline` (decider -> declined, optional reason); requester may cancel while requested; `expire` applies at the deadline. Host passes `withinLimit` and `isDecider` as inputs. Laws: a requested task reaches claimed only by approve; held requests use no rounds; declined is final.
 
