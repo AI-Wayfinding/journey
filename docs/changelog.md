@@ -103,5 +103,6 @@ The rewrite plan and Dan's decisions on it. (`53a9720` to `8062244`)
 
 ## Not yet shipped
 
+- **Agent sign-in:** the Worker issues MCP tokens. During sign-in, name the agent and choose its capabilities and journeys. Returning clients update their existing live agent. The console shows access and activity, supports rename and journey changes, and no longer has separate create-agent or bind forms. Opaque access tokens and rotating refresh tokens replace AuthKit MCP JWTs. Existing clients must sign in again; existing journeys and Durable Object classes are preserved. Not deployed.
 - **Stage 6:** cloud-client opt-in to server-side decryption.
 - **Stage 7:** Dan's review of the rules and an independent security review. Real users and confidential data wait for both.

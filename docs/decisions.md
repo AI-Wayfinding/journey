@@ -201,6 +201,15 @@ Dan's brief for v2 was to write the spec, build what seems best, and refine late
 - **Decided by:** Dan (2026-11-03)
 - **What:** this agent merges when the work looks good and complete. The rewrite merged to `main` as `ca48bdd`.
 
+### 31. The Worker is the authorization server; agents are created at sign-in
+
+- **Decided by:** Dan
+- **What:** MCP clients authorise with the Worker at the resource origin. AuthKit remains the upstream sign-in provider for the console. After a sign-in no more than ten minutes old, the person names the agent and chooses its capabilities and journeys. Allow creates or updates the live agent for that person and client, signs its card and binds the client through the existing rules. No separate create-agent or console bind step remains.
+- **Tokens:** single-use codes last 60 seconds and require S256 PKCE. Opaque access tokens last one hour; rotating refresh tokens last up to 30 days. Accounts stores token hashes, not bearer values. Reusing a rotated refresh token revokes its family. Removing an agent revokes tokens and removes journey memberships. Calls always use the bound agent and its current card.
+- **Confirmation:** fresh upstream login is the person's assertion at consent. Console widening still needs a passkey; narrowing, renaming, journey changes and deletion do not. `grant.issue` and the never-assignable actions remain forbidden.
+- **Supersedes:** decision 4's choice of AuthKit as the MCP authorization server, decision 21's passkey-only confirmation at sign-in, and decision 22's separate console binding flow. The rule that a bound client always acts as its agent remains. Existing Durable Object classes, rules hashes and journey data stay unchanged. Old AuthKit MCP tokens must reauthorise once.
+- **Source:** Dan's agent-at-auth brief; `packages/mcp/src/oauth.ts` and `packages/mcp/src/oauth-store.ts`.
+
 ## Open
 
 - **Stage 6, cloud-client opt-in:** not built.
