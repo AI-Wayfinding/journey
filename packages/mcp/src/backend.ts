@@ -265,7 +265,7 @@ export class MemoryBackend extends Backend {
     const accounts = new AccountsHost(storage, profiles, blobs, verifier, now);
     super(accounts, id => {
       let host = hosts.get(id);
-      if (!host) { const store = new MemoryStorage(); stores.set(id, store); host = new JourneyHost(store, now, blobs, { directory: () => accounts.offerDirectory(), stand: d => accounts.standingDecision(d) }); hosts.set(id, host); }
+      if (!host) { const store = new MemoryStorage(); stores.set(id, store); host = new JourneyHost(store, now, blobs, { directory: () => accounts.offerDirectory(), stand: d => accounts.standingDecision(d), reserve: r => accounts.reserveAllowance(r), release: id => accounts.releaseAllowance(id) }); hosts.set(id, host); }
       return host;
     });
     this.accountsHost = accounts; this.accountStorage = storage; this.journeyStores = stores; this.blobs = blobs;

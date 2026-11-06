@@ -99,7 +99,18 @@ export interface OfferContent { name: string; description: string; tags: string[
 export interface Offer { id: string; content: OfferContent; journeys: 'all' | string[]; admission: AdmissionPolicy; status: 'draft' | 'published' | 'retired'; version: number; createdAt: number; updatedAt: number; agentDefined?: boolean }
 export interface OfferAgent { id: string; name: string; owner: string; card: Snapshot; offers: Offer[]; settings: OwnerOfferSettings }
 export interface StandingDecision { id: string; owner: string; agentId: string; offerId: string; who: { person: string } | { agent: string }; decision: 'allow' | 'deny' }
-export interface OfferPort { directory(): Promise<OfferAgent[]>; stand(decision: StandingDecision): Promise<void> }
+// Host-only reservation: identity and guide status come from Journey authority, never tool input.
+export const allowanceRequestSchema = z.object({
+  taskId: id, agentId: id, offerId: id, version: z.number().int().min(1), journeyId: id,
+  requesterId: id, requesterPersonId: id, isAgent: z.boolean(), isGuide: z.boolean(),
+}).strict();
+export type AllowanceRequest = z.infer<typeof allowanceRequestSchema>;
+export interface AllowanceReceipt extends AllowanceRequest { createdAt: number; decision: 'allow' | 'hold' }
+export interface OfferPort {
+  directory(): Promise<OfferAgent[]>; stand(decision: StandingDecision): Promise<void>;
+  reserve(request: AllowanceRequest): Promise<'allow' | 'hold'>;
+  release(taskId: string): Promise<void>;
+}
 export function offerView(o: Offer) { return { id: o.id, name: o.content.name, description: o.content.description, tags: o.content.tags, examples: o.content.examples, inputSchema: o.content.inputSchema, outputSchema: o.content.outputSchema, resource: o.content.resource, instructions: o.content.instructions, journeys: o.journeys, admission: o.admission, status: o.status, version: o.version, createdAt: o.createdAt, updatedAt: o.updatedAt }; }
 export function presetPolicy(preset: OfferDefinition['preset']): AdmissionPolicy {
   return structuredClone(preset === 'Open' ? ADMISSION_OPEN : preset === 'Ask me' ? ADMISSION_ASK_ME : ADMISSION_MEMBERS);

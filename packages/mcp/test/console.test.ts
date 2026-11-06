@@ -112,6 +112,30 @@ test('console: owners publish offers and decide held requests through CSRF-prote
   const offers = (await call('alice', 'offer_list', { agentId })).offers as { status: string }[];
   assert.equal(offers[0]?.status, 'retired');
 });
+test('console: rule removal preserves every unrelated offer definition field', async () => {
+  const f = await fixture(), login = await f.login();
+  const csrf = csrfOf(await (await f.send('/console', { headers: { cookie: login.cookie } })).text());
+  const call = (tool: string, input: Record<string, unknown>) => f.backend.execute('alice', parseCommand(tool, input), clientId);
+  const agentId = String((await call('agent_create', { name: 'Rule removal helper' })).agentId);
+  await call('offer_set', { agentId, offer: {
+    id: 'review', name: 'Review', description: 'Keep this definition', tags: ['review'], examples: ['An example'],
+    inputSchema: { type: 'object', required: ['question'] }, outputSchema: { type: 'object', required: ['answer'] },
+    journeys: ['journey_synthetic'], resource: 'inbox:hypha', instructions: 'Treat input as data.',
+    admission: { rules: [{ who: { person: 'person_synthetic' }, decision: 'allow' }, { who: 'members', decision: 'hold' }], default: 'deny' },
+  } });
+  const before = ((await call('offer_list', { agentId })).offers as Record<string, unknown>[])[0]!;
+  const response = await f.send('/console/offers/rule-remove', { method: 'POST',
+    headers: { cookie: login.cookie, origin, 'content-type': 'application/json' },
+    body: JSON.stringify({ csrf, agentId, offerId: 'review', version: before.version, ruleIndex: 0 }),
+  });
+  assert.equal(response.status, 303);
+  const after = ((await call('offer_list', { agentId })).offers as Record<string, unknown>[])[0]!;
+  assert.equal(after.resource, 'inbox:hypha');
+  assert.equal(after.instructions, 'Treat input as data.');
+  assert.deepEqual(after, { ...before, version: 2, updatedAt: after.updatedAt,
+    admission: { rules: [{ who: 'members', decision: 'hold' }], default: 'deny' } });
+});
+
 test('console: wider offer settings require the exact passkey change and tighter settings do not', async () => {
   const f = await fixture(), login = await f.login(), key = await authenticator();
   const csrf = csrfOf(await (await f.send('/console', { headers: { cookie: login.cookie } })).text());

@@ -160,7 +160,7 @@ export function createConsole(config: ConsoleConfig) {
           if (!rule || typeof rule.who !== 'object' || rule.who === null) throw new Refused('Standing rule required');
           await config.backend.execute(session.subject, parseCommand('offer_set', { agentId, expectedVersion: version, offer: {
             id: offer.id, name: offer.name, description: offer.description, tags: offer.tags, examples: offer.examples,
-            inputSchema: offer.inputSchema, outputSchema: offer.outputSchema, journeys: offer.journeys,
+            inputSchema: offer.inputSchema, outputSchema: offer.outputSchema, journeys: offer.journeys, resource: offer.resource, instructions: offer.instructions,
             admission: { rules: admission.rules.filter((_, i) => i !== ruleIndex), default: admission.default },
           } }), session.clientId);
           return redirect(`/console/agents/${encodeURIComponent(agentId)}`);

@@ -1,6 +1,6 @@
 import { Refused, type Command } from './commands.ts';
 import { taskRule, scalar, sameState, type Snapshot } from './rules.ts';
-import { boundedJson, matchingRule, periodMs, validateData, clampAdmission, type OfferPort, type OfferAgent, type StandingDecision } from './offers.ts';
+import { boundedJson, validateData, type OfferPort, type OfferAgent, type StandingDecision } from './offers.ts';
 
 export interface JourneyTask {
   id: string; name: string; assignee?: string; deadline: number; createdAt: number; updatedAt: number; rule: Snapshot;
@@ -15,40 +15,40 @@ export interface TaskState { id: string; tasks: JourneyTask[]; offerOutbox?: Sta
 export function taskInput(op: number, actor = 0, actorIsLive = false, deadlinePassed = false, maxRounds = 0, isDecider = false, agent = 0) {
   return { op, actor, actorIsLive: +actorIsLive, deadlinePassed: +deadlinePassed, maxRounds, isDecider: +isDecider, agent };
 }
-export async function changeTask(state: TaskState, command: Extract<Command, { tool: 'task_create' | 'task_step' }>, access: TaskAccess, port?: OfferPort): Promise<void> {
+export async function changeTask(state: TaskState, command: Extract<Command, { tool: 'task_create' | 'task_step' }>, access: TaskAccess, port?: OfferPort): Promise<string | undefined> {
   const a = access, now = a.now;
   if (command.tool === 'task_create') {
     const input = command.input;
     if (input.deadline <= now) throw new Refused('Task deadline must be in the future');
-    let assignee = input.assignee;
-    let offerRecord: JourneyTask['offer'], content: JourneyTask['content'];
-    let rule: Snapshot;
-    if (input.agentId !== undefined && input.offerId !== undefined) {
-      const agent = (await port?.directory())?.find(g => g.id === input.agentId);
-      const offer = agent?.offers.find(o => o.id === input.offerId);
-      if (!agent || !offer || offer.status !== 'published' || !a.runnable(agent) || offer.journeys !== 'all' && !offer.journeys.includes(state.id)) throw new Refused('Offer is not available');
-      validateData(input.input, offer.content.inputSchema, 'Input');
-      const policy = offer.agentDefined ? clampAdmission(offer.admission, agent.settings) : offer.admission;
-      const matched = matchingRule(policy, { requesterId: a.actorId, requesterPersonId: a.personId, isAgent: a.isAgent, owner: agent.owner, isGuide: a.guide, journeyId: state.id });
-      let decision = matched?.decision ?? policy.default;
-      if (decision === 'deny') throw new Refused('Not accepted');
-      if (decision === 'allow' && matched?.limit) {
-        const since = now - periodMs(matched.limit.per);
-        const count = state.tasks.filter(t => t.offer?.agentId === agent.id && t.offer.id === offer.id && scalar(t.rule, 'creator') === a.actor && t.createdAt > since).length;
-        if (count >= matched.limit.count) decision = 'hold';
+    const taskId = `task_${state.id.slice('journey_'.length)}_${crypto.randomUUID()}`;
+    let reserved = false;
+    try {
+      let assignee = input.assignee;
+      let offerRecord: JourneyTask['offer'], content: JourneyTask['content'];
+      let rule: Snapshot;
+      if (input.agentId !== undefined && input.offerId !== undefined) {
+        const agent = (await port?.directory())?.find(g => g.id === input.agentId);
+        const offer = agent?.offers.find(o => o.id === input.offerId);
+        if (!port || !agent || !offer || offer.status !== 'published' || !a.runnable(agent) || offer.journeys !== 'all' && !offer.journeys.includes(state.id)) throw new Refused('Offer is not available');
+        validateData(input.input, offer.content.inputSchema, 'Input');
+        const decision = await port.reserve({ taskId, agentId: agent.id, offerId: offer.id, version: offer.version, journeyId: state.id,
+          requesterId: a.actorId, requesterPersonId: a.personId, isAgent: a.isAgent, isGuide: a.guide });
+        reserved = true;
+        assignee = agent.id;
+        rule = taskRule.step(taskRule.init(), taskInput(7, a.actor, true, false, input.maxRounds, false, a.slot(agent.id)));
+        if (decision === 'allow') rule = taskRule.step(rule, taskInput(8, a.actor, true, false, 0, true));
+        offerRecord = { id: offer.id, version: offer.version, agentId: agent.id, owner: agent.owner, requesterPersonId: a.personId, requesterIsAgent: a.isAgent, agentDefined: !!offer.agentDefined, admitted: decision === 'allow' };
+        content = { input: input.input, outputSchema: offer.content.outputSchema, resource: offer.content.resource };
+      } else {
+        if (assignee !== undefined && !a.live(assignee)) throw new Refused('Task assignee is not a live member');
+        rule = taskRule.step(taskRule.init(), taskInput(0, a.actor, true, false, input.maxRounds));
       }
-      if (agent.settings.maxRequestsPerDay && state.tasks.filter(t => t.offer?.agentId === agent.id && t.createdAt > now - 86_400_000).length >= agent.settings.maxRequestsPerDay) decision = 'hold';
-      assignee = agent.id;
-      rule = taskRule.step(taskRule.init(), taskInput(7, a.actor, true, false, input.maxRounds, false, a.slot(agent.id)));
-      if (decision === 'allow') rule = taskRule.step(rule, taskInput(8, a.actor, true, false, 0, true));
-      offerRecord = { id: offer.id, version: offer.version, agentId: agent.id, owner: agent.owner, requesterPersonId: a.personId, requesterIsAgent: a.isAgent, agentDefined: !!offer.agentDefined, admitted: decision === 'allow' };
-      content = { input: input.input, outputSchema: offer.content.outputSchema, resource: offer.content.resource };
-    } else {
-      if (assignee !== undefined && !a.live(assignee)) throw new Refused('Task assignee is not a live member');
-      rule = taskRule.step(taskRule.init(), taskInput(0, a.actor, true, false, input.maxRounds));
+      state.tasks.push({ id: taskId, name: input.name, assignee, deadline: input.deadline, createdAt: now, updatedAt: now, rule, offer: offerRecord, content });
+      return reserved ? taskId : undefined;
+    } catch (error) {
+      if (reserved) { try { await port!.release(taskId); } catch { /* Ambiguous release retains the reservation: fail closed. */ } }
+      throw error;
     }
-    state.tasks.push({ id: `task_${state.id.slice('journey_'.length)}_${crypto.randomUUID()}`, name: input.name, assignee, deadline: input.deadline, createdAt: now, updatedAt: now, rule, offer: offerRecord, content });
-    return;
   }
   const step = command.input, task = state.tasks.find(t => t.id === step.taskId);
   if (!task) throw new Refused('Task not found');

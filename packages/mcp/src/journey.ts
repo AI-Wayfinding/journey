@@ -127,12 +127,12 @@ export class JourneyHost {
   private runnable(state: JourneyState, agent: OfferAgent): boolean {
     return state.agents.some(a => a.id === agent.id && a.owner === agent.owner) && this.can(state, this.slot(state, agent.id), { personId: agent.owner, agent: { id: agent.id, name: agent.name, live: true, card: agent.card } }, 'task.manage');
   }
-  private async changeTask(state: JourneyState, actor: number, identity: Actor, command: Extract<Command, { tool: 'task_create' | 'task_step' }>): Promise<void> {
+  private async changeTask(state: JourneyState, actor: number, identity: Actor, command: Extract<Command, { tool: 'task_create' | 'task_step' }>): Promise<string | undefined> {
     if (command.tool === 'task_step') {
       const task = state.tasks.find(t => t.id === command.input.taskId);
       if (task && !this.taskVisible(state, task, identity)) throw new Refused('Task access refused');
     }
-    await changeTask(state, command, { actor, personId: identity.personId, actorId: identity.agent?.id ?? identity.personId, isAgent: !!identity.agent, now: this.now(), guide: this.has(state, this.slot(state, identity.personId), 'guide'),
+    return changeTask(state, command, { actor, personId: identity.personId, actorId: identity.agent?.id ?? identity.personId, isAgent: !!identity.agent, now: this.now(), guide: this.has(state, this.slot(state, identity.personId), 'guide'),
       live: id => this.live(state, this.slot(state, id)), slot: id => this.slot(state, id), decider: task => this.decider(state, task, identity), runnable: agent => this.runnable(state, agent),
       creatorId: task => state.identities[scalar(task.rule, 'creator') - 1]!.id }, this.offers);
   }
@@ -240,15 +240,22 @@ export class JourneyHost {
       }, { highWaterMark: 16 });
     });
   }
-  private async commit(state: JourneyState, writes: [string, string][] = []): Promise<void> {
-    const before = await this.load();
-    // Deliver older decisions before committing another command under stale policy.
-    if (state.offerOutbox?.length && !this.offers) throw new Refused('Offer decision delivery unavailable');
-    await this.storage.transaction(async (storage) => {
-      await storage.put('journey', JSON.stringify(state));
-      for (const [key, value] of writes) await storage.put(key, value);
-      await this.schedule(state, storage);
-    });
+  private async commit(state: JourneyState, writes: [string, string][] = [], allowance?: string): Promise<void> {
+    let before: JourneyState | undefined;
+    try {
+      before = await this.load();
+      // Deliver older decisions before committing another command under stale policy.
+      if (state.offerOutbox?.length && !this.offers) throw new Refused('Offer decision delivery unavailable');
+      await this.storage.transaction(async (storage) => {
+        await storage.put('journey', JSON.stringify(state));
+        for (const [key, value] of writes) await storage.put(key, value);
+        await this.schedule(state, storage);
+      });
+    } catch (error) {
+      // The task transaction aborted. Never release after a successful commit, even if notification fails.
+      if (allowance) { try { await this.offers!.release(allowance); } catch { /* Retain on ambiguity; no extra allowance. */ } }
+      throw error;
+    }
     try { await this.flushOffers(state); } catch { /* Durable outbox and alarm retry; the task decision is already committed. */ }
     for (const [controller, personId] of this.watchers) {
       if (!this.has(state, this.slot(state, personId), 'read') || (controller.desiredSize ?? 0) <= 0) {
@@ -306,6 +313,7 @@ export class JourneyHost {
     return this.serial.run(async () => {
       let state = await this.load();
       if (state?.offerOutbox?.length) await this.flushOffers(state);
+      let allowance: string | undefined;
       if (command.tool === 'journey_create') {
         if (state) throw new Refused('Journey already exists');
         if (!journeyId) throw new Refused('Journey identity missing');
@@ -396,11 +404,11 @@ export class JourneyHost {
             if (creatorPerson !== this.slot(state, personId) && !this.has(state, actor, 'guide')) throw new Refused('Only the artifact owner or guide may delete');
           }
         }
-        if (command.tool === 'task_create' || command.tool === 'task_step') await this.changeTask(state, actor, identity, command);
+        if (command.tool === 'task_create' || command.tool === 'task_step') allowance = await this.changeTask(state, actor, identity, command);
         else this.apply(state, actor, personId, command, resolved);
         if (command.tool === 'artifact_delete' && this.blobs) await deleteArtifactBlobs(this.storage, this.blobs, state.id, command.input.artifactId);
       }
-      await this.commit(state);
+      await this.commit(state, [], allowance);
       // Respond under the acting identity's read limit, never its owner's broader authority.
       const identity = command.tool === 'agent_add' ? { personId } : resolved ?? { personId };
       const readerId = identity.agent?.id ?? personId;

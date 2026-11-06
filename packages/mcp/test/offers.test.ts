@@ -257,3 +257,100 @@ test('offers: a guide allowance does not turn a guide’s agent into a guide', a
   await f.call('alice', 'task_create', { ...input, actingAgent: f.agentId });
   assert.deepEqual((await f.tasks()).map(t => t.status), ['claimed', 'requested']);
 });
+
+
+test('offers: reservation retries survive eviction and reject conflicting or stale claims', async () => {
+  const f = await fixture();
+  await f.call('alice', 'offer_settings', { agentId: f.agentId, maxRequestsPerDay: 1 });
+  await f.define({ preset: 'Open' }); await f.publish();
+  const { Accounts } = await import('../src/objects.ts');
+  let accounts = new Accounts({ storage: f.backend.accountStorage }, { WORKOS_API_KEY: 'synthetic-unused' });
+  const send = (body: Record<string, unknown>) => accounts.fetch(new Request('https://accounts.internal', { method: 'POST', body: JSON.stringify(body) }));
+  const request = { taskId: 'task_synthetic', agentId: f.agentId, offerId: 'review', version: 2, journeyId: f.journeyId, requesterId: f.bob, requesterPersonId: f.bob, isAgent: false, isGuide: false };
+  const reserve = (r = request) => send({ action: 'reserveAllowance', request: r });
+  assert.deepEqual(await (await reserve()).json(), { value: 'allow' });
+  const reserved = f.backend.snapshot();
+  accounts = new Accounts({ storage: f.backend.accountStorage }, { WORKOS_API_KEY: 'synthetic-unused' });
+  assert.deepEqual(await (await reserve()).json(), { value: 'allow' });
+  assert.equal((await reserve({ ...request, requesterId: f.alice })).status, 409);
+  assert.equal(f.backend.snapshot(), reserved, 'replays must not add usage or change the bound identity');
+  await f.define({ preset: 'Open' });
+  const edited = f.backend.snapshot();
+  assert.equal((await reserve({ ...request, taskId: 'task_stale' })).status, 409);
+  assert.equal((await send({ action: 'reserveAllowance', request: { ...request, taskId: 'task_forged', decision: 'allow' } })).status, 500);
+  assert.equal(f.backend.snapshot(), edited, 'stale and malformed reservations must not consume allowance');
+  assert.equal((await send({ action: 'releaseAllowance', taskId: request.taskId })).status, 200);
+  assert.equal((await send({ action: 'releaseAllowance', taskId: request.taskId })).status, 200);
+  assert.deepEqual(await (await reserve({ ...request, taskId: 'task_new', version: 3 })).json(), { value: 'allow' });
+});
+
+test('offers: an aborted journey commit releases the shared allowance', async () => {
+  const f = await fixture();
+  await f.call('alice', 'offer_settings', { agentId: f.agentId, maxRequestsPerDay: 1 });
+  await f.define({ admission: { rules: [{ who: 'members', decision: 'allow', limit: { count: 1, per: 'hour' } }], default: 'hold' } }); await f.publish();
+  const before = f.backend.snapshot(), storage = f.backend.journeyStores.get(f.journeyId)!, setAlarm = storage.setAlarm;
+  storage.setAlarm = async () => { throw new Error('synthetic allowance transaction abort'); };
+  await assert.rejects(f.request(), /synthetic allowance transaction abort/);
+  storage.setAlarm = setAlarm;
+  assert.equal(f.backend.snapshot(), before, 'neither the task nor its reservation may survive a definite abort');
+  await f.request(); await f.request();
+  assert.deepEqual((await f.tasks()).map(t => t.status), ['claimed', 'requested']);
+});
+
+test('offers: a lost reservation reply fails closed after Accounts eviction', async () => {
+  const f = await fixture();
+  await f.call('alice', 'offer_settings', { agentId: f.agentId, maxRequestsPerDay: 1 });
+  await f.define({ preset: 'Open' }); await f.publish();
+  const { Accounts, Journey, durableBackend } = await import('../src/objects.ts');
+  let accounts = new Accounts({ storage: f.backend.accountStorage }, { WORKOS_API_KEY: 'synthetic-unused' });
+  let loseReply = true;
+  const env: import('../src/objects.ts').ObjectBindings = { WORKOS_API_KEY: 'synthetic-unused', BLOBS: f.backend.blobs,
+    ACCOUNTS: { getByName() { return { async fetch(request) {
+      const body = await request.clone().json() as { action?: string };
+      const response = await accounts.fetch(request);
+      if (body.action === 'reserveAllowance' && loseReply) { loseReply = false; throw new Error('synthetic lost allowance reply'); }
+      return response;
+    } }; } },
+    JOURNEYS: { getByName(id) { return { fetch: request => new Journey({ storage: f.backend.journeyStores.get(id)! }, env, () => 1_800_000_000_000).fetch(request) }; } },
+  };
+  const backend = durableBackend(env);
+  const request = () => backend.execute('bob', parseCommand('task_create', { journeyId: f.journeyId, name: 'Durable request', agentId: f.agentId, offerId: 'review', input: { question: 'Synthetic' }, maxRounds: 1, deadline: 1_800_003_600_000 }));
+  await assert.rejects(request(), /Coordination storage operation failed/);
+  assert.deepEqual(await f.tasks(), []);
+  accounts = new Accounts({ storage: f.backend.accountStorage }, { WORKOS_API_KEY: 'synthetic-unused' });
+  await request();
+  assert.deepEqual((await f.tasks()).map(t => t.status), ['requested'], 'an uncertain reservation must not free a second automatic admission');
+});
+
+for (const allowance of ['agent', 'requester', 'requester-agent'] as const) for (const concurrent of [false, true]) {
+  test(`offers: ${allowance} allowance spans two journeys (${concurrent ? 'concurrent' : 'sequential'})`, async () => {
+    const f = await fixture();
+    const second = String((await f.call('alice', 'journey_create', { name: 'Second journey', policy: 'open', defaultRole: 'write' })).journeyId);
+    // Deliberately give Bob a different journey-local identity slot.
+    await f.call('eve', 'journey_join', { journeyId: second });
+    await f.call('bob', 'journey_join', { journeyId: second });
+    await f.call('alice', 'agent_add', { journeyId: second, agentId: f.agentId });
+    if (allowance === 'requester-agent') await f.call('bob', 'agent_add', { journeyId: second, agentId: f.requesterId });
+    if (allowance === 'agent') await f.call('alice', 'offer_settings', { agentId: f.agentId, maxRequestsPerDay: 1 });
+    await f.define({ preset: 'Open', ...(allowance !== 'agent' ? { admission: { rules: [{ who: 'members', decision: 'allow', limit: { count: 1, per: 'hour' } }], default: 'hold' } } : {}) });
+    await f.publish();
+    // The owner ceiling also spans offers and requesters, not just journeys.
+    if (allowance === 'agent') {
+      await f.define({ id: 'other', preset: 'Open' });
+      await f.call('alice', 'offer_publish', { agentId: f.agentId, offerId: 'other' });
+    }
+    const requestSecond = () => f.call(allowance === 'agent' ? 'eve' : 'bob', 'task_create', {
+      journeyId: second, name: 'Second request', agentId: f.agentId, offerId: allowance === 'agent' ? 'other' : 'review',
+      actingAgent: allowance === 'requester-agent' ? f.requesterId : undefined, input: { question: 'Synthetic' }, maxRounds: 1, deadline: 1_800_100_000_000,
+    });
+    const requestFirst = () => f.request({ question: 'Synthetic' }, allowance === 'requester-agent' ? f.requesterId : undefined);
+    if (concurrent) await Promise.all([requestFirst(), requestSecond()]);
+    else { await requestFirst(); await requestSecond(); }
+    const otherTasks = (await f.call('alice', 'journey_read', { journeyId: second })).tasks as { status: string }[];
+    assert.deepEqual([...(await f.tasks()), ...otherTasks].map(t => t.status).sort(), ['claimed', 'requested']);
+    f.advance(allowance === 'agent' ? 86_400_000 : 3_600_000);
+    await requestSecond();
+    const later = (await f.call('alice', 'journey_read', { journeyId: second })).tasks as { status: string }[];
+    assert.equal(later[1]!.status, 'claimed', 'the shared rolling allowance resets at its period boundary');
+  });
+}

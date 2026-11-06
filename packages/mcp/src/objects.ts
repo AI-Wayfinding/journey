@@ -1,5 +1,5 @@
 import * as z from 'zod';
-import { type OfferAgent, type StandingDecision } from './offers.ts';
+import { allowanceRequestSchema, type OfferAgent, type StandingDecision } from './offers.ts';
 const standingSchema = z.object({ id: z.string().min(1).max(200), owner: z.string().min(1).max(200), agentId: z.string().min(1).max(200), offerId: z.string().min(1).max(200), who: z.union([z.object({ person: z.string().min(1).max(200) }).strict(), z.object({ agent: z.string().min(1).max(200) }).strict()]), decision: z.enum(['allow', 'deny']) }).strict();
 import { AccountsHost, WorkOSProfiles, type Account } from './accounts.ts';
 import { Backend, type AccountsPort, type JourneyPort } from './backend.ts';
@@ -40,7 +40,12 @@ async function respond(operation: () => Promise<unknown>): Promise<Response> {
 export class Journey {
   private readonly host: JourneyHost;
   constructor(state: ObjectState, env?: Pick<ObjectBindings, 'BLOBS'> & Partial<Pick<ObjectBindings, 'ACCOUNTS'>>, now: () => number = Date.now) {
-    this.host = new JourneyHost(state.storage, now, env?.BLOBS, env?.ACCOUNTS ? { directory: () => call<OfferAgent[]>(env.ACCOUNTS!, 'accounts', { action: 'offerDirectory' }), stand: decision => call<void>(env.ACCOUNTS!, 'accounts', { action: 'standingDecision', decision }) } : undefined);
+    this.host = new JourneyHost(state.storage, now, env?.BLOBS, env?.ACCOUNTS ? {
+      directory: () => call<OfferAgent[]>(env.ACCOUNTS!, 'accounts', { action: 'offerDirectory' }),
+      stand: decision => call<void>(env.ACCOUNTS!, 'accounts', { action: 'standingDecision', decision }),
+      reserve: request => call<'allow' | 'hold'>(env.ACCOUNTS!, 'accounts', { action: 'reserveAllowance', request }),
+      release: taskId => call<void>(env.ACCOUNTS!, 'accounts', { action: 'releaseAllowance', taskId }),
+    } : undefined);
   }
   alarm(): Promise<void> { return this.host.alarm(); }
   async fetch(request: Request): Promise<Response> {
@@ -76,6 +81,8 @@ export class Accounts {
       const body = record(await request.json());
       if (body['action'] === 'offerDirectory') return this.host.offerDirectory();
       if (body['action'] === 'standingDecision') return this.host.standingDecision(standingSchema.parse(body['decision']));
+      if (body['action'] === 'reserveAllowance') return this.host.reserveAllowance(allowanceRequestSchema.parse(body['request']));
+      if (body['action'] === 'releaseAllowance') return this.host.releaseAllowance(field(body, 'taskId'));
       if (body['action'] === 'oauth') return this.host.oauth(oauthOperation.parse(body['operation']));
       if (body['action'] === 'consoleRecord') return this.host.consoleRecord(recordOperation.parse(body['operation']));
       if (body['action'] === 'passkey') return this.host.passkey({ subject: field(body, 'subject'), clientId: field(body, 'clientId') }, passkeyOperation.parse(body['operation']));
