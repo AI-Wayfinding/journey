@@ -13,7 +13,7 @@ for (const form of document.querySelectorAll('form[data-ceremony]')) form.addEve
     const change = fields.has('change') ? JSON.parse(fields.get('change')) : undefined;
     async function post(path, body) {
       const response = await fetch(path, { method: 'POST', credentials: 'same-origin', redirect: 'follow', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ csrf, ...body }) });
-      if (!response.ok) throw new Error('The request was refused. Check the form or sign in again.');
+      if (!response.ok) { const reason = response.status === 409 ? (await response.json().catch(() => ({}))).error : undefined; throw new Error(reason || 'The request was refused. Check the form or sign in again.'); }
       return response;
     }
     const options = await (await post(form.dataset.options, change ? { change } : {})).json();

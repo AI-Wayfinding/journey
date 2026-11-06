@@ -148,8 +148,13 @@ export class JourneyHost {
   summary(personId: string, resolved?: Actor): Promise<ToolData | undefined> {
     return this.serial.run(async () => {
       const state = await this.load();
-      if (!state || !this.can(state, this.slot(state, resolved?.agent?.id ?? personId), resolved ?? { personId }, 'read')) return undefined;
-      return { journeyId: state.id, name: state.name };
+      if (!state) return undefined;
+      const slot = this.slot(state, resolved?.agent?.id ?? personId);
+      if (this.can(state, slot, resolved ?? { personId }, 'read')) return { journeyId: state.id, name: state.name };
+      // A person (not an agent) sees journeys that invited them, so they can accept from the console.
+      const pending = !resolved?.agent && slot ? cell(state.membership, 'Pending', slot) : 0;
+      if (!pending) return undefined;
+      return { journeyId: state.id, name: state.name, pending: decodeChoice(JOURNEY.pending, pending, 'pending') };
     });
   }
   private inboxView(state: JourneyState, personId: string): ToolData {

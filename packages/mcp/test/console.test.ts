@@ -421,3 +421,30 @@ test('console: passkeys show a label and last use instead of the raw id, can be 
   await post('/console/passkeys/rename', { id: key.id, name: '' });
   assert.match(await page(), /<strong>Passkey<\/strong>/, 'an empty name falls back to the provider label');
 });
+
+test('console: an invited person can accept from the console, sees how to connect an agent, and is told to add a passkey first', async () => {
+  const f = await fixture();
+  const journeyId = String((await f.backend.execute('alice', parseCommand('journey_create', { name: 'Invite probe' }), clientId)).journeyId);
+  await f.backend.execute('bob', parseCommand('account_read', {}), clientId);
+  await f.backend.execute('alice', parseCommand('journey_invite', { journeyId, email: 'bob@example.test' }), clientId);
+  f.access(await token(signer, { sub: 'bob', client_id: clientId }));
+  const login = await f.login(), headers = { cookie: login.cookie };
+  const home = await (await f.send('/console', { headers })).text();
+  assert.match(home, /Invite probe<\/strong> · You are invited/);
+  assert.doesNotMatch(home, /href="\/console\/journeys\//, 'an invitee cannot open the journey before accepting');
+  assert.match(home, /Connect your agent/); assert.match(home, /claude mcp add --transport http wayfinding/);
+  assert.match(home, /<a href="\/console\/passkeys">Add a passkey<\/a>/);
+  const csrf = csrfOf(home), form = { ...headers, origin, 'content-type': 'application/x-www-form-urlencoded' };
+  const joined = await f.send('/console/journeys/join', { method: 'POST', redirect: 'manual', headers: form, body: new URLSearchParams({ csrf, journeyId }).toString() });
+  assert.equal(joined.status, 303); assert.equal(joined.headers.get('location'), '/console?notice=joined');
+  const after = await (await f.send('/console?notice=joined', { headers })).text();
+  assert.match(after, /You joined the journey\./); assert.match(after, new RegExp(`href="/console/journeys/${journeyId}">Invite probe`));
+  const agentId = String((await f.backend.execute('bob', parseCommand('agent_create', { name: 'Helper' }), clientId)).agentId);
+  assert.match(await (await f.send(`/console/agents/${agentId}`, { headers })).text(), /You need a passkey to give this agent capabilities/);
+  const options = await f.send('/console/authorize/options', { method: 'POST', headers: { ...headers, origin, 'content-type': 'application/json' }, body: JSON.stringify({ csrf, change: { kind: 'card', agentId, capabilities: ['post'] } }) });
+  assert.equal(options.status, 409); assert.match(String((await options.json() as { error: string }).error), /Add a passkey first/);
+  const stranger = String((await f.backend.execute('alice', parseCommand('journey_create', { name: 'Not invited' }), clientId)).journeyId);
+  assert.doesNotMatch(await (await f.send('/console', { headers })).text(), /Not invited/, 'uninvited journeys stay hidden');
+  void stranger;
+});
+
