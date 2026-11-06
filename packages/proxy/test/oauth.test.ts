@@ -32,3 +32,7 @@ test('proxy: SDK OAuth DCR, S256 PKCE, state, issuer/resource binding, token exc
  assert.equal(await restored.authorize(send),'AUTHORIZED');assert.equal(tokenCalls,2);
  await assert.rejects(restored.saveDiscoveryState({authorizationServerUrl:'https://evil.test',authorizationServerMetadata:undefined}),/Unexpected OAuth/);
 });
+
+test('proxy: trusts the Wayfinding Worker as its OAuth issuer, not the console login provider',()=>{
+ assert.equal(ISSUER,RESOURCE.origin);
+});
