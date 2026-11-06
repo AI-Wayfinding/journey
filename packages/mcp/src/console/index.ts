@@ -56,8 +56,10 @@ export function createConsole(config: ConsoleConfig) {
         destination.search = new URLSearchParams({ client_id: clientId, redirect_uri: redirectUri, response_type: 'code', scope: 'openid profile email',
           resource: config.resource.href, state, code_challenge: challenge, code_challenge_method: 'S256' }).toString();
         // After sign-out, ask AuthKit to show its sign-in page; otherwise its own session signs the person straight back in.
-        if ((request.headers.get('cookie') ?? '').split(';').some(c => c.trim() === `${SIGNED_OUT_COOKIE}=1`)) destination.searchParams.set('prompt', 'login');
-        const response = redirect(destination.href, [await sessions.create(OAUTH_COOKIE, { kind: 'oauth', state, verifier, expiresAt: now() + 600_000 })]);
+        destination.searchParams.set('prompt', 'login');
+        const returnTo = url.searchParams.get('return_to');
+        if (returnTo !== null && !/^\/oauth\/consent\?request=[A-Za-z0-9_-]{43}$/.test(returnTo)) throw new Refused('Invalid sign-in return');
+        const response = redirect(destination.href, [await sessions.create(OAUTH_COOKIE, { kind: 'oauth', state, verifier, ...(returnTo ? { returnTo } : {}), expiresAt: now() + 600_000 })]);
         return new Response(null, { status: 302, headers: response.headers });
       }
       if (request.method === 'GET' && path === '/console/callback') {
@@ -74,7 +76,7 @@ export function createConsole(config: ConsoleConfig) {
         const auth = await config.verifier.verifyAccessToken(result.access_token), subject = auth.extra?.['sub'];
         if (auth.clientId !== clientId || typeof subject !== 'string') throw new Refused('Only the console client may sign in');
         await config.backend.execute(subject, { tool: 'account_read', input: {} }, clientId);
-        return redirect('/console', [await sessions.create(SESSION_COOKIE, { kind: 'session', subject, clientId, csrf: random(), expiresAt: now() + 28_800_000 }), cookie(OAUTH_COOKIE, '', 0), cookie(SIGNED_OUT_COOKIE, '', 0)]);
+        return redirect(pending.returnTo ?? '/console', [await sessions.create(SESSION_COOKIE, { kind: 'session', subject, clientId, csrf: random(), signedInAt: now(), expiresAt: now() + 28_800_000 }), cookie(OAUTH_COOKIE, '', 0), cookie(SIGNED_OUT_COOKIE, '', 0)]);
       }
       // A page visit without a valid session goes to sign-in; POSTs stay refused.
       if (request.method === 'GET' && (await sessions.read(request, SESSION_COOKIE))?.kind !== 'session') return redirect('/console/login');
@@ -101,7 +103,7 @@ export function createConsole(config: ConsoleConfig) {
         }
         if (path === '/console/authorize/options' || path === '/console/authorize/complete') {
           const change = changeSchema.parse(body.change);
-          if (change.kind !== 'card' && change.clientId === clientId) throw new Refused('The console connection cannot be bound');
+          if (change.kind !== 'card') throw new Refused('Client binding is managed at sign-in');
           if (path.endsWith('/options')) {
             const keys = await config.backend.passkey(identity, { op: 'list' });
             const credentials = z.array(z.object({ id: z.string() })).parse(keys.passkeys);
@@ -116,6 +118,7 @@ export function createConsole(config: ConsoleConfig) {
         if (path === '/console/authorize/start') {
           const change = changeSchema.parse(body.kind === 'card' ? { kind: body.kind, agentId: body.agentId, capabilities: body.capabilities ?? [] }
             : { kind: body.kind, clientId: body.clientId, agentId: body.agentId });
+          if (change.kind !== 'card') throw new Refused('Client binding is managed at sign-in');
           const agent = await config.backend.execute(session.subject, parseCommand('agent_capabilities', { agentId: change.agentId }), session.clientId);
           return new Response(confirmation(change, session.csrf, String(agent.name)), { headers: { ...headers, 'Content-Type': 'text/html; charset=utf-8' } });
         }
@@ -123,17 +126,22 @@ export function createConsole(config: ConsoleConfig) {
           await config.backend.execute(session.subject, parseCommand('journey_join', { journeyId: body.journeyId }), session.clientId);
           return redirect('/console?notice=joined');
         }
-        if (['/console/agents/create', '/console/agents/narrow', '/console/agents/remove'].includes(path)) {
-          const tool = path.endsWith('/create') ? 'agent_create' : path.endsWith('/narrow') ? 'agent_narrow' : 'agent_remove';
-          const input = tool === 'agent_create' ? { name: body.name } : tool === 'agent_narrow' ? { agentId: body.agentId, remove: body.capabilities ?? [] } : { agentId: body.agentId };
+        if (path === '/console/agents/update') {
+          const agentId = z.string().min(1).max(200).parse(body.agentId);
+          await config.backend.manageAgent(identity, agentId, z.string().trim().min(1).max(60).parse(body.name), z.array(z.string().min(1).max(200)).max(128).parse(body.journeys ?? []));
+          return redirect(`/console/agents/${encodeURIComponent(agentId)}`);
+        }
+        if (['/console/agents/narrow', '/console/agents/remove'].includes(path)) {
+          const tool = path.endsWith('/narrow') ? 'agent_narrow' : 'agent_remove';
+          const input = tool === 'agent_narrow' ? { agentId: body.agentId, remove: body.capabilities ?? [] } : { agentId: body.agentId };
           await config.backend.execute(session.subject, parseCommand(tool, input), session.clientId);
-          return redirect(tool === 'agent_create' ? '/console?notice=agent#connect' : '/console');
+          return redirect('/console');
         }
         return new Response('Not found', { status: 404, headers });
       }
       const identity = { subject: session.subject, clientId: session.clientId };
       // A fixed notice after a redirect (never caller text) tells the person their passkey was just used or changed.
-      const notices: Record<string, string> = { confirmed: 'Confirmed with your passkey.', registered: 'Passkey added.', renamed: 'Passkey name saved.', joined: 'You joined the journey.', agent: 'Agent added. Follow the steps below to connect it.' };
+      const notices: Record<string, string> = { confirmed: 'Confirmed with your passkey.', registered: 'Passkey added.', renamed: 'Passkey name saved.', joined: 'You joined the journey.' };
       const notice = notices[url.searchParams.get('notice') ?? ''];
       const html = (text: string) => new Response(notice ? text.replace(STATUS, `<p id="status" role="status" aria-live="polite" class="notice">${notice}</p>`) : text,
         { headers: { ...headers, 'Content-Type': 'text/html; charset=utf-8' } });

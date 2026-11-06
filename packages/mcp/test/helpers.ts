@@ -52,6 +52,8 @@ export async function token(signer: Signer, claims: JWTPayload = {}, kid = signe
 /** The Worker app trusting only `signer`'s key, as the deployed Worker trusts only AuthKit's JWKS. */
 export function app(signer: Signer, backend?: CoordinationBackend) {
   return createApp({
+    // Transport/backend suites intentionally inject person/agent identities. oauth-as.test.ts exercises the production opaque gate.
+    mcpVerifier: createVerifier({ issuer: ISSUER, resource: RESOURCE, getKey: createLocalJWKSet(signer.jwks) }),
     verifier: createVerifier({ issuer: ISSUER, resource: RESOURCE, getKey: createLocalJWKSet(signer.jwks) }),
     resource: RESOURCE,
     issuer: ISSUER,

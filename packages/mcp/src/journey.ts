@@ -41,6 +41,7 @@ export class JourneyHost {
     if (typeof raw !== 'string') throw new Refused('Invalid stored journey');
     const state = JSON.parse(raw) as JourneyState;
     if (!sameRules(state.rulesHash)) throw new Refused('Stored journey uses different rules');
+    state.rulesHash = RULES; // Persist the accepted predecessor stamp only on the next successful write.
     return state;
   }
   private slot(state: JourneyState, id: string, allocate = false): number {
@@ -142,6 +143,28 @@ export class JourneyHost {
       try { actor = this.actor(state, personId, command, resolved); }
       catch (error) { if (error instanceof Refused) throw new Refused('Only guides may invite'); throw error; }
       if (!this.can(state, actor, resolved ?? { personId }, 'member.invite')) throw new Refused('Only guides may invite');
+    });
+  }
+  /** Host-only consent membership sync, independent of the agent's read capability. */
+  syncAgent(personId: string, agentId: string, name: string, present: boolean): Promise<void> {
+    return this.serial.run(async () => {
+      const state = await this.load();
+      if (!state) { if (present) throw new Refused('Journey not found'); return; }
+      const actor = this.slot(state, personId), subject = this.slot(state, agentId, present);
+      const owned = state.agents.find(a => a.id === agentId);
+      if (owned && owned.owner !== personId) throw new Refused('Only an agent owner changes membership');
+      if (present) {
+        if (!this.live(state, actor)) throw new Refused('Live journey membership required');
+        if (!this.live(state, subject)) {
+          state.membership = requireChange(state.membership, journeyRule.step(state.membership, encodeJourney({ op: 'addAgent', actor, subject })), 'Consent agent admission', ['allowed']);
+          if (!owned) state.agents.push({ id: agentId, owner: personId });
+        }
+        state.identities[subject - 1]!.name = name;
+      } else {
+        if (!owned || !this.live(state, subject)) return;
+        state.membership = requireChange(state.membership, journeyRule.step(state.membership, encodeJourney({ op: 'remove', actor, subject })), 'Consent agent removal', ['allowed']);
+      }
+      await this.commit(state);
     });
   }
   /** Used by the account directory, without leaking private journeys to nonmembers. */

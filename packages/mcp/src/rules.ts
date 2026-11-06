@@ -61,11 +61,14 @@ export const RULES: RulesStamp = Object.freeze({
   round: lock.files['generated/round.js'],
 });
 
-/** Whether `stamp` names exactly the rule modules this build runs. */
+// The sole accepted predecessor adds no state fields; capability ids 0–19 retain their meaning.
+export const PRE_DEVICE_CARD_HASH = 'bcc89603e3ea46b30d1d4acd3f19abf380e652cab1fd195ebfa37b99ae3eb0a3';
+/** Accept the current rule modules or the explicit, data-compatible card predecessor. */
 export function sameRules(stamp: unknown): boolean {
   if (typeof stamp !== 'object' || stamp === null) return false;
   const given = stamp as Record<string, unknown>;
-  return (Object.keys(RULES) as (keyof RulesStamp)[]).every((key) => given[key] === RULES[key]);
+  return (Object.keys(RULES) as (keyof RulesStamp)[]).every(key =>
+    given[key] === RULES[key] || (key === 'card' && given.card === PRE_DEVICE_CARD_HASH));
 }
 
 /**

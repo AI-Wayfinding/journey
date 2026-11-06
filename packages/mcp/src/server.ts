@@ -22,12 +22,15 @@ export function buildServer(ctx: Parameters<McpServerFactory>[0], backend?: Coor
     return { contents: [{ uri: uri.href, mimeType: 'application/json', text: JSON.stringify(inbox) }] };
   });
   server.registerTool('whoami', {
-    description: 'Report the authenticated WorkOS subject.', inputSchema: z.object({}),
-    outputSchema: z.object({ subject: z.string(), era: z.enum(['legacy', 'modern']) }),
+    description: 'Report the signed-in person and the acting agent with its current capabilities and journeys.', inputSchema: z.object({}),
+    outputSchema: z.object({ subject: z.string(), era: z.enum(['legacy', 'modern']),
+      person: z.object({ id: z.string(), name: z.string() }).optional(),
+      agent: z.object({ id: z.string(), name: z.string(), capabilities: z.array(z.string()), journeys: z.array(z.string()) }).nullable().optional() }),
   }, async () => {
     const subject = subjectOf(ctx.authInfo?.extra);
     if (!subject) return { isError: true, content: [{ type: 'text', text: 'No signed-in account on this request.' }] };
-    const result = { subject, era: ctx.era };
+    const details = backend?.whoami ? await backend.whoami(subject, ctx.authInfo!.clientId) : {};
+    const result = { subject, era: ctx.era, ...details };
     return { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result };
   });
   for (const name of TOOL_NAMES) {

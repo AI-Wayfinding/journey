@@ -89,7 +89,7 @@ test('card rejects unsigned widening and unknown ids, narrows without assertion 
   const step = (changes: Partial<typeof request>) => {s = generated.step(p, s, card.encodeInput({...request, ...changes})); return card.decode(s)}
   assert.equal(step({}).allowed, false)
   assert.equal(step({op: 'sign', personAsserted: true, NewCaps: [6, 20, 999]}).signed, true)
-  assert.equal(s.maps.Caps!.get(20) ?? 0, 0)
+  assert.equal(s.maps.Caps!.get(20) ?? 0, 1)
   assert.equal(s.maps.Caps!.get(999) ?? 0, 0)
   assert.equal(step({}).allowed, true)
   assert.equal(step({personHolds: false}).allowed, false)

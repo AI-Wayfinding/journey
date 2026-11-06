@@ -201,6 +201,24 @@ Dan's brief for v2 was to write the spec, build what seems best, and refine late
 - **Decided by:** Dan (2026-11-03)
 - **What:** this agent merges when the work looks good and complete. The rewrite merged to `main` as `ca48bdd`.
 
+### 31. The Worker is the authorization server; agents are created at sign-in
+
+- **Decided by:** Dan
+- **What:** MCP clients authorise with the Worker at the resource origin. AuthKit remains the upstream sign-in provider for the console. After a sign-in no more than ten minutes old, the person names the agent and chooses its capabilities and journeys. Allow creates or updates the live agent for that person and client, signs its card and binds the client through the existing rules. No separate create-agent or console bind step remains.
+- **Tokens:** single-use codes last 60 seconds and require S256 PKCE. Opaque access tokens last one hour; rotating refresh tokens last up to 30 days. Accounts stores token hashes, not bearer values. Reusing a rotated refresh token revokes its family. Removing an agent revokes tokens and removes journey memberships. Calls always use the bound agent and its current card.
+- **Confirmation:** fresh upstream login confirms ordinary consent. The `device.keys` exception in decision 32 always needs a passkey. Console widening still needs a passkey; narrowing, renaming, journey changes and deletion do not. `grant.issue` and the never-assignable actions remain forbidden.
+- **Supersedes:** decision 4's choice of AuthKit as the MCP authorization server, decision 21's passkey-only confirmation at sign-in, and decision 22's separate console binding flow. The rule that a bound client always acts as its agent remains. Existing Durable Object classes, rules hashes and journey data stay unchanged. Old AuthKit MCP tokens must reauthorise once.
+- **Source:** Dan's agent-at-auth brief; `packages/mcp/src/oauth.ts` and `packages/mcp/src/oauth-store.ts`.
+
+### 32. Device keys require explicit, passkey-confirmed consent
+
+- **Decided by:** Dan set the boundary; this agent chose the binding and compatibility path.
+- **What:** `device.keys` is account capability 20. A person can use the private account profile, personal group, key-package and personal relay operations as before. An agent also needs `device.keys` on its live card. The local proxy remains required for sealed artifact content; ordinary remote clients do not need device authority.
+- **Confirmation:** consent always shows this capability unchecked. Selecting it requires a registered passkey with user verification, even on first consent after a fresh login. Accounts stores a single-use challenge lasting up to five minutes bound to the person, the exact pending OAuth request (client, redirect, PKCE and state), and the proposed name, capabilities and journeys. Changing those fields, replaying the assertion or letting it expire cannot issue tokens. Console widening reuses its existing passkey check.
+- **Compatibility:** preserve existing Accounts and Journeys data. Accept only the preceding card-module hash with every other rules hash unchanged. Capability ids 0–19 and the card state shape retain their meaning. Old unknown cells and map defaults cannot grant the new capability. Reads do not write; the next successful write stores the current stamp. Unknown rules remain refused. No new Durable Object classes or storage reset.
+- **Supersedes:** decision 28's reset policy for this additive card change, and decision 31's login-only confirmation for `device.keys`.
+- **Source:** `packages/mcp/src/accounts.ts`, `packages/mcp/src/oauth.ts`, `packages/mcp/src/rules.ts`; regression tests in `packages/mcp/test/oauth-as.test.ts` and `packages/mcp/test/device-compatibility.test.ts`.
+
 ## Open
 
 - **Stage 6, cloud-client opt-in:** not built.

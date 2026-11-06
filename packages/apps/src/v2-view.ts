@@ -1,6 +1,6 @@
 import { App } from '@modelcontextprotocol/ext-apps';
 import { v2View, CONSOLE_URL, type V2View } from './v2-contract.ts';
-import { capabilities } from '../../rules/src/capabilities.ts';
+import { capabilities } from './legacy-capabilities.ts';
 const app = new App({ name: 'wayfinding-workspace', version: '2.0.0' }, {}, { autoResize: false });
 const overview = document.getElementById('overview')!, status = document.getElementById('status')!;
 let ready = false, busy = false;
