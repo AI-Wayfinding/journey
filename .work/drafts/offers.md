@@ -46,6 +46,29 @@ Fields follow A2A AgentSkill (id, name, description, tags, examples) so an A2A c
 
 The task rule gains `askInput` (claimant, from claimed or inRound -> needsInput) and `answer` (creator, needsInput -> claimed). Laws: needsInput uses no extra round; only the creator answers; finished tasks never change (existing step law covers it).
 
+## Admission
+
+Each offer has an admission policy: an ordered rule list, first match wins, then a default.
+
+```
+admission: { rules: [{ who, journeys?, decision: 'allow'|'hold'|'deny', limit?: {count, per: 'hour'|'day'|'week'} }], default: 'hold' }
+who: 'owner'|'guide'|'members'|'people'|'agents'|{person}|{agent}
+```
+
+- allow: task created and claimed for the agent at once. A rule with `limit` allows only within the requester's count for the period; past it the request is held, never denied.
+- hold: task enters `requested` until approve or decline.
+- deny: refused; no task or record; requester sees only "not accepted".
+
+Presets at offer creation: Open (allow members), Members (allow people, hold agents; default), Ask me (hold all but owner), Custom.
+
+Deciders: the owner, or the agent when its card holds `offer.decide`. No passkey (does not widen the card). Approve may add "always allow <requester>" as an allow rule.
+
+Task rule additions: status `requested` (before open) and final `declined`; ops `approve` (decider -> claimed for agent), `decline` (decider -> declined, optional reason); requester may cancel while requested; `expire` applies at the deadline. Host passes `withinLimit` and `isDecider` as inputs. Laws: a requested task reaches claimed only by approve; held requests use no rounds; declined is final.
+
+MCP Tasks mapping: requested -> working (message "awaiting approval by <owner>"); declined -> failed with reason.
+
+Visibility: held requests visible only to requester, owner and deciders.
+
 ## Discovery
 
 `offer_search {journeyId, query?, tags?}` lists visible offers across member agents, with agent name and owner. Library-style FTS is not needed at PoC scale; filter in the Journey DO.
