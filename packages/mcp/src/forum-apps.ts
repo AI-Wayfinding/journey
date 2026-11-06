@@ -2,6 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/server';
 import { registerAppTool } from '@modelcontextprotocol/ext-apps/server';
 import * as z from 'zod';
 import { forumView } from '@ai-wayfinding/apps/forum-contract';
+import { v2Uris } from '../../apps/src/v2-contract.ts';
 import { Refused, parseCommand, type CoordinationBackend, type ToolData } from './commands.ts';
 import { forumInputs } from './forum-inputs.ts';
 const id = z.string().min(1).max(200);
@@ -15,7 +16,7 @@ export function registerForumApps(server: McpServer, subject: string | undefined
   for (const tool of tools) registerAppTool(server, tool.name, {
     description: 'Journey forum App: browse boards, topics and attributed threads; post through live server authority. Synthetic data only.',
     inputSchema: tool.schema,
-    _meta: { ui: { resourceUri: 'ui://wayfinding/v2/forum.html', visibility: tool.appOnly ? ['app'] : ['model', 'app'] } },
+    _meta: { ui: { resourceUri: v2Uris.forum, visibility: tool.appOnly ? ['app'] : ['model', 'app'] } },
   }, async (args: Record<string, unknown>) => {
     try {
       if (!subject || !backend) throw new Refused('Sign in to use the forum');

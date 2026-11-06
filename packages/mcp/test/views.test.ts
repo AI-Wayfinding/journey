@@ -55,6 +55,19 @@ test('views: released URI bytes stay identical while new resources and app-only 
   for (const name of ['apps_v2_library', 'apps_v2_round', 'apps_v2_interview_read', 'apps_v2_interview_write', 'apps_v2_interview_share', 'apps_v2_contribute', 'apps_v2_forum', 'apps_v2_reply', 'apps_v2_agents']) assert.deepEqual((tools.find(tool => tool.name === name)!._meta!.ui as { visibility: string[] }).visibility, ['app']);
 });
 
+test('views: tool launchers use the current successor URIs', async t => {
+  const f = await fixture(t), tools = (await f.alice.listTools()).tools;
+  const launchers = [
+    ['ui://wayfinding/v3/library.html', ['library_view', 'apps_v2_library']],
+    ['ui://wayfinding/v3/round.html', ['round_view', 'apps_v2_round', 'apps_v2_interview_read', 'apps_v2_interview_write', 'apps_v2_interview_share', 'apps_v2_contribute']],
+    ['ui://wayfinding/v3/agents.html', ['agent_capabilities_view', 'apps_v2_agents']],
+    ['ui://wayfinding/v4/forum.html', ['forum_view', 'forum_topic_create_view', 'forum_post_create_view', 'forum_view_v3', 'apps_v2_forum', 'apps_v2_topic', 'apps_v2_reply']],
+  ] as const;
+  for (const [uri, names] of launchers) for (const name of names) {
+    assert.equal((tools.find(tool => tool.name === name)?._meta?.ui as { resourceUri: string } | undefined)?.resourceUri, uri, name);
+  }
+});
+
 test('views: library filters, metadata detail and attached conversation run through the bundled host', async t => {
   const f = await fixture(t);
   const item = await f.call(f.alice, 'library_add', { journeyId: f.journeyId, name: '<b>Heading</b>', kind: 'prompt', labels: ['heading'], text: 'ARTIFACT-SECRET' });
