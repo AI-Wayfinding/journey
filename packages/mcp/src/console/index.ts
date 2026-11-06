@@ -105,7 +105,7 @@ export function createConsole(config: ConsoleConfig) {
           if (path.endsWith('/options')) {
             const keys = await config.backend.passkey(identity, { op: 'list' });
             const credentials = z.array(z.object({ id: z.string() })).parse(keys.passkeys);
-            if (!credentials.length) throw new Refused('Register a passkey first');
+            if (!credentials.length) return Response.json({ error: 'Add a passkey first: open Passkeys, add one, then come back and confirm.' }, { status: 409, headers });
             const { challenge } = await config.backend.beginAuthorization(identity, change);
             return Response.json({ challenge, rpId: 'poc.wayfinding.support', userVerification: 'required', timeout: 60000,
               allowCredentials: credentials.map(c => ({ type: 'public-key', id: c.id })) }, { headers });
@@ -119,17 +119,21 @@ export function createConsole(config: ConsoleConfig) {
           const agent = await config.backend.execute(session.subject, parseCommand('agent_capabilities', { agentId: change.agentId }), session.clientId);
           return new Response(confirmation(change, session.csrf, String(agent.name)), { headers: { ...headers, 'Content-Type': 'text/html; charset=utf-8' } });
         }
+        if (path === '/console/journeys/join') {
+          await config.backend.execute(session.subject, parseCommand('journey_join', { journeyId: body.journeyId }), session.clientId);
+          return redirect('/console?notice=joined');
+        }
         if (['/console/agents/create', '/console/agents/narrow', '/console/agents/remove'].includes(path)) {
           const tool = path.endsWith('/create') ? 'agent_create' : path.endsWith('/narrow') ? 'agent_narrow' : 'agent_remove';
           const input = tool === 'agent_create' ? { name: body.name } : tool === 'agent_narrow' ? { agentId: body.agentId, remove: body.capabilities ?? [] } : { agentId: body.agentId };
           await config.backend.execute(session.subject, parseCommand(tool, input), session.clientId);
-          return redirect('/console');
+          return redirect(tool === 'agent_create' ? '/console?notice=agent#connect' : '/console');
         }
         return new Response('Not found', { status: 404, headers });
       }
       const identity = { subject: session.subject, clientId: session.clientId };
       // A fixed notice after a redirect (never caller text) tells the person their passkey was just used or changed.
-      const notices: Record<string, string> = { confirmed: 'Confirmed with your passkey.', registered: 'Passkey added.', renamed: 'Passkey name saved.' };
+      const notices: Record<string, string> = { confirmed: 'Confirmed with your passkey.', registered: 'Passkey added.', renamed: 'Passkey name saved.', joined: 'You joined the journey.', agent: 'Agent added. Follow the steps below to connect it.' };
       const notice = notices[url.searchParams.get('notice') ?? ''];
       const html = (text: string) => new Response(notice ? text.replace(STATUS, `<p id="status" role="status" aria-live="polite" class="notice">${notice}</p>`) : text,
         { headers: { ...headers, 'Content-Type': 'text/html; charset=utf-8' } });
