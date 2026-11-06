@@ -44,7 +44,10 @@ async function fixture() {
     const start = await authorize();
     const location = start.headers.get('location')!;
     assert.ok(location.startsWith('/oauth/consent?'));
-    const html = await (await send(location, { headers: { cookie } })).text();
+    const page = await send(location, { headers: { cookie } }), html = await page.text();
+    // The consent script fetches passkey options; the page policy must allow same-origin fetch.
+    assert.ok(html.includes('data-options="/oauth/consent/options"'));
+    assert.match(page.headers.get('content-security-policy') ?? '', /connect-src 'self'/);
     const id = new URL(location, origin).searchParams.get('request')!;
     const allow = await post('/oauth/consent', { csrf: csrfOf(html), request: id, decision: 'allow', name: 'Scout', capabilities, journeys }, cookie);
     assert.equal(allow.status, 303);

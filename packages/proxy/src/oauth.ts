@@ -1,7 +1,7 @@
 import {auth,type OAuthClientProvider,type OAuthClientMetadata,type StoredOAuthClientInformation,type StoredOAuthTokens,type OAuthDiscoveryState} from '@modelcontextprotocol/client';
 import * as z from 'zod';
 import type {LocalStore} from './store.ts';
-export const ISSUER='https://welcoming-folk-53-staging.authkit.app';
+export const ISSUER='https://poc.wayfinding.support';
 export const RESOURCE=new URL('https://poc.wayfinding.support/mcp');
 const tokenSchema=z.object({access_token:z.string(),token_type:z.string(),refresh_token:z.string().optional(),expires_in:z.number().optional(),scope:z.string().optional(),issuer:z.literal(ISSUER).optional()});
 const clientSchema=z.object({client_id:z.string(),client_secret:z.string().optional(),client_id_issued_at:z.number().optional(),client_secret_expires_at:z.number().optional(),issuer:z.literal(ISSUER).optional()});
