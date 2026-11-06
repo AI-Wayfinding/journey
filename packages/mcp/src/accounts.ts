@@ -1,4 +1,7 @@
 import * as z from 'zod';
+import { accountOfferCommand } from './agent-offers.ts';
+import { DEFAULT_SETTINGS, offerView, allowanceRequestSchema, matchingRule, clampAdmission, periodMs, type AllowanceRequest, type AllowanceReceipt, type OfferAgent, type StandingDecision } from './offers.ts';
+import { PRE_OFFERS_CARD_HASH } from './rules.ts';
 import { Refused, isRelay, type Command, type KeyPackageCommand, type ToolData } from './commands.ts';
 import { personalGroupRule, RULES, sameRules, sameState, cell, SLOTS, type Snapshot, type RulesStamp } from './rules.ts';
 import { Serial, type KeyValueStorage } from './storage.ts';
@@ -14,7 +17,7 @@ import { managePasskey } from './console/passkeys.ts';
 export interface Profile { name: string; email: string }
 export interface Profiles { get(subject: string): Promise<Profile> }
 export interface Account extends Profile, AgentAccount { subject: string; personId: string; nickname?: string; group: Snapshot; identities: { id: string; name: string; kind: 'device' | 'agent' }[] }
-interface AccountsState { rulesHash: RulesStamp; accounts: Account[]; journeys: string[]; oauth?: OAuthState }
+interface AccountsState { rulesHash: RulesStamp; accounts: Account[]; journeys: string[]; oauth?: OAuthState; allowances?: AllowanceReceipt[] }
 
 export class AccountsHost {
   private readonly serial = new Serial();
@@ -33,7 +36,7 @@ export class AccountsHost {
     if (state.rulesHash.card !== RULES.card) {
       // Preserve every old capability, including sparse defaults, without inheriting new device authority.
       for (const agent of state.accounts.flatMap(a => a.agents)) {
-        agent.card.maps.Caps = Array.from({ length: 20 }, (_, id): [number, number] => [id, cell(agent.card, 'Caps', id)]);
+        agent.card.maps.Caps = Array.from({ length: state.rulesHash.card === PRE_OFFERS_CARD_HASH ? 21 : 20 }, (_, id): [number, number] => [id, cell(agent.card, 'Caps', id)]);
         if (agent.card.defaults) delete agent.card.defaults.Caps;
       }
     }
@@ -187,13 +190,79 @@ export class AccountsHost {
       return this.resolve(account, clientId, actingAgent);
     });
   }
+  /** Internal inventory only: never exposed as a caller-supplied authority flag. */
+  offerDirectory(): Promise<OfferAgent[]> {
+    return this.serial.run(async () => (await this.load()).accounts.filter(a => a.live).flatMap(a => a.agents.filter(g => g.live).map(g => ({ id: g.id, name: g.name, owner: a.personId, card: g.card, offers: g.offers ?? [], settings: g.offerSettings ?? DEFAULT_SETTINGS }))));
+  }
+  /** Reserve across all journeys under the same serial authority as offer edits. */
+  reserveAllowance(supplied: AllowanceRequest): Promise<'allow' | 'hold'> {
+    return this.serial.run(async () => {
+      const request = allowanceRequestSchema.parse(supplied), state = await this.load(), now = this.now();
+      const previous = state.allowances?.find(r => r.taskId === request.taskId);
+      if (previous) {
+        for (const key of Object.keys(request) as (keyof AllowanceRequest)[]) if (request[key] !== previous[key]) throw new Refused('Allowance reservation mismatch');
+        return previous.decision;
+      }
+      const account = state.accounts.find(a => a.live && a.agents.some(g => g.id === request.agentId && g.live));
+      const agent = account?.agents.find(g => g.id === request.agentId);
+      const offer = agent?.offers?.find(o => o.id === request.offerId);
+      if (!account || !agent || !offer || offer.status !== 'published' || offer.version !== request.version || offer.journeys !== 'all' && !offer.journeys.includes(request.journeyId)) throw new Refused('Offer changed; reload before requesting');
+      const settings = agent.offerSettings ?? DEFAULT_SETTINGS;
+      const policy = offer.agentDefined ? clampAdmission(offer.admission, settings) : offer.admission;
+      const matched = matchingRule(policy, { requesterId: request.requesterId, requesterPersonId: request.requesterPersonId, isAgent: request.isAgent, isGuide: request.isGuide, journeyId: request.journeyId, owner: account.personId });
+      let decision = matched?.decision ?? policy.default;
+      if (decision === 'deny') throw new Refused('Not accepted');
+      // Count requests, including held ones. Keep a week so later policy edits cannot reset usage.
+      const receipts = (state.allowances ?? []).filter(r => r.createdAt > now - periodMs('week'));
+      const agentReceipts = receipts.filter(r => r.agentId === agent.id);
+      const limit = matched?.limit;
+      if (decision === 'allow' && limit && agentReceipts.filter(r => r.offerId === offer.id && r.requesterId === request.requesterId && r.isAgent === request.isAgent && r.createdAt > now - periodMs(limit.per)).length >= limit.count) decision = 'hold';
+      if (settings.maxRequestsPerDay && agentReceipts.filter(r => r.createdAt > now - periodMs('day')).length >= settings.maxRequestsPerDay) decision = 'hold';
+      receipts.push({ taskId: request.taskId, agentId: agent.id, offerId: offer.id, version: offer.version, journeyId: request.journeyId, requesterId: request.requesterId, requesterPersonId: request.requesterPersonId, isAgent: request.isAgent, isGuide: request.isGuide, createdAt: now, decision });
+      state.allowances = receipts;
+      await this.storage.put('accounts', JSON.stringify(state));
+      return decision;
+    });
+  }
+  /** Only the creating journey releases, after a definite failure before its task commit. */
+  releaseAllowance(taskId: string): Promise<void> {
+    return this.serial.run(async () => {
+      const state = await this.load(), receipts = state.allowances;
+      if (!receipts?.some(r => r.taskId === taskId)) return;
+      state.allowances = receipts.filter(r => r.taskId !== taskId);
+      if (!state.allowances.length) delete state.allowances;
+      await this.storage.put('accounts', JSON.stringify(state));
+    });
+  }
+  /** Idempotent delivery of a decision already committed by the journey. */
+  standingDecision(decision: StandingDecision): Promise<void> {
+    return this.serial.run(async () => {
+      const state = await this.load(), account = state.accounts.find(a => a.personId === decision.owner && a.live);
+      const agent = account?.agents.find(a => a.id === decision.agentId && a.live);
+      if (!agent || agent.standingReceipts?.includes(decision.id)) return;
+      const offer = agent.offers?.find(o => o.id === decision.offerId);
+      if (!offer) return;
+      const who = 'person' in decision.who ? { person: decision.who.person } : { agent: decision.who.agent };
+      offer.admission.rules = [{ who, decision: decision.decision }, ...offer.admission.rules.filter(r => JSON.stringify(r.who) !== JSON.stringify(who))].slice(0, 50);
+      offer.version++; offer.updatedAt = this.now();
+      agent.standingReceipts = [...(agent.standingReceipts ?? []), decision.id];
+      await this.storage.put('accounts', JSON.stringify(state));
+    });
+  }
   agentCommand(personId: string, clientId: string, command: Command): Promise<ToolData> {
     return this.serial.run(async () => {
       const state = await this.load(), account = state.accounts.find(a => a.personId === personId);
       if (!account) throw new Refused('Account not found');
       const actor = this.resolve(account, clientId, 'actingAgent' in command.input ? command.input.actingAgent : undefined);
-      const view = (a: Account['agents'][number]) => ({ agentId: a.id, name: a.name, live: a.live, signed: scalar(a.card, 'signed') === 1, capabilities: cardCaps(a.card), clientId: a.clientId, clientName: a.clientName, createdAt: a.createdAt, lastUsedAt: a.lastUsedAt, journeys: a.journeys ?? [] });
+      const view = (a: Account['agents'][number]) => ({ agentId: a.id, name: a.name, live: a.live, signed: scalar(a.card, 'signed') === 1, capabilities: cardCaps(a.card), offers: !actor.agent || actor.agent.id === a.id ? (a.offers ?? []).map(offerView) : undefined, clientId: a.clientId, clientName: a.clientName, createdAt: a.createdAt, lastUsedAt: a.lastUsedAt, journeys: a.journeys ?? [] });
       switch (command.tool) {
+        case 'offer_set': case 'offer_list': case 'offer_publish': case 'offer_retire': case 'offer_settings': {
+          const agent = account.agents.find(a => a.id === command.input.agentId && a.live);
+          if (!agent) throw new Refused('Only a live agent owner may manage offers');
+          const result = accountOfferCommand(actor, agent, command, this.now());
+          if (result.changed) await this.storage.put('accounts', JSON.stringify(state));
+          return result.data;
+        }
         case 'client_list': return { clientId, actingAgent: actor.agent?.id, clients: account.clients.map((id, i) => ({ clientId: id, agentId: cell(account.bindings, 'Bound', i + 1) || cell(account.bindings, 'Revoked', i + 1) ? account.agents[cell(account.bindings, 'Agents', i + 1) - 2]?.id : undefined, bound: cell(account.bindings, 'Bound', i + 1) === 1, revoked: cell(account.bindings, 'Revoked', i + 1) === 1 })) };
         case 'agent_list': return { agents: account.agents.map(view) };
         case 'agent_create': {
@@ -252,6 +321,10 @@ export class AccountsHost {
       const agent = account.agents.find(a => a.id === change.agentId && a.live);
       if (!agent) throw new Refused('Only an owned live agent may be changed');
       if (change.kind === 'card') agent.card = stepCard(agent.card, scalar(agent.card, 'signed') ? 'widen' : 'sign', change.capabilities, 'read', false, true, true, true);
+      else if (change.kind === 'offer_settings') {
+        const current = agent.offerSettings ?? DEFAULT_SETTINGS;
+        agent.offerSettings = { publishWithoutReview: change.settings.publishWithoutReview ?? current.publishWithoutReview, maxAdmission: change.settings.maxAdmission ?? current.maxAdmission, maxRequestsPerDay: change.settings.maxRequestsPerDay ?? current.maxRequestsPerDay };
+      }
       else {
         let client = account.clients.indexOf(change.clientId) + 1;
         if (!client) { account.clients.push(change.clientId); client = account.clients.length; }

@@ -1,4 +1,5 @@
 import { encodeJourney, encodeProject, encodeGrant, JOURNEY, PROJECT, decodeChoice, type JourneyNeed, type JourneyOp } from '../../rules/src/encode.ts';
+import { taskInput } from './tasks.ts';
 import { artifactRule, grantRule, journeyRule, projectRule, taskRule, topicRule, RULES, SLOTS, sameRules, sameState, scalar, cell, type Snapshot, type RulesStamp } from './rules.ts';
 import { capabilities, type Capability } from '../../rules/src/capabilities.ts';
 import { allows, type Actor } from './agents.ts';
@@ -8,18 +9,21 @@ import { relay, deleteArtifactBlobs, type BlobStore } from './relay.ts';
 import { library, isLibraryCommand, isLibraryArtifact, requireItem, visibleItem, type LibraryArtifact, type LibraryAccess, type LibraryCommand } from './library.ts';
 import { forum, isForumCommand, defaultBoard, type Board, type Topic, type Post } from './forum.ts';
 import { rounds, isRoundCommand, type SensemakingRound } from './rounds.ts';
+import { changeTask, type JourneyTask } from './tasks.ts';
+import { offerView, DEFAULT_SETTINGS, type OfferPort, type OfferAgent, type StandingDecision } from './offers.ts';
 
 interface Identity { id: string; name: string }
 interface Project { id: string; name: string; purpose: string; rule: Snapshot }
 interface Agent { id: string; owner: string }
 interface Grant { id: string; need: JourneyNeed; resource: string; expiresAt: number; rule: Snapshot }
 interface Artifact { id: string; name: string; type: string; size: number; rule: Snapshot; storage?: never }
-interface Task { id: string; name: string; assignee?: string; deadline: number; createdAt: number; updatedAt: number; rule: Snapshot }
+type Task = JourneyTask;
 export interface JourneyState {
   id: string; name: string; rulesHash: RulesStamp; identities: Identity[]; membership: Snapshot;
   projects: Project[]; agents: Agent[]; grants: Grant[]; artifacts: (Artifact | LibraryArtifact)[]; tasks: Task[];
   topics: Snapshot; boards: Board[]; topicRecords: Topic[]; targets: import("./forum-inputs.ts").ForumTarget[]; posts: Post[];
   rounds: SensemakingRound[];
+  offerOutbox?: StandingDecision[];
 }
 
 function requireChange(before: Snapshot, after: Snapshot, what: string, ignore: string[] = []): Snapshot {
@@ -34,7 +38,8 @@ export class JourneyHost {
   private readonly storage: KeyValueStorage;
   private readonly now: () => number;
   private readonly blobs: BlobStore | undefined;
-  constructor(storage: KeyValueStorage, now: () => number = Date.now, blobs?: BlobStore) { this.storage = storage; this.now = now; this.blobs = blobs; }
+  private readonly offers: OfferPort | undefined;
+  constructor(storage: KeyValueStorage, now: () => number = Date.now, blobs?: BlobStore, offers?: OfferPort) { this.storage = storage; this.now = now; this.blobs = blobs; this.offers = offers; }
   private async load(): Promise<JourneyState | undefined> {
     const raw = await this.storage.get('journey');
     if (raw === undefined) return undefined;
@@ -98,9 +103,10 @@ export class JourneyHost {
       case 'grant_issue': case 'grant_revoke': return 'grant.issue';
       case 'artifact_create': case 'artifact_version': case 'artifact_rename': return 'artifact.write';
       case 'artifact_delete': return 'artifact.delete';
+      case 'offer_search': return 'read';
       case 'task_create': return 'task.manage';
       // Claiming/doing a task is member participation; managing/cancelling it is write authority.
-      case 'task_step': return command.input.action === 'cancel' ? 'task.manage' : 'read';
+      case 'task_step': return command.input.action === 'approve' || command.input.action === 'decline' ? 'offer.decide' : command.input.action === 'cancel' ? 'task.manage' : 'read';
       case 'mls_message_fetch': case 'artifact_blob_get': return 'read';
       case 'mls_message_post': return 'read';
       case 'artifact_blob_put': return 'artifact.write';
@@ -108,14 +114,45 @@ export class JourneyHost {
       default: return undefined;
     }
   }
+  private decider(state: JourneyState, task: Task, identity: Actor): boolean {
+    if (!task.offer) return false;
+    const actor = this.slot(state, identity.agent?.id ?? identity.personId);
+    return identity.personId === task.offer.owner && this.live(state, actor) && (!identity.agent || this.can(state, actor, identity, 'offer.decide'));
+  }
+  private taskVisible(state: JourneyState, task: Task, identity: Actor): boolean {
+    if (!task.offer || task.offer.admitted) return true;
+    return state.identities[scalar(task.rule, 'creator') - 1]?.id === (identity.agent?.id ?? identity.personId)
+      || !identity.agent && task.offer?.requesterPersonId === identity.personId || this.decider(state, task, identity);
+  }
+  private runnable(state: JourneyState, agent: OfferAgent): boolean {
+    return state.agents.some(a => a.id === agent.id && a.owner === agent.owner) && this.can(state, this.slot(state, agent.id), { personId: agent.owner, agent: { id: agent.id, name: agent.name, live: true, card: agent.card } }, 'task.manage');
+  }
+  private async changeTask(state: JourneyState, actor: number, identity: Actor, command: Extract<Command, { tool: 'task_create' | 'task_step' }>): Promise<string | undefined> {
+    if (command.tool === 'task_step') {
+      const task = state.tasks.find(t => t.id === command.input.taskId);
+      if (task && !this.taskVisible(state, task, identity)) throw new Refused('Task access refused');
+    }
+    return changeTask(state, command, { actor, personId: identity.personId, actorId: identity.agent?.id ?? identity.personId, isAgent: !!identity.agent, now: this.now(), guide: this.has(state, this.slot(state, identity.personId), 'guide'),
+      live: id => this.live(state, this.slot(state, id)), slot: id => this.slot(state, id), decider: task => this.decider(state, task, identity), runnable: agent => this.runnable(state, agent),
+      creatorId: task => state.identities[scalar(task.rule, 'creator') - 1]!.id }, this.offers);
+  }
+  private async flushOffers(state: JourneyState): Promise<void> {
+    if (!state.offerOutbox?.length) return;
+    if (!this.offers) throw new Refused('Offer decision delivery unavailable');
+    for (const decision of state.offerOutbox) await this.offers.stand(decision);
+    state.offerOutbox = [];
+    await this.storage.transaction(async storage => { await storage.put('journey', JSON.stringify(state)); await this.schedule(state, storage); });
+  }
   private taskView(state: JourneyState, task: Task): ToolData {
     return { taskId: task.id, name: task.name, assignee: task.assignee, deadline: task.deadline,
       creator: state.identities[scalar(task.rule, 'creator') - 1]?.id,
       claimant: state.identities[scalar(task.rule, 'claimant') - 1]?.id,
-      status: ['none', 'open', 'claimed', 'inRound', 'done', 'expired', 'cancelled'][scalar(task.rule, 'status')],
+      status: ['none', 'open', 'claimed', 'inRound', 'done', 'expired', 'cancelled', 'requested', 'declined'][scalar(task.rule, 'status')],
+      offerId: task.offer?.id, offerVersion: task.offer?.version, agentId: task.offer?.agentId,
+      input: task.content?.input, output: task.content?.output, reason: task.content?.reason,
       roundsUsed: scalar(task.rule, 'roundsUsed'), maxRounds: scalar(task.rule, 'cap') };
   }
-  private view(state: JourneyState, personId: string): ToolData {
+  private view(state: JourneyState, personId: string, identity: Actor = { personId }): ToolData {
     return {
       journeyId: state.id, name: state.name, rulesHash: state.rulesHash,
       policy: decodeChoice(JOURNEY.policy, scalar(state.membership, 'policy'), 'policy'),
@@ -131,7 +168,7 @@ export class JourneyHost {
       agents: state.agents.map(a => ({ agentId: a.id, owner: a.owner, signed: false, read: false, write: false, grant: false })),
       grants: state.grants.map((g) => ({ grantId: g.id, need: g.need, resource: g.resource, expiresAt: g.expiresAt, status: ['unissued', 'live', 'revoked', 'ended'][scalar(g.rule, 'status')], usesLeft: scalar(g.rule, 'usesLeft') })),
       artifacts: state.artifacts.filter(a => !isLibraryArtifact(a) || visibleItem(a, this.slot(state, personId))).map((a) => ({ artifactId: a.id, name: a.name, type: a.type, size: a.size, version: scalar(a.rule, 'version'), deleted: scalar(a.rule, 'at') === 2 })),
-      tasks: state.tasks.map((t) => this.taskView(state, t)),
+      tasks: state.tasks.filter(t => this.taskVisible(state, t, identity)).map((t) => this.taskView(state, t)),
     };
   }
   /** A read-free authority probe; final invitation still runs the unchanged rule. */
@@ -180,15 +217,15 @@ export class JourneyHost {
       return { journeyId: state.id, name: state.name, pending: decodeChoice(JOURNEY.pending, pending, 'pending') };
     });
   }
-  private inboxView(state: JourneyState, personId: string): ToolData {
+  private inboxView(state: JourneyState, personId: string, identity: Actor = { personId }): ToolData {
     const recipients = new Set([personId, ...state.agents.filter((agent) => agent.owner === personId && this.live(state, this.slot(state, agent.id))).map((agent) => agent.id)]);
-    return { journeyId: state.id, tasks: state.tasks.filter((task) => task.assignee === undefined || recipients.has(task.assignee)).map((task) => this.taskView(state, task)) };
+    return { journeyId: state.id, tasks: state.tasks.filter((task) => (task.assignee === undefined || recipients.has(task.assignee) || scalar(task.rule, 'status') === 7 && this.decider(state, task, identity)) && this.taskVisible(state, task, identity)).map((task) => this.taskView(state, task)) };
   }
   inbox(personId: string, resolved?: Actor): Promise<ToolData> {
     return this.serial.run(async () => {
       const state = await this.load();
       if (!state || !this.can(state, this.slot(state, resolved?.agent?.id ?? personId), resolved ?? { personId }, 'read')) throw new Refused('Inbox reading refused');
-      return this.inboxView(state, resolved?.agent?.id ?? personId);
+      return this.inboxView(state, resolved?.agent?.id ?? personId, resolved ?? { personId });
     });
   }
   watchInbox(personId: string, resolved?: Actor): Promise<ReadableStream<Uint8Array>> {
@@ -203,13 +240,23 @@ export class JourneyHost {
       }, { highWaterMark: 16 });
     });
   }
-  private async commit(state: JourneyState, writes: [string, string][] = []): Promise<void> {
-    const before = await this.load();
-    await this.storage.transaction(async (storage) => {
-      await storage.put('journey', JSON.stringify(state));
-      for (const [key, value] of writes) await storage.put(key, value);
-      await this.schedule(state, storage);
-    });
+  private async commit(state: JourneyState, writes: [string, string][] = [], allowance?: string): Promise<void> {
+    let before: JourneyState | undefined;
+    try {
+      before = await this.load();
+      // Deliver older decisions before committing another command under stale policy.
+      if (state.offerOutbox?.length && !this.offers) throw new Refused('Offer decision delivery unavailable');
+      await this.storage.transaction(async (storage) => {
+        await storage.put('journey', JSON.stringify(state));
+        for (const [key, value] of writes) await storage.put(key, value);
+        await this.schedule(state, storage);
+      });
+    } catch (error) {
+      // The task transaction aborted. Never release after a successful commit, even if notification fails.
+      if (allowance) { try { await this.offers!.release(allowance); } catch { /* Retain on ambiguity; no extra allowance. */ } }
+      throw error;
+    }
+    try { await this.flushOffers(state); } catch { /* Durable outbox and alarm retry; the task decision is already committed. */ }
     for (const [controller, personId] of this.watchers) {
       if (!this.has(state, this.slot(state, personId), 'read') || (controller.desiredSize ?? 0) <= 0) {
         this.watchers.delete(controller); controller.close(); continue;
@@ -219,18 +266,21 @@ export class JourneyHost {
     }
   }
   private async schedule(state: JourneyState, storage: Pick<KeyValueStorage, 'setAlarm' | 'deleteAlarm'> = this.storage): Promise<void> {
-    const active = state.tasks.filter((task) => scalar(task.rule, 'status') >= 1 && scalar(task.rule, 'status') <= 3);
-    if (active.length) await storage.setAlarm(Math.min(...active.map((task) => task.deadline)));
+    const active = state.tasks.filter((task) => [1, 2, 3, 7].includes(scalar(task.rule, 'status')));
+    const deadlines = active.map(task => task.deadline);
+    if (state.offerOutbox?.length) deadlines.push(this.now() + 60_000);
+    if (deadlines.length) await storage.setAlarm(Math.min(...deadlines));
     else await storage.deleteAlarm();
   }
   alarm(): Promise<void> {
     return this.serial.run(async () => {
       const state = await this.load();
       if (!state) return;
+      if (state.offerOutbox?.length) { try { await this.flushOffers(state); } catch { /* Expiry must proceed even while Accounts is unavailable. */ } }
       const now = this.now();
       let changed = false;
       for (const task of state.tasks) {
-        const next = taskRule.step(task.rule, { op: 6, actor: 0, actorIsLive: 0, deadlinePassed: +(now >= task.deadline), maxRounds: 0 });
+        const next = taskRule.step(task.rule, taskInput(6, 0, false, now >= task.deadline));
         if (!sameState(task.rule, next)) { task.rule = next; task.updatedAt = now; changed = true; }
       }
       if (changed) await this.commit(state);
@@ -244,22 +294,26 @@ export class JourneyHost {
       if (!state || !this.can(state, actor, resolved ?? { personId }, 'read')) throw new Refused('Task access refused');
       const task = state.tasks.find((task) => task.id === taskId);
       if (!task) throw new Refused('Task not found');
+      if (!this.taskVisible(state, task, resolved ?? { personId })) throw new Refused('Task access refused');
       if (method === 'cancel') {
         this.requireCapability(state, actor, resolved ?? { personId }, 'task.manage');
-        this.apply(state, actor, personId, { tool: 'task_step', input: { journeyId: state.id, taskId, action: 'cancel' } });
+        await this.changeTask(state, actor, resolved ?? { personId }, { tool: 'task_step', input: { journeyId: state.id, taskId, action: 'cancel' } });
         await this.commit(state);
       }
       if (method !== 'get') return { resultType: 'complete' };
       const status = scalar(task.rule, 'status');
-      const result: ToolData = { resultType: 'complete', taskId, status: status === 6 ? 'cancelled' : status >= 4 ? 'completed' : 'working',
+      const result: ToolData = { resultType: 'complete', taskId, status: status === 6 ? 'cancelled' : status === 5 || status === 8 ? 'failed' : status === 4 ? 'completed' : 'working',
+        ...(status === 7 ? { statusMessage: 'awaiting approval' } : {}),
         createdAt: new Date(task.createdAt).toISOString(), lastUpdatedAt: new Date(task.updatedAt).toISOString(), ttlMs: null, pollIntervalMs: 1000 };
-      if (status === 4 || status === 5) result.result = { content: [{ type: 'text', text: JSON.stringify(this.taskView(state, task)) }], structuredContent: this.taskView(state, task), isError: status === 5 };
+      if ([4, 5, 8].includes(status)) result.result = { content: [{ type: 'text', text: JSON.stringify(this.taskView(state, task)) }], structuredContent: this.taskView(state, task), isError: status !== 4 };
       return result;
     });
   }
   execute(personId: string, command: Command, journeyId?: string, resolved?: Actor): Promise<ToolData> {
     return this.serial.run(async () => {
       let state = await this.load();
+      if (state?.offerOutbox?.length) await this.flushOffers(state);
+      let allowance: string | undefined;
       if (command.tool === 'journey_create') {
         if (state) throw new Refused('Journey already exists');
         if (!journeyId) throw new Refused('Journey identity missing');
@@ -304,6 +358,11 @@ export class JourneyHost {
           if (!allows(identity, 'agent.remove', this.has(state, actor, 'read'))) throw new Refused('Agent removal refused');
         }
         if (cap && !ownRemoval) this.requireCapability(state, actor, identity, cap);
+        if (command.tool === 'offer_search') {
+          const found = (await this.offers?.directory() ?? []).filter(g => this.runnable(state!, g)).flatMap(g => g.offers.filter(o => o.status === 'published' && (o.journeys === 'all' || o.journeys.includes(state!.id))).map(o => ({ ...offerView(o), agentId: g.id, agentName: g.name, owner: g.owner })));
+          const query = command.input.query?.toLowerCase(), tags = command.input.tags;
+          return { journeyId: state.id, offers: found.filter(o => (!query || `${o.name} ${o.description} ${o.tags.join(' ')}`.toLowerCase().includes(query)) && (!tags || tags.every(t => o.tags.includes(t)))) };
+        }
         if (isRelay(command)) {
           if (command.input.groupId !== state.id || command.input.memberId !== undefined) throw new Refused('Invalid journey relay identity');
           if (!this.has(state, actor, 'read')) throw new Refused('A live readable member is required for relay');
@@ -327,7 +386,7 @@ export class JourneyHost {
         }
         if (command.tool === 'journey_read') {
           if (!this.has(state, actor, 'read')) throw new Refused('Reading journey refused');
-          return this.view(state, personId);
+          return this.view(state, personId, identity);
         }
         if (command.tool === 'artifact_version' || command.tool === 'artifact_rename' || command.tool === 'artifact_delete') {
           const artifact = state.artifacts.find(a => a.id === command.input.artifactId);
@@ -345,15 +404,16 @@ export class JourneyHost {
             if (creatorPerson !== this.slot(state, personId) && !this.has(state, actor, 'guide')) throw new Refused('Only the artifact owner or guide may delete');
           }
         }
-        this.apply(state, actor, personId, command, resolved);
+        if (command.tool === 'task_create' || command.tool === 'task_step') allowance = await this.changeTask(state, actor, identity, command);
+        else this.apply(state, actor, personId, command, resolved);
         if (command.tool === 'artifact_delete' && this.blobs) await deleteArtifactBlobs(this.storage, this.blobs, state.id, command.input.artifactId);
       }
-      await this.commit(state);
+      await this.commit(state, [], allowance);
       // Respond under the acting identity's read limit, never its owner's broader authority.
       const identity = command.tool === 'agent_add' ? { personId } : resolved ?? { personId };
       const readerId = identity.agent?.id ?? personId;
       if (!this.can(state, this.slot(state, readerId), identity, 'read')) return { journeyId: state.id, accepted: true };
-      return this.view(state, personId);
+      return this.view(state, personId, identity);
     });
   }
   private apply(state: JourneyState, actor: number, personId: string, command: Command, resolved?: Actor): void {
@@ -452,28 +512,6 @@ export class JourneyHost {
         if (command.tool === 'artifact_version') artifact.size = command.input.size;
         if (command.tool === 'artifact_rename') artifact.name = command.input.name;
         return;
-      }
-      case 'task_create': {
-        const now = this.now();
-        if (command.input.deadline <= now) throw new Refused('Task deadline must be in the future');
-        const assignee = command.input.assignee;
-        if (assignee !== undefined && !this.live(state, this.slot(state, assignee))) throw new Refused('Task assignee is not a live member');
-        const rule = taskRule.step(taskRule.init(), { op: 0, actor, actorIsLive: +this.live(state, actor), deadlinePassed: 0, maxRounds: command.input.maxRounds });
-        if (scalar(rule, 'status') !== 1) throw new Refused('Task create refused');
-        state.tasks.push({ id: `task_${state.id.slice('journey_'.length)}_${crypto.randomUUID()}`, name: command.input.name,
-          ...(assignee === undefined ? {} : { assignee }), deadline: command.input.deadline, createdAt: now, updatedAt: now, rule }); return;
-      }
-      case 'task_step': {
-        const task = state.tasks.find((t) => t.id === command.input.taskId);
-        if (!task) throw new Refused('Task not found');
-        if (command.input.action === 'claim' && task.assignee !== undefined && this.slot(state, task.assignee) !== actor) throw new Refused('Only the task assignee may claim it');
-        const deadlinePassed = +(this.now() >= task.deadline);
-        if (deadlinePassed && command.input.action !== 'expire') throw new Refused('Task change refused: deadline passed');
-        task.rule = requireChange(task.rule, taskRule.step(task.rule, { op: ['create', 'claim', 'startRound', 'endRound', 'finish', 'cancel', 'expire'].indexOf(command.input.action), actor,
-          actorIsLive: +this.live(state, actor), deadlinePassed, maxRounds: 0 }), 'Task change');
-        // The generated expire operation also enforces the round cap outside a round.
-        task.rule = taskRule.step(task.rule, { op: 6, actor: 0, actorIsLive: 0, deadlinePassed, maxRounds: 0 });
-        task.updatedAt = this.now(); return;
       }
       default: throw new Refused('Not a journey command');
     }

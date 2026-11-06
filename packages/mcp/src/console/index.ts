@@ -16,6 +16,11 @@ import { changeSchema, assertionSchema } from '../agents.ts';
 import { registration } from './contract.ts';
 
 const STATUS = '<p id="status" role="status" aria-live="polite"></p>';
+const offerSettingsForm = (body: Record<string, unknown>) => ({
+  publishWithoutReview: typeof body.publishWithoutReview === 'boolean' ? body.publishWithoutReview : z.enum(['true', 'false']).parse(body.publishWithoutReview) === 'true',
+  maxAdmission: z.enum(['hold', 'allow']).parse(body.maxAdmission),
+  maxRequestsPerDay: z.coerce.number().int().min(0).max(1000).parse(body.maxRequestsPerDay),
+});
 export function createConsole(config: ConsoleConfig) {
   const origin = config.resource.origin, clientId = `${origin}/console/client.json`, redirectUri = `${origin}/console/callback`;
   const now = config.now ?? Date.now, send = config.send ?? fetch.bind(globalThis);
@@ -103,7 +108,7 @@ export function createConsole(config: ConsoleConfig) {
         }
         if (path === '/console/authorize/options' || path === '/console/authorize/complete') {
           const change = changeSchema.parse(body.change);
-          if (change.kind !== 'card') throw new Refused('Client binding is managed at sign-in');
+          if (change.kind !== 'card' && change.kind !== 'offer_settings') throw new Refused('Client binding is managed at sign-in');
           if (path.endsWith('/options')) {
             const keys = await config.backend.passkey(identity, { op: 'list' });
             const credentials = z.array(z.object({ id: z.string() })).parse(keys.passkeys);
@@ -113,12 +118,13 @@ export function createConsole(config: ConsoleConfig) {
               allowCredentials: credentials.map(c => ({ type: 'public-key', id: c.id })) }, { headers });
           }
           await config.backend.completeAuthorization(identity, change, assertionSchema.parse(body.assertion));
-          return redirect(change.kind === 'card' ? `/console/agents/${encodeURIComponent(change.agentId)}?notice=confirmed` : '/console?notice=confirmed');
+          return redirect(`/console/agents/${encodeURIComponent(change.agentId)}?notice=confirmed`);
         }
         if (path === '/console/authorize/start') {
           const change = changeSchema.parse(body.kind === 'card' ? { kind: body.kind, agentId: body.agentId, capabilities: body.capabilities ?? [] }
+            : body.kind === 'offer_settings' ? { kind: body.kind, agentId: body.agentId, settings: offerSettingsForm(body) }
             : { kind: body.kind, clientId: body.clientId, agentId: body.agentId });
-          if (change.kind !== 'card') throw new Refused('Client binding is managed at sign-in');
+          if (change.kind !== 'card' && change.kind !== 'offer_settings') throw new Refused('Client binding is managed at sign-in');
           const agent = await config.backend.execute(session.subject, parseCommand('agent_capabilities', { agentId: change.agentId }), session.clientId);
           return new Response(confirmation(change, session.csrf, String(agent.name)), { headers: { ...headers, 'Content-Type': 'text/html; charset=utf-8' } });
         }
@@ -129,6 +135,43 @@ export function createConsole(config: ConsoleConfig) {
         if (path === '/console/agents/update') {
           const agentId = z.string().min(1).max(200).parse(body.agentId);
           await config.backend.manageAgent(identity, agentId, z.string().trim().min(1).max(60).parse(body.name), z.array(z.string().min(1).max(200)).max(128).parse(body.journeys ?? []));
+          return redirect(`/console/agents/${encodeURIComponent(agentId)}`);
+        }
+        if (path === '/console/offers/settings') {
+          const agentId = z.string().min(1).max(200).parse(body.agentId);
+          await config.backend.execute(session.subject, parseCommand('offer_settings', { agentId, ...offerSettingsForm(body) }), session.clientId);
+          return redirect(`/console/agents/${encodeURIComponent(agentId)}`);
+        }
+        if (path === '/console/offers/publish' || path === '/console/offers/retire') {
+          const agentId = z.string().min(1).max(200).parse(body.agentId);
+          await config.backend.execute(session.subject, parseCommand(path.endsWith('/publish') ? 'offer_publish' : 'offer_retire', { agentId, offerId: body.offerId }), session.clientId);
+          return redirect(`/console/agents/${encodeURIComponent(agentId)}`);
+        }
+        if (path === '/console/offers/rule-remove') {
+          const agentId = z.string().min(1).max(200).parse(body.agentId), offerId = z.string().min(1).max(200).parse(body.offerId);
+          const ruleIndex = z.coerce.number().int().min(0).max(49).parse(body.ruleIndex);
+          const version = z.coerce.number().int().min(1).parse(body.version);
+          const listed = await config.backend.execute(session.subject, parseCommand('offer_list', { agentId }), session.clientId);
+          const offers = z.array(z.record(z.string(), z.unknown())).parse(listed.offers);
+          const offer = offers.find(o => o.id === offerId);
+          if (!offer || offer.version !== version) throw new Refused('Offer changed; reload before removing a rule');
+          const admission = z.object({ rules: z.array(z.record(z.string(), z.unknown())), default: z.enum(['allow', 'hold', 'deny']) }).parse(offer.admission);
+          const rule = admission.rules[ruleIndex];
+          if (!rule || typeof rule.who !== 'object' || rule.who === null) throw new Refused('Standing rule required');
+          await config.backend.execute(session.subject, parseCommand('offer_set', { agentId, expectedVersion: version, offer: {
+            id: offer.id, name: offer.name, description: offer.description, tags: offer.tags, examples: offer.examples,
+            inputSchema: offer.inputSchema, outputSchema: offer.outputSchema, journeys: offer.journeys, resource: offer.resource, instructions: offer.instructions,
+            admission: { rules: admission.rules.filter((_, i) => i !== ruleIndex), default: admission.default },
+          } }), session.clientId);
+          return redirect(`/console/agents/${encodeURIComponent(agentId)}`);
+        }
+        if (path === '/console/offers/decide') {
+          const agentId = z.string().min(1).max(200).parse(body.agentId);
+          const action = z.enum(['approve', 'decline']).parse(body.action);
+          await config.backend.execute(session.subject, parseCommand('task_step', {
+            journeyId: body.journeyId, taskId: body.taskId, action,
+            standing: body.standing, reason: action === 'decline' ? body.reason : undefined,
+          }), session.clientId);
           return redirect(`/console/agents/${encodeURIComponent(agentId)}`);
         }
         if (['/console/agents/narrow', '/console/agents/remove'].includes(path)) {

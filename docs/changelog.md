@@ -103,6 +103,7 @@ The rewrite plan and Dan's decisions on it. (`53a9720` to `8062244`)
 
 ## Not yet shipped
 
+- **Agent offers:** named work on agent cards, checked request input, offer version audit records and ordered admission rules. Owners publish drafts, retire offers and approve or decline held requests in the console. Agent decisions require `offer.decide`; defining offers requires `offer.manage`. Excess requests are held rather than denied. Content sealing and the browser MLS device are not part of this stage. Not deployed.
 - **Agent sign-in:** the Worker issues MCP tokens. During sign-in, name the agent and choose its capabilities and journeys. Returning clients update their existing live agent. The console shows access and activity, supports rename and journey changes, and no longer has separate create-agent or bind forms. Opaque access tokens and rotating refresh tokens replace AuthKit MCP JWTs. Existing clients must sign in again; existing journeys and Durable Object classes are preserved. Not deployed.
 - **Device encryption access:** `device.keys` lets a scoped agent bootstrap the required local encryption proxy, manage personal device identities and key packages, and relay personal sealed content. It defaults off and always needs an authorization-bound passkey assertion at consent. Existing Accounts and Journeys records under the preceding card rules hash load without a reset and upgrade on their next successful write. Not deployed.
 - **Stage 6:** cloud-client opt-in to server-side decryption.
