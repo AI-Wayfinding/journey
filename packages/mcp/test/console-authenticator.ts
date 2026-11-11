@@ -18,8 +18,8 @@ export async function authenticator() {
       const attestation = isoCBOR.encode(new Map<string, string | Uint8Array | Map<string, string>>([['fmt', 'none'], ['attStmt', new Map()], ['authData', data]]));
       return { id: b64(id), rawId: b64(id), type: 'public-key' as const, clientExtensionResults: {}, response: { clientDataJSON: b64(clientData('webauthn.create', challenge, origin)), attestationObject: b64(attestation), transports: ['internal'] } };
     },
-    async assert(challenge: string, count = 1, origin?: string) {
-      const data = Buffer.concat([rpHash, new Uint8Array([5, 0, 0, 0, count])]);
+    async assert(challenge: string, count = 1, origin?: string, userVerified = true) {
+      const data = Buffer.concat([rpHash, new Uint8Array([userVerified ? 5 : 1, 0, 0, 0, count])]);
       const client = clientData('webauthn.get', challenge, origin);
       const signature = new Uint8Array(await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, keys.privateKey, Buffer.concat([data, await hash(client)])));
       // WebAuthn ES256 signatures are DER, while Web Crypto produces r || s.

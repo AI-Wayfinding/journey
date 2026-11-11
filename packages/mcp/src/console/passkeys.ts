@@ -30,6 +30,7 @@ export async function managePasskey(account: Account, accounts: Account[], stora
     await storage.put(key, JSON.stringify({ challenge: options.challenge, expiresAt: now + 300_000 }));
     return { ...options };
   }
+  if(operation.op!=='finish')throw new Refused('Browser enrollment uses the host enrollment path');
   let pending: { challenge: string; expiresAt: number } | null = null;
   const raw = await storage.get(key);
   try { pending = typeof raw === 'string' ? JSON.parse(raw) as { challenge: string; expiresAt: number } : null; }

@@ -17,9 +17,10 @@ import { SEALED_NOTICE, bindingSchema, sealedInputs, type DeviceBinding } from '
 
 import { recordOperation, consoleRecord, passkeyOperation, type RecordOperation, type ConsoleRecord, type PasskeyOperation } from './console/contract.ts';
 import { managePasskey } from './console/passkeys.ts';
+import { browserEnrollment, type BrowserRegistration } from './console/browser-enrollment.ts';
 export interface Profile { name: string; email: string }
 export interface Profiles { get(subject: string): Promise<Profile> }
-export interface Account extends Profile, AgentAccount { descriptor?:SealedDescriptor; emailIndex?:string; subject: string; personId: string; nickname?: string; group: Snapshot; identities: { id: string; name: string; kind: 'device' | 'agent' }[] }
+export interface Account extends Profile, AgentAccount { browsers?: { id: string; credentialId: string; devices: string[] }[]; descriptor?:SealedDescriptor; emailIndex?:string; subject: string; personId: string; nickname?: string; group: Snapshot; identities: { id: string; name: string; kind: 'device' | 'agent' }[] }
 interface AccountsState { emailKey?:string; rulesHash: RulesStamp; accounts: Account[]; journeys: string[]; oauth?: OAuthState; allowances?: AllowanceReceipt[]; permits?: AdmissionPermit[] }
 
 function parseDevice(raw:string):DeviceBinding{try{return bindingSchema.parse(JSON.parse(raw));}catch{throw new Refused('Invalid stored authenticated device binding');}}
@@ -250,15 +251,22 @@ export class AccountsHost {
     const b=await this.sealedBinding(await this.load(),deviceId),key=`sealed:reservation:${deviceId}`,old=await this.storage.get(key);
     if(old!==undefined&&old!==groupId)throw new Refused('Key package already reserved for another audience');await this.storage.put(key,groupId);return b;
   });}
+  private async registerDevice(account:Account,actor:Actor,input:BrowserRegistration):Promise<DeviceBinding>{
+    const {deviceId,verificationKey,data}=input;
+    if(await this.storage.get(`sealed:device:${deviceId}`)!==undefined)throw new Refused('Device id already bound');
+    decodeBytes(data,64*1024);if(decodeBytes(verificationKey,64).length!==32)throw new Refused('Ed25519 verification key required');
+    const slot=account.identities.length+2;if(slot>=SLOTS)throw new Refused('Device capacity reached');
+    account.group=personalGroupRule(1).step(account.group,{op:0,subject:slot,kind:actor.agent?3:2,belongsTo:1});
+    account.identities.push({id:deviceId,name:deviceId,kind:actor.agent?'agent':'device'});
+    const binding:DeviceBinding={deviceId,personId:account.personId,agentId:actor.agent?.id,verificationKey,data,hash:await tokenHash(data),createdAt:this.now()};
+    await this.storage.put(`sealed:device:${deviceId}`,JSON.stringify(binding));return binding;
+  }
   sealedDevice(personId:string,clientId:string,tool:string,supplied:unknown):Promise<ToolData>{return this.serial.run(async()=>{
     const input=sealedInputs[tool]?.parse(supplied) as Record<string,unknown>|undefined;if(!input)throw new Refused('Unknown device operation');
     const state=await this.load(),account=state.accounts.find(a=>a.personId===personId);if(!account)throw new Refused('Unknown account');const actor=this.resolve(account,clientId);if(!allows(actor,'read',true)||!allows(actor,'device.keys',true))throw new Refused('Sealed content refused: needs read + device.keys; ask the owner to grant both explicitly');
     if(tool==='sealed_device_binding'){const raw=await this.storage.get(`sealed:device:${String(input.deviceId)}`);if(typeof raw!=='string')throw new Refused('Unknown authenticated device');return parseDevice(raw);}
-    if(tool!=='sealed_device_register')throw new Refused('Unknown device operation');const id=String(input.deviceId);if(await this.storage.get(`sealed:device:${id}`)!==undefined)throw new Refused('Device id already bound');
-    decodeBytes(String(input.data),64*1024);if(decodeBytes(String(input.verificationKey),64).length!==32)throw new Refused('Ed25519 verification key required');
-    const slot=account.identities.length+2;if(slot>=SLOTS)throw new Refused('Device capacity reached');const machine=personalGroupRule(1);account.group=machine.step(account.group,{op:0,subject:slot,kind:actor.agent?3:2,belongsTo:1});
-    account.identities.push({id,name:id,kind:actor.agent?'agent':'device'});const binding:DeviceBinding={deviceId:id,personId,agentId:actor.agent?.id,verificationKey:String(input.verificationKey),data:String(input.data),hash:await tokenHash(String(input.data)),createdAt:this.now()};
-    await this.storage.transaction(async()=>{await this.save(state);await this.storage.put(`sealed:device:${id}`,JSON.stringify(binding));});return binding;
+    if(tool!=='sealed_device_register')throw new Refused('Unknown device operation');
+    return this.storage.transaction(async()=>{const binding=await this.registerDevice(account,actor,{deviceId:String(input.deviceId),verificationKey:String(input.verificationKey),data:String(input.data)});await this.save(state);return binding;});
   });}
   issueWrite(supplied: WriteRequest): Promise<WritePermit> {
     return this.serial.run(async () => {
@@ -449,6 +457,11 @@ export class AccountsHost {
       const state = await this.load(), account = state.accounts.find(a => a.subject === identity.subject);
       if (!account || this.resolve(account, identity.clientId).agent) throw new Refused('Only a live person manages passkeys');
       const operation = passkeyOperation.parse(supplied);
+      if(operation.op.startsWith('browser_'))return this.storage.transaction(async()=>{
+        const result=await browserEnrollment(account,this.storage,this.verifier,identity,operation,this.now(),input=>this.registerDevice(account,{personId:account.personId,clientId:identity.clientId},input));
+        await this.save(state);return result;
+      });
+      if(operation.op==='delete'&&(account.browsers??[]).some(b=>b.credentialId===operation.id&&b.devices.some(d=>{const i=account.identities.findIndex(x=>x.id===d);return i>=0&&cell(account.group,'Members',i+2)!==0;})))throw new Refused('Revoke browser devices before removing their wrapping passkey');
       const result = await managePasskey(account, state.accounts, this.storage, operation, this.now(),this.sealedMode);
       if (operation.op === 'finish' || operation.op === 'delete' || operation.op === 'rename') await this.save(state);
       return result;

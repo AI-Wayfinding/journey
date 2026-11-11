@@ -6,7 +6,13 @@ import type { AuthenticationResponseJSON } from '@simplewebauthn/server';
 
 export const registration = z.object({ id: z.string().min(1).max(2048), rawId: z.string().max(2048), type: z.literal('public-key'), clientExtensionResults: z.object({}).strip(),
   response: z.object({ clientDataJSON: z.string().max(8192), attestationObject: z.string().max(65536), transports: z.array(z.string()).max(10).optional() }).strip() }).strip();
+export const browserBinding = z.object({ deviceId: z.string().regex(/^device_[0-9a-f-]{36}$/), verificationKey: z.string().max(128), data: z.string().max(90000) }).strict();
+const browserFields = { browserId: z.string().uuid(), credentialId: z.string().min(1).max(2048), device: browserBinding };
 export const passkeyOperation = z.discriminatedUnion('op', [
+  z.object({ op: z.literal('browser_list') }).strict(),
+  z.object({ op: z.literal('browser_check'), browserId: z.string().uuid() }).strict(),
+  z.object({ op: z.literal('browser_begin'), ...browserFields }).strict(),
+  z.object({ op: z.literal('browser_finish'), ...browserFields, assertion: z.object({ id: z.string(), rawId: z.string(), type: z.literal('public-key'), clientExtensionResults: z.object({}).strip(), response: z.object({ clientDataJSON: z.string(), authenticatorData: z.string(), signature: z.string(), userHandle: z.string().optional() }).strict() }).strict() }).strict(),
   z.object({ op: z.literal('list') }).strict(),
   z.object({ op: z.literal('begin') }).strict(),
   z.object({ op: z.literal('finish'), credential: registration }).strict(),
