@@ -552,7 +552,7 @@ export class WorkOSProfiles implements Profiles {
     url.pathname += encodeURIComponent(subject);
     if (url.origin !== 'https://api.workos.com' || !url.pathname.startsWith('/user_management/users/')) throw new Refused('Account profile origin refused');
     const response = await this.send(url, {
-      redirect: 'error',
+      redirect: 'manual',
       headers: { authorization: `Bearer ${this.apiKey}` }, signal: AbortSignal.timeout(10_000),
     });
     if (!response.ok) throw new Refused('Account profile lookup failed');

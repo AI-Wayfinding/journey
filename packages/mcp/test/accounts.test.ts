@@ -57,3 +57,26 @@ test('account profile lookup calls the default fetch without a foreign this (wor
   const profile = await new WorkOSProfiles('sk_test_synthetic').get('user_synthetic');
   assert.equal(profile.email, 'synthetic@test.wayfinding.support');
 });
+
+test('account profile lookup uses a Workers-supported redirect mode and refuses redirects', async () => {
+  const modes: unknown[] = [];
+  const redirected = new WorkOSProfiles('sk_test_synthetic', async (_input, init) => {
+    modes.push(init?.redirect);
+    // workerd rejects any mode other than follow or manual before sending.
+    if (init?.redirect !== 'follow' && init?.redirect !== 'manual') throw new TypeError('Invalid redirect value, must be one of "follow" or "manual"');
+    return new Response(null, { status: 302, headers: { location: 'https://attacker.test/' } });
+  });
+  await assert.rejects(redirected.get('user_synthetic'), { message: 'Account profile lookup failed' });
+  assert.deepEqual(modes, ['manual']);
+});
+
+test('worker source never asks fetch for the unsupported error redirect mode', async () => {
+  const { readdir, readFile } = await import('node:fs/promises');
+  const root = new URL('../src/', import.meta.url);
+  const files = (await readdir(root, { recursive: true })).filter((name) => name.endsWith('.ts'));
+  assert.ok(files.length > 10, 'source scan must see the worker sources');
+  const offenders = [];
+  for (const name of files) if (/redirect\s*:\s*['"]error['"]/.test(await readFile(new URL(name, root), 'utf8'))) offenders.push(name);
+  assert.deepEqual(offenders, []);
+});
+
