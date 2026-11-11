@@ -37,9 +37,10 @@ export function accountOfferCommand(actor: Actor, agent: AccountAgent, command: 
     const policy = input.admission ?? presetPolicy(input.preset);
     const content = { name: input.name, description: input.description, tags: input.tags, examples: input.examples, inputSchema: input.inputSchema, outputSchema: input.outputSchema, resource: input.resource, instructions: input.instructions };
     const journeySettings = editJourneySettings(previous?.journeySettings ?? {}, input.journeySettings ?? {}, settings, !!actor.agent);
-    const contentChanged = !previous || JSON.stringify(content) !== JSON.stringify(previous.content);
-    const offer: Offer = { id: input.id, content, contentRevision: (previous?.contentRevision ?? 0) + +contentChanged, journeySettings, admission: actor.agent ? clampAdmission(policy, settings) : policy,
+    const contentChanged = !previous || JSON.stringify(content) !== JSON.stringify(previous.content) || JSON.stringify(input.sealed) !== JSON.stringify(previous.sealed);
+    const offer: Offer = { id: input.id, content, sealed: input.sealed, contentRevision: (previous?.contentRevision ?? 0) + +contentChanged, journeySettings, admission: actor.agent ? clampAdmission(policy, settings) : policy,
       status: actor.agent ? settings.publishWithoutReview ? 'published' : 'draft' : previous?.status === 'published' ? 'published' : 'draft', agentDefined: !!actor.agent, version: (previous?.version ?? 0) + 1, createdAt: previous?.createdAt ?? now, updatedAt: now };
+    if (input.sealed && input.sealed.contentRevision !== offer.contentRevision) throw new Refused('Sealed content revision mismatch');
     agent.offers = [...(agent.offers ?? []).filter(o => o.id !== input.id), offer];
     return { data: { agentId: agent.id, offer: offerView(offer) }, changed: true };
   }

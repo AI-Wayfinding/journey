@@ -1,4 +1,5 @@
 import * as z from 'zod';
+import { sealedOfferDefinition, type SealedOfferDefinition } from './sealed-descriptors.ts';
 import { Refused } from './errors.ts';
 import type { Snapshot } from './rules.ts';
 
@@ -90,18 +91,18 @@ const jsonSchema = z.record(z.string(), z.unknown()).superRefine((s, ctx) => { t
 export const journeySettingSchema = z.object({ enabled: z.boolean(), maxRequestsPerDay: z.number().int().min(1).max(1000).optional() }).strict();
 export const journeySettingsSchema = z.record(id, journeySettingSchema).refine(v => Object.keys(v).length <= 128, 'At most 128 offer journeys');
 export type JourneySettings = z.infer<typeof journeySettingsSchema>;
-// TODO(sealing): each row will hold a J-encrypted definition and its contentRevision.
-// Until then the current server-readable source stays in Offer.content; no fake envelope.
+// Sealed generations use immutable P source and J publication references.
+// Legacy definitions remain supported only by the unsealed generation.
 export const offerDefinitionSchema = z.object({
   id: z.string().regex(/^[a-z0-9][a-z0-9-]{0,59}$/), name: z.string().trim().min(1).max(60), description: z.string().max(1000),
   tags: z.array(z.string().min(1).max(60)).max(10).default([]), examples: z.array(z.string().max(1000)).max(5).default([]),
   inputSchema: jsonSchema, outputSchema: jsonSchema.optional(), journeySettings: journeySettingsSchema.optional(),
   admission: admissionSchema.optional(), preset: z.enum(['Open', 'Members', 'Ask me', 'Custom']).optional(),
-  resource: z.string().min(1).max(200).optional(), instructions: z.string().max(1000).optional(),
+  resource: z.string().min(1).max(200).optional(), instructions: z.string().max(1000).optional(), sealed: sealedOfferDefinition.optional(),
 }).strict();
 export type OfferDefinition = z.infer<typeof offerDefinitionSchema>;
 export interface OfferContent { name: string; description: string; tags: string[]; examples: string[]; inputSchema: Record<string, unknown>; outputSchema?: Record<string, unknown>; resource?: string; instructions?: string }
-export interface Offer { id: string; content: OfferContent; contentRevision: number; journeySettings: JourneySettings; admission: AdmissionPolicy; status: 'draft' | 'published' | 'retired'; version: number; createdAt: number; updatedAt: number; agentDefined?: boolean }
+export interface Offer { id: string; content: OfferContent; sealed?: SealedOfferDefinition; contentRevision: number; journeySettings: JourneySettings; admission: AdmissionPolicy; status: 'draft' | 'published' | 'retired'; version: number; createdAt: number; updatedAt: number; agentDefined?: boolean }
 export interface OfferAgent { id: string; name: string; owner: string; card: Snapshot; offers: Offer[]; settings: OwnerOfferSettings }
 export interface StandingDecision { id: string; owner: string; agentId: string; offerId: string; who: { person: string } | { agent: string }; decision: 'allow' | 'deny' }
 // Host-only reservation: identity and guide status come from Journey authority, never tool input.
@@ -121,7 +122,7 @@ export interface OfferPort {
   approve(request: PermitRequest): Promise<'allow' | 'hold'>;
   release(taskId: string, permitOnly?: boolean): Promise<void>;
 }
-export function offerView(o: Offer) { return { id: o.id, name: o.content.name, description: o.content.description, tags: o.content.tags, examples: o.content.examples, inputSchema: o.content.inputSchema, outputSchema: o.content.outputSchema, resource: o.content.resource, instructions: o.content.instructions, journeySettings: o.journeySettings, contentRevision: o.contentRevision, admission: o.admission, status: o.status, version: o.version, createdAt: o.createdAt, updatedAt: o.updatedAt }; }
+export function offerView(o: Offer) { return { id: o.id, sealed: o.sealed, privateDefinition: o.sealed?.privateDefinition, publications: o.sealed?.publications, name: o.content.name, description: o.content.description, tags: o.content.tags, examples: o.content.examples, inputSchema: o.content.inputSchema, outputSchema: o.content.outputSchema, resource: o.content.resource, instructions: o.content.instructions, journeySettings: o.journeySettings, contentRevision: o.contentRevision, admission: o.admission, status: o.status, version: o.version, createdAt: o.createdAt, updatedAt: o.updatedAt }; }
 export function presetPolicy(preset: OfferDefinition['preset']): AdmissionPolicy {
   return structuredClone(preset === 'Open' ? ADMISSION_OPEN : preset === 'Ask me' ? ADMISSION_ASK_ME : ADMISSION_MEMBERS);
 }
@@ -140,7 +141,7 @@ export function periodMs(per: 'hour' | 'day' | 'week'): number { return per === 
 
 /** No wildcard: absent entries, including future memberships, are off. */
 export function journeyEnabled(offer: Offer, journeyId: string): boolean {
-  return Object.hasOwn(offer.journeySettings, journeyId) && offer.journeySettings[journeyId]!.enabled;
+  return Object.hasOwn(offer.journeySettings, journeyId) && offer.journeySettings[journeyId]!.enabled && (!offer.sealed || !!offer.sealed.publications[journeyId]);
 }
 export function clampJourneyLimits(offers: Offer[], settings: OwnerOfferSettings, now: number): void {
   if (!settings.maxRequestsPerDay) return;

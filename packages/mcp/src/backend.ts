@@ -1,4 +1,6 @@
 import * as z from 'zod';
+import { internalDefinition, verifyDefinition } from './sealed-offers.ts';
+import { sealedOfferDefinition, type DefinitionRef } from './sealed-descriptors.ts';
 import type { OfferAgent, StandingDecision } from './offers.ts';
 import type { WritePort, WritePermit, WriteReceipt, WriteDrain } from './write-permits.ts';
 import { AccountsHost, type Account, type Profiles } from './accounts.ts';
@@ -67,6 +69,16 @@ export class Backend implements CoordinationBackend {
     const parsed=sealedInputs[tool]?.safeParse(input);if(!parsed?.success)throw new Refused('Invalid sealed fields or unknown format');const named=parsed.data as Record<string,unknown>;
     await this.recoverWrites();const account=await this.accounts.provision(subject),actor=await this.accounts.resolveActor(account.personId,clientId);
     if(actor.agent&&(tool==='content_prepare'||Object.hasOwn(sealedRouting,tool))&&(!allows(actor,'read',true)||!allows(actor,'device.keys',true)))throw new Refused('Sealed content refused: needs read + device.keys; ask the owner to grant both explicitly');
+    const read=(ref:DefinitionRef)=>this.sealedExecute(subject,'sealed_record_read',ref,clientId);
+    if(tool==='offer_set'){
+      const definition=z.object({id:z.string(),sealed:sealedOfferDefinition,journeySettings:z.record(z.string(),z.unknown()),admission:z.unknown()}).parse(named.offer),agentId=String(named.agentId);
+      if(!account.agents.some(a=>a.id===agentId&&a.live)||actor.agent&&actor.agent.id!==agentId)throw new Refused('Owned live agent required');
+      const d=definition.sealed;await verifyDefinition(d.privateDefinition,account.personId,agentId,definition.id,d.contentRevision,true,read);
+      for(const [journeyId,ref] of Object.entries(d.publications)){if(ref.journeyId!==journeyId)throw new Refused('Offer journey publication mismatch');await verifyDefinition(ref,account.personId,agentId,definition.id,d.contentRevision,false,read);}
+      for(const [journeyId,row] of Object.entries(definition.journeySettings))if(z.object({enabled:z.boolean()}).parse(row).enabled&&!d.publications[journeyId])throw new Refused('Enabled journey needs a current sealed publication');
+      return this.executeCommand(subject,parseCommand('offer_set',{agentId,expectedVersion:named.expectedVersion,offer:internalDefinition(definition.id,d,definition.journeySettings,definition.admission)}),clientId);
+    }
+    if(tool==='offer_search'){const result=await this.executeCommand(subject,parseCommand('offer_search',{journeyId:named.journeyId}),clientId);return {journeyId:named.journeyId,offers:z.array(z.record(z.string(),z.unknown())).parse(result.offers).map(o=>({id:o.id,agentId:o.agentId,owner:o.owner,version:o.version,contentRevision:o.contentRevision,status:o.status,admission:o.admission,publication:z.record(z.string(),z.unknown()).parse(o.publications??{})[String(named.journeyId)]}))};}
     if(tool==='journey_create'){requireAccountCapability(actor,'journey.create');return this.executeCommand(subject,parseCommand('journey_create',{name:SEALED_NOTICE,policy:named.policy,defaultRole:named.defaultRole}),clientId);}
     if(tool==='sealed_device_register'||tool==='sealed_device_binding'){if(!this.accounts.sealedDevice)throw new Refused('Device binding storage unavailable');return this.accounts.sealedDevice(account.personId,clientId,tool,named);}
     const journeyId=z.string().min(1).max(200).parse(named.journeyId),port=this.journey(journeyId);if(!port.sealed||!this.accounts.deviceBinding||!this.accounts.reserveDevice)throw new Refused('Sealed storage unavailable');

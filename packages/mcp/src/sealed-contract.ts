@@ -1,4 +1,6 @@
 import * as z from 'zod';
+import { sealedOfferDefinition } from './sealed-descriptors.ts';
+import { admissionSchema, journeySettingsSchema } from './offers.ts';
 import { decodeBytes } from './relay.ts';
 import { Refused } from './errors.ts';
 
@@ -23,6 +25,7 @@ const round = { roundId: sid };
 // Each action copies only named coordination fields. All descriptive values live inside MLS.
 export const sealedRouting = {
   journey_descriptor: z.object({}).strict(),
+  offer_definition: z.object({agentId:sid,offerId:sid,contentRevision:snat.min(1),private:z.boolean()}).strict(),
   project_create: z.object({}).strict(),
   project_update: z.object({projectId:sid,status:z.enum(['gettingStarted','active','lookingForOthers','archived']).optional()}).strict(),
   board_create: z.object({}).strict(),
@@ -52,6 +55,9 @@ const ticket = z.object({...ctx,ticketId:sid,devices:z.record(z.string(),sid),en
 export const contentContext=z.object({format:z.literal(SEALED_FORMAT),groupId:sid,parentId:sid,recordId:sid,recordType:sid,revision:snat.min(1),operationId:sid,authorId:sid,epoch:snat}).strict();
 export type ContentContext=z.infer<typeof contentContext>;
 export const sealedInputs: Record<string,z.ZodObject> = {
+  sealed_record_read:z.object({journeyId:sid,recordId:sid,revision:snat.min(1)}).strict(),
+  offer_set:z.object({agentId:sid,offer:z.object({id:sid,sealed:sealedOfferDefinition,journeySettings:journeySettingsSchema,admission:admissionSchema}).strict(),expectedVersion:snat.min(1).optional()}).strict(),
+  offer_search:z.object({journeyId:sid}).strict(),
   journey_create:z.object({policy:z.enum(['request','open','invite']).default('request'),defaultRole:z.enum(['read','write']).default('read')}).strict(),
   sealed_catalog:z.object({...ctx,cursor:snat.default(0)}).strict(),
   ...Object.fromEntries(Object.keys(sealedRouting).map(name=>[name,ticket])),

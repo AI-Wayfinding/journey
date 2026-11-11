@@ -1,4 +1,6 @@
 import * as z from 'zod';
+import { offerDefinitionSchema, presetPolicy, validateData } from '../../mcp/src/offers.ts';
+import { definitionRef } from '../../mcp/src/sealed-descriptors.ts';
 import type { Client } from '@modelcontextprotocol/client';
 const localInputs={...inputs,library_get:inputs.library_get.safeExtend({version:z.number().int().min(1).optional()}),library_add:inputs.library_add.safeExtend({text:z.string().max(9*1024*1024).optional()}),library_version:inputs.library_version.safeExtend({text:z.string().max(9*1024*1024)})};
 import { inputs } from '../../mcp/src/commands.ts';
@@ -9,7 +11,7 @@ import { encode, decode, json, text, utf8, id, base64, nat } from './codec.ts';
 import type { LocalStore } from './store.ts';
 import { contentKey, encrypt, decrypt } from './crypto.ts';
 
-const payloadSchema=z.object({name:z.string().max(4096).optional(),title:z.string().max(4096).optional(),purpose:z.string().max(4096).optional(),description:z.string().max(4096).optional(),body:z.string().max(9*1024*1024).optional(),text:z.string().max(9*1024*1024).optional(),kind:id.optional(),mimeType:id.optional(),labels:z.array(id).max(64).optional(),url:z.string().max(4096).optional(),summary:z.string().max(4096).optional(),goal:z.string().max(4096).optional(),format:z.string().max(4096).optional(),type:id.optional(),content:z.string().max(9*1024*1024).optional(),blob:z.object({blob:id,key:base64,hash:id,size:nat,groupId:id,recordId:id,revision:nat}).strict().optional()}).strict();
+const payloadSchema=z.object({definition:offerDefinitionSchema.optional(),name:z.string().max(4096).optional(),title:z.string().max(4096).optional(),purpose:z.string().max(4096).optional(),description:z.string().max(4096).optional(),body:z.string().max(9*1024*1024).optional(),text:z.string().max(9*1024*1024).optional(),kind:id.optional(),mimeType:id.optional(),labels:z.array(id).max(64).optional(),url:z.string().max(4096).optional(),summary:z.string().max(4096).optional(),goal:z.string().max(4096).optional(),format:z.string().max(4096).optional(),type:id.optional(),content:z.string().max(9*1024*1024).optional(),blob:z.object({blob:id,key:base64,hash:id,size:nat,groupId:id,recordId:id,revision:nat}).strict().optional()}).strict();
 type Payload=z.infer<typeof payloadSchema>;
 const signedSchema=z.object({context:contentContext,deviceId:id,payload:payloadSchema,origin:z.string().max(SEALED_LIMITS.envelope).optional(),signature:base64}).strict();
 type Signed=z.infer<typeof signedSchema>;
@@ -159,6 +161,17 @@ export class SealedClient {
   return {...value,name:descriptor?.name??'sealed — open in your client',projects:records.filter(r=>r.type==='project'),boards:records.filter(r=>r.type==='board'),artifacts:records.filter(r=>r.type==='library'),contentUnavailable:descriptor?.contentUnavailable??!descriptor};
  }
  async call(name:string,supplied:Record<string,unknown>={}):Promise<Record<string,unknown>> {
+  if(name==='offer_set'){
+   const input=inputs.offer_set.parse(supplied),source=input.offer,existing=await this.callRemote('offer_list',{agentId:input.agentId});const previous=z.array(z.object({id,contentRevision:nat})).parse(existing.offers).find(o=>o.id===source.id),contentRevision=(previous?.contentRevision??0)+1;
+   const personal=await this.artifactJourney(this.personalAlias),pubs:Record<string,z.infer<typeof definitionRef>>={};
+   const store=async(journeyId:string,privateSource:boolean)=>{const result=await this.write('offer_definition',journeyId,{agentId:input.agentId,offerId:source.id,contentRevision,private:privateSource},{definition:source});const r=z.array(z.object({recordId:id,revision:nat})).parse(result.records)[0]!;return {journeyId,recordId:r.recordId,revision:r.revision};};
+   const privateDefinition=await store(personal,true);for(const [journeyId,row] of Object.entries(source.journeySettings??{}))if(row.enabled)pubs[journeyId]=await store(journeyId,false);
+   return this.callRemote('offer_set',{agentId:input.agentId,expectedVersion:input.expectedVersion,offer:{id:source.id,sealed:{privateDefinition,publications:pubs,contentRevision},journeySettings:source.journeySettings??{},admission:source.admission??presetPolicy(source.preset)}});
+  }
+  if(name==='offer_search'){
+   const input=inputs.offer_search.parse(supplied),remote=await this.callRemote(name,{journeyId:input.journeyId}),offers:Record<string,unknown>[]=[];let partialIndex=false;
+   for(const meta of z.array(z.record(z.string(),z.unknown())).parse(remote.offers)){if(!meta.publication)continue;const ref=definitionRef.parse(meta.publication);const record=await this.callRemote('sealed_record_read',ref);if(this.groups.has(ref.journeyId))await this.sync(ref.journeyId);const rendered=await this.render(record);if(!rendered.definition){partialIndex=true;offers.push(meta);continue;}const definition=offerDefinitionSchema.parse(rendered.definition);if((input.tags??[]).every(t=>definition.tags.includes(t))&&(!input.query||JSON.stringify(definition).toLowerCase().includes(input.query.toLowerCase())))offers.push({...meta,...definition});}return {offers,localSearch:true,partialIndex};
+  }
   if(name==='journey_read')return this.hydrateJourney(await this.callRemote(name,inputs.journey_read.parse(supplied)));
   if(name==='journey_list'){const list=await this.callRemote(name,inputs.journey_list.parse(supplied));return {journeys:await Promise.all(z.array(z.record(z.string(),z.unknown())).parse(list.journeys).map(j=>this.hydrateJourney(j)))};}
   if(name==='journey_create'){const input=inputs.journey_create.parse(supplied);const result=await this.callRemote(name,{policy:input.policy,defaultRole:input.defaultRole}),journeyId=id.parse(result.journeyId);await this.createGroup(journeyId);await this.write('journey_descriptor',journeyId,{}, {name:input.name});await this.write('board_create',journeyId,{}, {name:'General',description:''});return {...result,name:input.name};}

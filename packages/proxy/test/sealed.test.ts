@@ -9,7 +9,7 @@ import {parseCommand} from '../../mcp/src/commands.ts';
 import * as z from 'zod';
 
 async function fixture(t:TestContext){
- const backend=new MemoryBackend({async get(s){return {name:s,email:`${s}@example.test`};}},Date.now,undefined,true),signer=await keyPair('sealed');
+ const backend=new MemoryBackend({async get(s){return {name:s,email:`${s}@example.test`};}},Date.now,testPasskeys,true),signer=await keyPair('sealed');
  const connect=async(subject:string)=>{const remote=new Client({name:'sealed-test',version:'1'});await remote.connect(new StreamableHTTPClientTransport(RESOURCE,{fetch:bridge(app(signer,backend)),requestInit:{headers:{authorization:`Bearer ${await token(signer,{sub:subject})}`}}}));t.after(()=>remote.close());const files=new Map<string,string>(),store={async read(k:string){return files.get(k)},async write(k:string,v:string){files.set(k,v)}};return {client:await SealedClient.open(remote,store,z.object({personId:z.string()}).parse((await remote.callTool({name:'account_read',arguments:{}})).structuredContent).personId),remote,files,store};};
  return {backend,connect,a:await connect('alice')};
 }
@@ -146,4 +146,20 @@ test('sealed capability-only authors receive an actionable refusal without a sil
   await assert.rejects(backend.sealedExecute('alice','sealed_device_register',{deviceId:'device_ungranted',verificationKey:'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',data:'AQ=='},'writer'),/needs read \+ device.keys; ask the owner/);
   assert.equal(backend.snapshot(),before,'refusal must neither grant authority nor register a device or content ticket');
  }
+});
+
+
+test('sealed offers keep definitions private and publish current authenticated journey copies',async t=>{
+ const {a,backend,connect}=await fixture(t),journeyId=String((await a.client.call('journey_create',{name:'Offers',policy:'open',defaultRole:'write'})).journeyId);
+ const agentId=String((await a.client.call('agent_create',{name:'Agent'})).agentId);await setAgentCard(backend,'alice',agentId,['read','task.manage','device.keys']);await a.client.call('agent_add',{journeyId,agentId});
+ const markers=['OFFER-NAME-CANARY','OFFER-DESCRIPTION-CANARY','OFFER-TAG-CANARY','OFFER-EXAMPLE-CANARY','OFFER-SCHEMA-CANARY','OFFER-INSTRUCTIONS-CANARY','OFFER-RESOURCE-CANARY'];
+ const definition={id:'sealed-offer',name:markers[0],description:markers[1],tags:[markers[2]],examples:[markers[3]],inputSchema:{type:'object',properties:{value:{type:'string',description:markers[4]}},required:['value'],additionalProperties:false},outputSchema:{type:'object'},instructions:markers[5],resource:markers[6],journeySettings:{[journeyId]:{enabled:true}}};
+ await a.client.call('offer_set',{agentId,offer:definition});await a.client.call('offer_publish',{agentId,offerId:definition.id});
+ const result=await a.client.call('offer_search',{journeyId,query:markers[0],tags:[markers[2]]});assert.equal(z.array(z.object({name:z.string()})).parse(result.offers)[0]!.name,markers[0]);
+ const b=await connect('bob');await b.client.call('journey_join',{journeyId});const device=await b.client.prepareGroup(journeyId);await a.client.addMember(journeyId,b.client.personId,device.deviceId);const found=await b.client.call('offer_search',{journeyId});assert.equal(z.array(z.object({description:z.string()})).parse(found.offers)[0]!.description,markers[1]);
+ const metadata=await backend.sealedExecute('bob','offer_search',{journeyId});assert.equal(JSON.stringify(metadata).includes('privateDefinition'),false);
+ const own=await a.client.call('offer_list',{agentId}),offer=z.array(z.record(z.string(),z.unknown())).parse(own.offers)[0]!;const sealed=z.object({privateDefinition:z.record(z.string(),z.unknown()),publications:z.record(z.string(),z.unknown()),contentRevision:z.number()}).parse(offer.sealed);
+ await assert.rejects(backend.sealedExecute('alice','offer_set',{agentId,expectedVersion:offer.version,offer:{id:definition.id,sealed:{...sealed,privateDefinition:sealed.publications[journeyId]},journeySettings:{[journeyId]:{enabled:true}},admission:{rules:[],default:'hold'}}}));
+ for(const marker of markers){assert.equal(backend.snapshot().includes(marker),false,marker);for(const blob of backend.blobs.data.values())assert.equal(Buffer.from(blob).includes(Buffer.from(marker)),false,marker);}
+ await assert.rejects(backend.sealedExecute('alice','offer_set',{agentId,offer:definition}),/Invalid sealed/);
 });
