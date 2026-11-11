@@ -166,3 +166,89 @@ test('sealed offers keep definitions private and publish current authenticated j
  await assert.rejects(backend.sealedExecute('alice','offer_set',{agentId,offer:definition}),/Invalid sealed/);
  await assert.rejects(backend.sealedExecute('alice','offer_set',{agentId,offer:{id:'private-human-title',sealed,journeySettings:{[journeyId]:{enabled:true}},admission:{rules:[],default:'hold'}}}),/Invalid sealed/);
 });
+
+
+test('sealed board archive refuses posting and can reopen',async t=>{
+ const {a,backend}=await fixture(t),journeyId=String((await a.client.call('journey_create',{name:'Archive',policy:'open',defaultRole:'write'})).journeyId);
+ const boardId=recordId(await a.client.call('board_create',{journeyId,name:'Board'}),'board');
+ const topicId=recordId(await a.client.call('topic_create',{boardId,title:'Topic',body:'Initial'}),'topic');
+ await a.client.call('board_update',{boardId,archived:true});
+ const boards=records(await backend.sealedExecute('alice','forum_boards',{journeyId}));
+ assert.equal(z.object({scalars:z.object({archived:z.number()})}).parse(boards.find(b=>b.recordId===boardId)!.rule).scalars.archived,1);
+ await assert.rejects(a.client.call('post_create',{topicId,body:'Refused'}),/Open board/);
+ await assert.rejects(a.client.call('topic_create',{boardId,title:'Refused',body:'Refused'}),/Open board/);
+ await a.client.call('board_update',{boardId,archived:false});
+ await a.client.call('post_create',{topicId,body:'Reopened'});
+ assert.equal(z.array(z.object({body:z.string()})).parse((await a.client.call('topic_read',{topicId})).posts).at(-1)!.body,'Reopened');
+});
+
+
+test('sealed project membership needs only read for a person and read-only agent',async t=>{
+ const {a,backend,connect}=await fixture(t),journeyId=String((await a.client.call('journey_create',{name:'Read membership',policy:'open',defaultRole:'read'})).journeyId);
+ const projectId=recordId(await a.client.call('project_create',{journeyId,name:'Project',purpose:'Purpose'}),'project');
+ const b=await connect('bob');await b.client.call('journey_join',{journeyId});
+ const agentId=String((await backend.sealedExecute('alice','agent_create',{})).agentId);
+ await setAgentCard(backend,'alice',agentId,['read']);await backend.execute('alice',parseCommand('agent_add',{journeyId,agentId}));
+ const identity={subject:'alice',clientId:'test-console'},change={kind:'bind' as const,clientId:'reader',agentId};
+ const {challenge}=await backend.beginAuthorization(identity,change);
+ await backend.completeAuthorization(identity,change,{id:'synthetic',rawId:'synthetic',type:'public-key',clientExtensionResults:{},response:{clientDataJSON:challenge,authenticatorData:'',signature:'test-valid'}});
+ for(const [subject,clientId] of [['bob',undefined],['alice','reader']] as const){
+  const joined=await backend.sealedExecute(subject,'project_join',{journeyId,projectId},clientId);
+  assert.equal(z.object({maps:z.object({Members:z.array(z.tuple([z.number(),z.number()]))})}).parse(joined.rule).maps.Members.filter(([,value])=>value===1).length,2);
+  const left=await backend.sealedExecute(subject,'project_leave',{journeyId,projectId},clientId);
+  assert.equal(z.object({maps:z.object({Members:z.array(z.tuple([z.number(),z.number()]))})}).parse(left.rule).maps.Members.filter(([,value])=>value===1).length,1);
+  await assert.rejects(backend.sealedExecute(subject,'content_prepare',{journeyId,action:'project_update',routing:{projectId}},clientId),/project.edit|refused/i);
+ }
+});
+
+
+test('rejected sealed admission never consumes cross-journey or cross-account packages',async t=>{
+ const {a,backend,connect}=await fixture(t),journeyId=String((await a.client.call('journey_create',{name:'Audience',policy:'open',defaultRole:'read'})).journeyId),b=await connect('bob');
+ const otherJourney=String((await backend.sealedExecute('bob','journey_create',{policy:'open',defaultRole:'read'})).journeyId),device=await b.client.prepareGroup(otherJourney);
+ const reservations=()=>[...backend.accountStorage.data.entries()].filter(([k])=>k.startsWith('sealed:reservation:'));
+ const before=reservations();
+ const binding=await backend.accountsHost.deviceBinding(device.deviceId);
+ await assert.rejects(backend.accountsHost.reserveDevice({...binding,hash:'stale-authorized-package'},journeyId),/Authorized device binding changed/);
+ assert.deepEqual(reservations(),before);
+ await assert.rejects(backend.sealedExecute('alice','sealed_package_reserve',{journeyId,groupId:journeyId,deviceId:device.deviceId}),/refused|entitled/i);
+ assert.deepEqual(reservations(),before);
+ const group=await backend.sealedExecute('alice','sealed_group',{journeyId,groupId:journeyId});
+ const sender=z.array(z.object({deviceId:z.string()})).parse(group.devices)[0]!.deviceId;
+ await assert.rejects(backend.sealedExecute('alice','sealed_group_commit',{journeyId,groupId:journeyId,deviceId:sender,targetDeviceId:device.deviceId,action:'add',expectedEpoch:group.epoch,expectedSequence:group.sequence,data:'e30='}),/refused|entitled/i);
+ assert.deepEqual(reservations(),before);
+ await b.client.call('journey_join',{journeyId});
+ await a.client.call('library_add',{journeyId,name:'Private',visibility:'private',text:'Synthetic private text'});const privateId=`private_${journeyId.slice(8)}_${a.client.personId}`;
+ const privateView=await backend.sealedExecute('alice','sealed_group',{journeyId,groupId:privateId}),privateSender=z.array(z.object({deviceId:z.string()})).parse(privateView.devices)[0]!.deviceId;
+ const ownBefore=reservations();
+ for(const tool of ['sealed_package_reserve','sealed_group_commit']){
+  const args=tool==='sealed_package_reserve'?{deviceId:device.deviceId}:{deviceId:privateSender,targetDeviceId:device.deviceId,action:'add',expectedEpoch:privateView.epoch,expectedSequence:privateView.sequence,data:'e30='};
+  await assert.rejects(backend.sealedExecute('alice',tool,{journeyId,groupId:privateId,...args}),/refused|entitled/i);
+  assert.deepEqual(reservations(),ownBefore);
+ }
+ await a.client.addMember(journeyId,b.client.personId,device.deviceId);assert.equal(backend.accountStorage.data.get(`sealed:reservation:${device.deviceId}`),journeyId);
+});
+
+
+test('sealed ciphertext and fetch receipts respect the 128 KiB DO value limit',async t=>{
+ const {a,backend,connect}=await fixture(t),journeyId=String((await a.client.call('journey_create',{name:'Large payloads',policy:'open',defaultRole:'write'})).journeyId);
+ let largest=0;for(const storage of [backend.accountStorage,...backend.journeyStores.values()]){
+  const put=storage.put.bind(storage);storage.put=async(key,value)=>{const size=new TextEncoder().encode(value).length;largest=Math.max(largest,size);assert.ok(size<=128*1024,`DO value limit exceeded: ${key} (${size} bytes)`);await put(key,value);};
+ }
+ const marker='SYNTHETIC-LARGE-SEALED-',body=marker+'x'.repeat(512*1024),itemId=recordId(await a.client.call('library_add',{journeyId,name:'Large item',text:body}),'library');
+ assert.equal((await a.client.call('library_get',{itemId})).text,body);
+ const b=await connect('bob');await b.client.call('journey_join',{journeyId});const device=await b.client.prepareGroup(journeyId);await a.client.addMember(journeyId,b.client.personId,device.deviceId);await b.client.sync(journeyId);
+ assert.equal((await b.client.call('library_get',{itemId})).text,body);
+ await a.client.call('library_version',{itemId,baseVersion:1,text:body+'v2'});await b.client.sync(journeyId);assert.equal((await b.client.call('library_get',{itemId})).text,body+'v2');
+ const view=await backend.sealedExecute('alice','sealed_group',{journeyId,groupId:journeyId}),sender=z.array(z.object({deviceId:z.string()})).parse(view.devices)[0]!.deviceId;
+ const data=Buffer.alloc(1024*1024,77).toString('base64');
+ const committed=await backend.sealedExecute('alice','sealed_group_commit',{journeyId,groupId:journeyId,deviceId:sender,expectedEpoch:view.epoch,expectedSequence:view.sequence,action:'update',data});
+ const page=await backend.sealedExecute('alice','sealed_group_fetch',{journeyId,groupId:journeyId,deviceId:sender,since:view.sequence,limit:100});
+ assert.equal(z.array(z.object({data:z.string()})).parse(page.messages)[0]!.data,data);assert.equal(page.cursor,committed.sequence);
+ const metadata=await backend.sealedExecute('alice','library_get',{journeyId,itemId});const contexts=z.array(z.object({context:z.record(z.string(),z.unknown())})).parse(metadata.content).map(r=>r.context);
+ const history=await backend.sealedExecute('alice','sealed_history_post',{journeyId,groupId:journeyId,deviceId:sender,contexts,envelope:{groupId:journeyId,epoch:committed.epoch,ciphertext:data,contentType:'application/vnd.wayfinding.sealed+json;v=1',size:1024*1024}});
+ const historyPage=await backend.sealedExecute('alice','sealed_group_fetch',{journeyId,groupId:journeyId,deviceId:sender,since:committed.sequence,limit:100});
+ assert.equal(z.array(z.object({data:z.string()})).parse(historyPage.messages)[0]!.data,data);assert.equal(historyPage.cursor,history.sequence);
+ for(const raw of [...backend.accountStorage.data.values(),...[...backend.journeyStores.values()].flatMap(s=>[...s.data.values()]),...[...backend.blobs.data.values()].map(b=>new TextDecoder().decode(b))])assert.ok(!String(raw).includes(marker));
+ for(const s of backend.journeyStores.values())for(const [key,raw] of s.data)if(key.startsWith('write:receipt:')){const receipt=JSON.parse(String(raw));assert.equal(receipt.result,undefined,'Sealed receipts retain no response bodies');}
+ assert.ok(largest<=128*1024);
+});

@@ -177,7 +177,7 @@ export class WriteReceiver {
     await this.storage.base.put(this.key(permit.id), JSON.stringify({ permit, outcome: 'cancelled' }));
     return { permit, outcome: 'cancelled' };
   }
-  async run(actor: Actor, target: string, digest: string, operation: () => Promise<ToolData>, retryId?: string, aborted?: () => Promise<void>, deviceIds?:()=>string[]): Promise<{ value: ToolData; changed: boolean }> {
+  async run(actor: Actor, target: string, digest: string, operation: () => Promise<ToolData>, retryId?: string, aborted?: () => Promise<void>, deviceIds?:()=>string[], retainResult = true): Promise<{ value: ToolData; changed: boolean }> {
     if (retryId) {
       const previous = await this.record(retryId);
       if (!previous || previous.permit.personId !== actor.personId || previous.permit.target !== target || previous.permit.digest !== digest) throw new Refused('Unknown or mismatched write receipt');
@@ -210,7 +210,8 @@ export class WriteReceiver {
       await this.storage.base.transaction(async tx => {
         if (permit.expiresAt <= this.now()) throw new Refused('Write permit expired before publication');
         await this.storage.flush(tx);
-        await tx.put(this.key(permit.id), JSON.stringify({ permit, outcome: 'committed', result: value }));
+        // Sealed responses use ticket status/CAS recovery and can exceed the DO value limit.
+        await tx.put(this.key(permit.id), JSON.stringify({ permit, outcome: 'committed', ...(retainResult ? { result: value } : {}) }));
         if (permit.expiresAt <= this.now()) throw new Refused('Write permit expired before publication');
       });
       await this.hooks?.committed?.(permit);

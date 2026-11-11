@@ -247,8 +247,11 @@ export class AccountsHost {
     return b;
   }
   deviceBinding(deviceId:string):Promise<DeviceBinding>{return this.serial.run(async()=>this.sealedBinding(await this.load(),deviceId));}
-  reserveDevice(deviceId:string,groupId:string):Promise<DeviceBinding>{return this.serial.run(async()=>{
-    const b=await this.sealedBinding(await this.load(),deviceId),key=`sealed:reservation:${deviceId}`,old=await this.storage.get(key);
+  reserveDevice(expected:DeviceBinding,groupId:string):Promise<DeviceBinding>{return this.serial.run(async()=>{
+    // Recheck the exact binding authorized by the journey and consume its package in one Accounts turn.
+    const authorized=bindingSchema.parse(expected),b=await this.sealedBinding(await this.load(),authorized.deviceId);
+    if(JSON.stringify(b)!==JSON.stringify(authorized))throw new Refused('Authorized device binding changed');
+    const key=`sealed:reservation:${b.deviceId}`,old=await this.storage.get(key);
     if(old!==undefined&&old!==groupId)throw new Refused('Key package already reserved for another audience');await this.storage.put(key,groupId);return b;
   });}
   private async registerDevice(account:Account,actor:Actor,input:BrowserRegistration):Promise<DeviceBinding>{

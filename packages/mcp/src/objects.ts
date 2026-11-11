@@ -10,7 +10,7 @@ import { JourneyHost } from './journey.ts';
 import { actorSchema, assertionSchema, changeSchema, type Actor } from './agents.ts';
 import type { KeyValueStorage } from './storage.ts';
 import type { BlobStore } from './relay.ts';
-import type { DeviceBinding } from './sealed-contract.ts';
+import { bindingSchema, type DeviceBinding } from './sealed-contract.ts';
 
 import { oauthOperation } from './oauth-contract.ts';
 import { passkeyOperation, recordOperation, type ConsoleRecord } from './console/contract.ts';
@@ -54,7 +54,7 @@ export class Journey {
       redeemWrite: permit => call<void>(env.ACCOUNTS!, 'accounts', { action: 'redeemWrite', permit }),
       settleWrite: receipt => call<void>(env.ACCOUNTS!, 'accounts', { action: 'settleWrite', receipt }),
     } : undefined);
-    if(env?.ACCOUNTS)this.authority={binding:id=>call<DeviceBinding>(env.ACCOUNTS!,'accounts',{action:'deviceBinding',deviceId:id}),reserve:(deviceId,groupId)=>call<DeviceBinding>(env.ACCOUNTS!,'accounts',{action:'reserveDevice',deviceId,groupId})};
+    if(env?.ACCOUNTS)this.authority={binding:id=>call<DeviceBinding>(env.ACCOUNTS!,'accounts',{action:'deviceBinding',deviceId:id}),reserve:(expected,groupId)=>call<DeviceBinding>(env.ACCOUNTS!,'accounts',{action:'reserveDevice',expected,groupId})};
   }
   private authority?:import('./sealed-content.ts').SealedAuthority;
   alarm(): Promise<void> { return this.host.alarm(); }
@@ -94,7 +94,7 @@ export class Accounts {
       if(body.action==='publishedDescriptors')return this.host.publishedDescriptors(field(body,'journeyId'),z.array(z.string()).max(1024).parse(body.ids));
       if(body.action==='setDescriptor')return this.host.setDescriptor(field(body,'personId'),field(body,'clientId'),typeof body.agentId==='string'?field(body,'agentId'):undefined,sealedDescriptor.parse(body.descriptor));
       if(body.action==='deviceBinding')return this.host.deviceBinding(field(body,'deviceId'));
-      if(body.action==='reserveDevice')return this.host.reserveDevice(field(body,'deviceId'),field(body,'groupId'));
+      if(body.action==='reserveDevice')return this.host.reserveDevice(bindingSchema.parse(body.expected),field(body,'groupId'));
       if(body.action==='sealedDevice')return this.host.sealedDevice(field(body,'personId'),field(body,'clientId'),field(body,'tool'),body.input);
       if (body['action'] === 'issueWrite') return this.host.issueWrite(writeRequestSchema.parse(body['request']));
       if (body['action'] === 'redeemWrite') return this.host.redeemWrite(writePermitSchema.parse(body['permit']));
@@ -152,7 +152,7 @@ export function durableBackend(env: ObjectBindings,sealedMode=false): Backend {
     setDescriptor:(personId,clientId,agentId,descriptor)=>call(env.ACCOUNTS,'accounts',{action:'setDescriptor',personId,clientId,agentId,descriptor}),
     sealedDevice:(personId,clientId,tool,input)=>call(env.ACCOUNTS,'accounts',{action:'sealedDevice',personId,clientId,tool,input}),
     deviceBinding:deviceId=>call(env.ACCOUNTS,'accounts',{action:'deviceBinding',deviceId}),
-    reserveDevice:(deviceId,groupId)=>call(env.ACCOUNTS,'accounts',{action:'reserveDevice',deviceId,groupId}),
+    reserveDevice:(expected,groupId)=>call(env.ACCOUNTS,'accounts',{action:'reserveDevice',expected,groupId}),
     issueWrite: request => call(env.ACCOUNTS, 'accounts', { action: 'issueWrite', request }),
     redeemWrite: permit => call(env.ACCOUNTS, 'accounts', { action: 'redeemWrite', permit }),
     settleWrite: receipt => call(env.ACCOUNTS, 'accounts', { action: 'settleWrite', receipt }),

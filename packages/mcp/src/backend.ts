@@ -30,7 +30,7 @@ export interface AccountsPort extends OAuthPort, WritePort {
   setDescriptor?(personId:string,clientId:string,agentId:string|undefined,descriptor:SealedDescriptor):Promise<ToolData>;
   sealedDevice?(personId:string,clientId:string,tool:string,input:unknown):Promise<ToolData>;
   deviceBinding?(deviceId:string):Promise<DeviceBinding>;
-  reserveDevice?(deviceId:string,groupId:string):Promise<DeviceBinding>;
+  reserveDevice?(expected:DeviceBinding,groupId:string):Promise<DeviceBinding>;
   drainWrites(personId?: string): Promise<WriteDrain>;
   offerDirectory(): Promise<OfferAgent[]>;
   standingDecision(decision: StandingDecision): Promise<void>;
