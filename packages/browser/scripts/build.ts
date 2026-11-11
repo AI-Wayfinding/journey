@@ -12,4 +12,4 @@ export async function generate(){
 }
 const destination=new URL('generated/bundle.ts',root),next=await generate();
 let previous:string|undefined;try{previous=await readFile(destination,'utf8');}catch(error){if(!(error instanceof Error&&'code'in error&&error.code==='ENOENT'))throw error;}
-if(previous!==next){if(process.argv.includes('--check'))throw new Error('Browser bundle stale. Run npm run build:browser.');await mkdir(new URL('generated/',root),{recursive:true});await writeFile(destination,next);}
+if(previous!==next){if(process.argv.includes('--check')){let i=0;const old=previous??'';while(i<old.length&&i<next.length&&old[i]===next[i])i++;throw new Error(`Browser bundle stale at offset ${i} (committed ${old.length}, built ${next.length} chars). Run npm run build:browser.\ncommitted: ${JSON.stringify(old.slice(Math.max(0,i-120),i+120))}\nbuilt:     ${JSON.stringify(next.slice(Math.max(0,i-120),i+120))}`);}await mkdir(new URL('generated/',root),{recursive:true});await writeFile(destination,next);}
