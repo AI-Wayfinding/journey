@@ -1,12 +1,61 @@
 # Test the Wayfinding PoC
 
-Wayfinding gives a team and its agents a shared journey: membership, tasks, artifact metadata and bounded agent permissions. A local MCP proxy encrypts and decrypts artifact content. The Cloudflare MCP server coordinates the work and relays ciphertext.
+Wayfinding gives a team and its agents a shared journey with membership, tasks and bounded permissions. In the current sealed-v1 source, a local MCP proxy encrypts forum, library and sensemaking content, including artifact metadata and journey/project names and purposes. The Cloudflare MCP server coordinates work and relays ciphertext. Profiles, cards, offers and tasks remain server-readable.
 
 **Use synthetic data only.** The proxy uses unaudited ts-mls 1.6.4 and WorkOS AuthKit Staging. Do not upload client material, personal data or secrets. This is a proof of concept, not a production service.
 
+
+## Sealed content checks (source only)
+
+This stage is not live verification of the public endpoint. Run its tests locally against the in-process Worker and real MLS proxy. The historical walkthroughs below describe older deployments.
+
+### Privacy boundary
+
+- Sealed: journey/project names and purposes; board names/descriptions; topic titles and post bodies; attached conversations; library names, labels, metadata, bodies and versions; round descriptors, guidance, synthesis, interviews and contributions; artifact names and metadata.
+- Still readable: authenticated identity, profile/card descriptions, offers and tasks, memberships, capabilities, object ids, parent links, visibility, lifecycle/version counters, deadlines and byte counts. Traffic patterns and ciphertext sizes are visible too.
+- J carries journey material; P carries owner-only private items; I carries one participant's private interview. Sharing publishes a separate J copy irreversibly, including to future journey readers. Later interview edits update I and J atomically; the private workspace remains in I.
+- Revocation cannot erase text or keys a former reader already saved. New content requires removal of departed leaves and fresh encryption. Each large revision has a new AES-256-GCM key, even without a group epoch change.
+- Device bindings record the authenticated person/agent, verification key and key package. The client verifies MLS rosters, signatures and content contexts before rendering. An agent without both live `read` and `device.keys` receives an explicit refusal, never an automatic grant.
+- Search terms, labels and kind filters are evaluated locally. A missing audience or retained packet produces `partialIndex`/`contentUnavailable`, not a claim of complete results. Adding a device requires an existing member to re-share entitled live retained history; incomplete local history refuses the transfer.
+- Browser MLS, PRF/recovery and device-trust hardening remain later work. The console shows **sealed — open in your client** for these content views. Personal workspace aliases are device-local. Independent review and an audit of ts-mls remain launch gates; real-data mode is refused.
+
+### Bounds and recovery
+
+A group retains at most 4,096 messages and 32 MiB of ciphertext, without silent eviction. Envelopes are at most 1 MiB, device packages 64 KiB, local payloads 9 MiB and encrypted uploads 10 MiB. Listings are paged at 100 records and 4 MiB. A journey allows 1,024 content records, 128 groups and 128 active preparation tickets; each group allows 128 devices. A separate 32 MiB journey upload budget counts even expired, uncollected ciphertext. Exhausted budgets refuse writes; this stage performs no deletion or cleanup.
+
+Preparation tickets and pending uploads expire after ten minutes. Device checkpoints expire after thirty days without a successful fetch. Large-body uploads become readable only through a committed, entitled record/version reference. Item metadata edits also advance the content revision.
+
+Before final publication, the proxy saves its advanced ratchets and exact pending ciphertext. After a lost reply, it checks the server receipt and either completes locally or retries that same ciphertext. A proved uncommitted, expired ticket can be abandoned without rolling a ratchet back. Unresolved handshake/history delivery fails closed; do not restore an old MLS snapshot.
+
+### Automated checks
+
+From the repository root:
+
+```sh
+node --test packages/proxy/test/sealed.test.ts packages/mcp/test/sealed-contract.test.ts
+npm run typecheck
+npm test
+npm run check:rules
+(cd packages/mcp && npx wrangler deploy --dry-run)
+```
+
+The storage canary writes distinct markers through the proxy for every sealed field type, then scans all Durable Object values, including side keys, and all blob bytes. It also checks private interview isolation, future-reader history, irreversible sharing and later shared updates, large revision keys and tampering, assigned source isolation, attributed concurrent contributions, closed-round successors, personal copy/move and exact-once lost-reply recovery. A device-revocation race occurs between Journey validation and Accounts permit issuance.
+
+The following temporary mutations were each observed to turn a passing test red, then restored:
+
+| Bypassed control | Observed failure |
+| --- | --- |
+| Replace MLS sealing with the clear signed packet | Storage scan finds `CANARY-journey-name-40fa64` |
+| Remove envelope audience equality | Wrong-audience assertion no longer throws |
+| Remove decoded byte-size equality | Size assertion no longer throws |
+| Replace the fixed content-type literal with an arbitrary string | Unknown-format assertion no longer throws |
+| Omit live audience-device checks during permit issuance | Revocation-race publication no longer rejects |
+
+Malformed/plaintext sealed inputs, incomplete multi-envelope manifests, oversized input, noncanonical base64 and unauthorized blob references must leave published content unchanged. Restore every mutation before running the full gates. A dry run bundles only; it does not authorize a deployment.
+
 ## What is new in v2
 
-This revision adds a Worker authorization server without replacing Durable Object classes or clearing existing journeys. It has not been deployed by this change. Existing MCP clients must sign in again after deployment; their AuthKit tokens no longer work at `/mcp`.
+The Worker authorization server replaces AuthKit MCP tokens with its own tokens; existing MCP clients must sign in again after deployment. The sealed-v1 source also switches bindings to fresh `JourneySealedV1` and `AccountsSealedV1` classes with an appended migration. Old classes and data remain intact. Neither change is deployed by this work, and changing bindings does not erase old plaintext.
 
 ### Connect and name an agent
 
@@ -95,7 +144,7 @@ The MCP endpoint is `https://poc.wayfinding.support/mcp`. Its OAuth issuer is `h
 
 ### Server setup (deployment operator only)
 
-The Worker still needs its existing **`WORKOS_API_KEY` secret** for Staging profile provisioning and **`CONSOLE_SECRET`** (at least 32 bytes) for console sessions. Keep the existing `AUTHKIT_ISSUER`, `AUTHKIT_AUTHORIZE_URL` and `MCP_RESOURCE` variables. No new secret or binding is required. `MCP_RESOURCE` determines the new issuer origin. Keep the current Accounts and Journey Durable Object classes and migrations unchanged. Do not reset data. Retain the AuthKit registration of `/console/client.json` with `/console/callback` as its redirect. Changing secrets can publish a Worker version, so this no-deploy change does not set any.
+The Worker needs the existing **`WORKOS_API_KEY` secret** for Staging profiles and **`CONSOLE_SECRET`** (at least 32 bytes) for console sessions. Keep `AUTHKIT_ISSUER`, `AUTHKIT_AUTHORIZE_URL` and `MCP_RESOURCE`; the resource determines the issuer origin. The sealed-v1 configuration switches bindings to the new sealed classes and appends a migration while retaining old classes and data. Do not reset data or deploy this stage. Retain the AuthKit registration of `/console/client.json` with `/console/callback` as its redirect. Secret changes can publish a Worker version, so this work changes no secret.
 
 ## Artifact revision-key checks (source only)
 
