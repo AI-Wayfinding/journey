@@ -14,6 +14,8 @@ import { formBody } from './forms.ts';
 import { landingPage } from './landing.ts';
 import { changeSchema, assertionSchema } from '../agents.ts';
 import { registration } from './contract.ts';
+import { browserPost } from './browser-api.ts';
+import { browserBundle,browserIntegrity,browserPath,webauthnIntegrity } from '../../../browser/generated/bundle.ts';
 
 const STATUS = '<p id="status" role="status" aria-live="polite"></p>';
 const offerSettingsForm = (body: Record<string, unknown>) => ({
@@ -29,7 +31,7 @@ export function createConsole(config: ConsoleConfig) {
   const sessions = new ConsoleSessions(config.backend, config.secret, origin, now);
   // same-origin (not no-referrer): with no-referrer, browsers send `Origin: null` on form posts and the origin check refuses them.
   const headers = { 'Cache-Control': 'no-store', 'Referrer-Policy': 'same-origin', 'X-Content-Type-Options': 'nosniff',
-    'Content-Security-Policy': "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'" };
+    'Content-Security-Policy': `default-src 'none'; style-src 'self'; script-src '${webauthnIntegrity}' '${browserIntegrity}'; connect-src 'self'; object-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'` };
   const redirect = (location: string, cookies: string[] = []) => {
     const h = new Headers({ ...headers, Location: location });
     for (const c of cookies) h.append('Set-Cookie', c);
@@ -51,6 +53,7 @@ export function createConsole(config: ConsoleConfig) {
         } catch { return html(landingPage({ signedIn: false }, config.resource.href)); }
       }
       if (request.method === 'GET' && path === '/console/style.css') return new Response(style, { headers: { ...headers, 'Content-Type': 'text/css; charset=utf-8' } });
+      if(request.method==='GET'&&path===browserPath&&config.backend.sealedMode)return new Response(browserBundle,{headers:{...headers,'Content-Type':'text/javascript; charset=utf-8'}});
       if (request.method === 'GET' && path === '/console/webauthn.js') return new Response(webauthn, { headers: { ...headers, 'Content-Type': 'text/javascript; charset=utf-8' } });
       if (request.method === 'GET' && path === '/console/client.json') return Response.json({ client_id: clientId, client_name: 'Wayfinding console',
         redirect_uris: [redirectUri], grant_types: ['authorization_code'], response_types: ['code'], token_endpoint_auth_method: 'none' }, { headers });
@@ -87,12 +90,13 @@ export function createConsole(config: ConsoleConfig) {
       if (request.method === 'GET' && (await sessions.read(request, SESSION_COOKIE))?.kind !== 'session') return redirect('/console/login');
       const session = await sessions.require(request);
       if (request.method === 'POST') {
-        const body = await formBody(request, session.csrf, origin), identity = { subject: session.subject, clientId: session.clientId };
+        const body = await formBody(request, session.csrf, origin, path==='/console/device/call'?15*1024*1024:96*1024), identity = { subject: session.subject, clientId: session.clientId };
         if (path === '/console/logout') {
           await sessions.read(request, SESSION_COOKIE, 'delete');
           // Land on the signed-out home page: /console/login would bounce through AuthKit, whose own session signs the person straight back in.
           return redirect('/', [cookie(SESSION_COOKIE, '', 0), cookie(SIGNED_OUT_COOKIE, '1', 600)]);
         }
+        if(config.backend.sealedMode&&path.startsWith('/console/device/'))return Response.json(await browserPost(config.backend,identity,path,body),{headers});
         if (path === '/console/passkeys/options') return Response.json(await config.backend.passkey(identity, { op: 'begin' }), { headers });
         if (path === '/console/passkeys/register') {
           await config.backend.passkey(identity, { op: 'finish', credential: registration.parse(body.credential) });
@@ -142,6 +146,16 @@ export function createConsole(config: ConsoleConfig) {
           await config.backend.execute(session.subject, parseCommand('offer_settings', { agentId, ...offerSettingsForm(body) }), session.clientId);
           return redirect(`/console/agents/${encodeURIComponent(agentId)}`);
         }
+        if (path === '/console/offers/journey') {
+          const agentId = z.string().min(1).max(200).parse(body.agentId);
+          const limitMode = z.enum(['inherit', 'limit']).parse(body.limitMode);
+          const enabled = typeof body.enabled === 'boolean' ? body.enabled : z.enum(['true', 'false']).parse(body.enabled) === 'true';
+          await config.backend.execute(session.subject, parseCommand('offer_journey_set', {
+            agentId, offerId: body.offerId, journeyId: body.journeyId, expectedVersion: z.coerce.number().int().min(1).parse(body.expectedVersion), enabled,
+            ...(limitMode === 'inherit' ? { clearLimit: true } : { maxRequestsPerDay: z.coerce.number().int().min(1).max(1000).parse(body.maxRequestsPerDay) }),
+          }), session.clientId);
+          return redirect(`/console/agents/${encodeURIComponent(agentId)}`);
+        }
         if (path === '/console/offers/publish' || path === '/console/offers/retire') {
           const agentId = z.string().min(1).max(200).parse(body.agentId);
           await config.backend.execute(session.subject, parseCommand(path.endsWith('/publish') ? 'offer_publish' : 'offer_retire', { agentId, offerId: body.offerId }), session.clientId);
@@ -160,7 +174,7 @@ export function createConsole(config: ConsoleConfig) {
           if (!rule || typeof rule.who !== 'object' || rule.who === null) throw new Refused('Standing rule required');
           await config.backend.execute(session.subject, parseCommand('offer_set', { agentId, expectedVersion: version, offer: {
             id: offer.id, name: offer.name, description: offer.description, tags: offer.tags, examples: offer.examples,
-            inputSchema: offer.inputSchema, outputSchema: offer.outputSchema, journeys: offer.journeys, resource: offer.resource, instructions: offer.instructions,
+            inputSchema: offer.inputSchema, outputSchema: offer.outputSchema, journeySettings: offer.journeySettings, resource: offer.resource, instructions: offer.instructions,
             admission: { rules: admission.rules.filter((_, i) => i !== ruleIndex), default: admission.default },
           } }), session.clientId);
           return redirect(`/console/agents/${encodeURIComponent(agentId)}`);
@@ -186,8 +200,11 @@ export function createConsole(config: ConsoleConfig) {
       // A fixed notice after a redirect (never caller text) tells the person their passkey was just used or changed.
       const notices: Record<string, string> = { confirmed: 'Confirmed with your passkey.', registered: 'Passkey added.', renamed: 'Passkey name saved.', joined: 'You joined the journey.' };
       const notice = notices[url.searchParams.get('notice') ?? ''];
-      const html = (text: string) => new Response(notice ? text.replace(STATUS, `<p id="status" role="status" aria-live="polite" class="notice">${notice}</p>`) : text,
-        { headers: { ...headers, 'Content-Type': 'text/html; charset=utf-8' } });
+      const html = (text: string) => {
+        text=text.replace('<script src="/console/webauthn.js" defer></script>',`<script src="/console/webauthn.js" integrity="${webauthnIntegrity}" crossorigin="anonymous" defer></script>`);
+        if(config.backend.sealedMode)text=text.replace('</head>',`<script type="module" src="${browserPath}" integrity="${browserIntegrity}" crossorigin="anonymous"></script></head>`).replace(/<p role="note">Proof of concept\.[\s\S]*?<\/p>/,'<p role="note">Synthetic data only. Content is sealed on your devices. Unlock this browser to read or write it. No key escrow: losing all devices and recovery material loses content. The hosted page can be replaced by its operator; this PoC does not protect against that.</p>');
+        return new Response(notice ? text.replace(STATUS, `<p id="status" role="status" aria-live="polite" class="notice">${notice}</p>`) : text,{headers:{...headers,'Content-Type':'text/html; charset=utf-8'}});
+      };
       if (path === '/console' || path === '/console/') return html(await home(config.backend, identity, session.csrf));
       if (path === '/console/passkeys') return html(await passkeysPage(config.backend, identity, session.csrf));
       if (path.startsWith('/console/agents/')) return html(await agentPage(config.backend, identity, routeId(path, '/console/agents/'), session.csrf));
@@ -197,7 +214,7 @@ export function createConsole(config: ConsoleConfig) {
       return new Response('Not found', { status: 404, headers });
     } catch (error) {
       // Log the refusal reason only (no tokens or cookies) so live sign-in failures can be diagnosed.
-      console.warn('console refused', new URL(request.url).pathname, error instanceof Error ? `${error.name}: ${error.message}`.slice(0, 300) : 'unknown');
+      console.warn('console refused', config.backend.sealedMode?'sealed request':new URL(request.url).pathname, config.backend.sealedMode?'refused':error instanceof Error ? `${error.name}: ${error.message}`.slice(0, 300) : 'unknown');
       return new Response('<!doctype html><html lang="en"><meta charset="utf-8"><title>Console request refused</title><main><h1>Console request refused</h1><p>Check the form or <a href="/console/login">sign in to your console</a>.</p></main></html>', { status: 403, headers: { ...headers, 'Content-Type': 'text/html; charset=utf-8' } });
     }
   } };

@@ -5,10 +5,11 @@ import { Refused, type ToolData } from '../commands.ts';
 import type { PasskeyOperation } from './contract.ts';
 import { providerName } from './providers.ts';
 
-export async function managePasskey(account: Account, accounts: Account[], storage: KeyValueStorage, operation: PasskeyOperation, now: number): Promise<ToolData> {
+export async function managePasskey(account: Account, accounts: Account[], storage: KeyValueStorage, operation: PasskeyOperation, now: number,sealedMode=false): Promise<ToolData> {
+  if(sealedMode&&operation.op==='rename')throw new Refused('Passkey labels must be sealed in the private profile by an enrolled proxy');
   const key = `passkey-registration:${account.personId}`;
-  if (operation.op === 'list') return { passkeys: account.passkeys.map(c => ({ id: c.id, label: c.name || providerName(c.aaguid) || 'Passkey', provider: providerName(c.aaguid) ?? null,
-    name: c.name ?? null, createdAt: c.createdAt ?? null, lastUsedAt: c.lastUsedAt ?? null })) };
+  if (operation.op === 'list') return { passkeys: account.passkeys.map(c => ({ id: c.id, label: sealedMode?c.id:c.name || providerName(c.aaguid) || 'Passkey', provider: sealedMode?null:providerName(c.aaguid) ?? null,
+    name: sealedMode?null:c.name ?? null, createdAt: c.createdAt ?? null, lastUsedAt: c.lastUsedAt ?? null })) };
   if (operation.op === 'rename') {
     const credential = account.passkeys.find(c => c.id === operation.id);
     if (!credential) throw new Refused('Unknown owned passkey');
@@ -29,6 +30,7 @@ export async function managePasskey(account: Account, accounts: Account[], stora
     await storage.put(key, JSON.stringify({ challenge: options.challenge, expiresAt: now + 300_000 }));
     return { ...options };
   }
+  if(operation.op!=='finish')throw new Refused('Browser enrollment uses the host enrollment path');
   let pending: { challenge: string; expiresAt: number } | null = null;
   const raw = await storage.get(key);
   try { pending = typeof raw === 'string' ? JSON.parse(raw) as { challenge: string; expiresAt: number } : null; }
@@ -40,7 +42,7 @@ export async function managePasskey(account: Account, accounts: Account[], stora
   const credential = verified.registrationInfo.credential;
   if (accounts.some(a => a.passkeys.some(c => c.id === credential.id))) throw new Refused('Passkey already registered');
   if (account.passkeys.length >= 16) throw new Refused('Passkey capacity reached');
-  account.passkeys.push({ id: credential.id, publicKey: [...credential.publicKey], counter: credential.counter, aaguid: verified.registrationInfo.aaguid, createdAt: now });
+  account.passkeys.push({ id: credential.id, publicKey: [...credential.publicKey], counter: credential.counter, ...(sealedMode?{}:{aaguid:verified.registrationInfo.aaguid}), createdAt: now });
   await storage.put(key, 'null');
   return { registered: true };
 }

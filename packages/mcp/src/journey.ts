@@ -5,12 +5,15 @@ import { capabilities, type Capability } from '../../rules/src/capabilities.ts';
 import { allows, type Actor } from './agents.ts';
 import { Refused, isRelay, type Command, type TaskMethod, type ToolData } from './commands.ts';
 import { Serial, type KeyValueStorage } from './storage.ts';
+import { tokenHash } from './oauth-store.ts';
+import { WriteStorage, WriteBlobs, WriteReceiver, type WritePort, type WriteHooks, type WritePermit, type WriteReceipt } from './write-permits.ts';
 import { relay, deleteArtifactBlobs, type BlobStore } from './relay.ts';
 import { library, isLibraryCommand, isLibraryArtifact, requireItem, visibleItem, type LibraryArtifact, type LibraryAccess, type LibraryCommand } from './library.ts';
 import { forum, isForumCommand, defaultBoard, type Board, type Topic, type Post } from './forum.ts';
 import { rounds, isRoundCommand, type SensemakingRound } from './rounds.ts';
 import { changeTask, type JourneyTask } from './tasks.ts';
-import { offerView, DEFAULT_SETTINGS, type OfferPort, type OfferAgent, type StandingDecision } from './offers.ts';
+import { journeyEnabled, type AllowanceRelease, offerView, DEFAULT_SETTINGS, type OfferPort, type OfferAgent, type StandingDecision } from './offers.ts';
+import { sealedContent, type SealedAuthority } from './sealed-content.ts';
 
 interface Identity { id: string; name: string }
 interface Project { id: string; name: string; purpose: string; rule: Snapshot }
@@ -35,11 +38,38 @@ function requireChange(before: Snapshot, after: Snapshot, what: string, ignore: 
 export class JourneyHost {
   private readonly watchers = new Map<ReadableStreamDefaultController<Uint8Array>, string>();
   private readonly serial = new Serial();
-  private readonly storage: KeyValueStorage;
+  private readonly storage: WriteStorage;
+  private readonly receiver: WriteReceiver;
+  private stagedAllowance: AllowanceRelease | undefined;
   private readonly now: () => number;
-  private readonly blobs: BlobStore | undefined;
+  private readonly blobs: WriteBlobs | undefined;
   private readonly offers: OfferPort | undefined;
-  constructor(storage: KeyValueStorage, now: () => number = Date.now, blobs?: BlobStore, offers?: OfferPort) { this.storage = storage; this.now = now; this.blobs = blobs; this.offers = offers; }
+  constructor(storage: KeyValueStorage, now: () => number = Date.now, blobs?: BlobStore, offers?: OfferPort, authority?: WritePort, hooks?: WriteHooks) {
+    this.storage = new WriteStorage(storage); this.now = now; this.blobs = blobs ? new WriteBlobs(blobs) : undefined; this.offers = offers;
+    this.receiver = new WriteReceiver(this.storage, this.blobs, now, authority, hooks);
+  }
+  sealed(personId:string,tool:string,input:unknown,resolved:Actor,authority:SealedAuthority):Promise<ToolData>{return this.serial.run(async()=>{
+    const before=await this.load();if(!before)throw new Refused('Journey not found');
+    const command={tool:'journey_read',input:{journeyId:before.id}} as const,slot=this.actor(before,personId,command,resolved),person=this.slot(before,personId);
+    const deviceIds=new Set<string>(),digest=await tokenHash(JSON.stringify([personId,resolved.agent?.id??null,tool,input]));
+    this.stagedAllowance=undefined;const result=await this.receiver.run(resolved,before.id,digest,async()=>{
+      if(!this.blobs)throw new Refused('Sealed blob storage unavailable');
+      const value=await sealedContent({state:before,offers:this.offers,runnable:async id=>{const a=(await this.offers?.directory())?.find(g=>g.id===id);return !!a&&this.runnable(before,a)&&cell(a.card,'Caps',capabilities.find(c=>c.name==='read')!.id)===1&&cell(a.card,'Caps',capabilities.find(c=>c.name==='device.keys')!.id)===1;},changeTask:async(command,taskId)=>{const allowance=await changeTask(before,command,{actor:slot,personId,actorId:resolved.agent?.id??personId,isAgent:!!resolved.agent,now:this.now(),guide:this.has(before,person,'guide'),creatorId:t=>before.identities[scalar(t.rule,'creator')-1]!.id,live:id=>this.live(before,this.slot(before,id)),slot:id=>this.slot(before,id),decider:t=>this.decider(before,t,resolved),runnable:a=>this.runnable(before,a)},this.offers,taskId);await this.commit(before,[],allowance);},actor:resolved,slot,person,can:c=>this.can(before,slot,resolved,c),livePerson:id=>{const s=this.slot(before,id);return s&&cell(before.membership,'Members',s)===1?s:0;},eligible:b=>{const p=this.slot(before,b.personId),a=this.slot(before,b.agentId??b.personId);return this.has(before,p,'read')&&this.live(before,a)&&(!b.agentId||before.agents.some(g=>g.id===b.agentId&&g.owner===b.personId));},now:this.now(),storage:this.storage,blobs:this.blobs,authority,deviceIds},tool,input);return value;
+    },undefined,async()=>{if(this.stagedAllowance)await this.offers!.release(this.stagedAllowance.taskId,this.stagedAllowance.permitOnly);},()=>[...deviceIds],false);
+    if(result.changed){const after=await this.load();if(after)await this.notifyCommit(before,after);}
+    return result.value;
+  });}
+  cancelWrite(permit: WritePermit): Promise<WriteReceipt> { return this.serial.run(() => this.receiver.cancel(permit)); }
+  private async writeRun(personId: string, resolved: Actor | undefined, intent: unknown, journeyId: string | undefined, operation: () => Promise<ToolData>, retryId?: string): Promise<ToolData> {
+    const before = await this.load(), target = journeyId ?? before?.id ?? 'missing';
+    const digest = await tokenHash(JSON.stringify([personId, resolved?.agent?.id ?? null, intent]));
+    this.stagedAllowance = undefined;
+    const result = await this.receiver.run(resolved ?? { personId }, target, digest, operation, retryId, async () => {
+      if (this.stagedAllowance) await this.offers!.release(this.stagedAllowance.taskId, this.stagedAllowance.permitOnly);
+    });
+    if (result.changed) { const state = await this.load(); if (state) await this.notifyCommit(before, state); }
+    return result.value;
+  }
   private async load(): Promise<JourneyState | undefined> {
     const raw = await this.storage.get('journey');
     if (raw === undefined) return undefined;
@@ -120,6 +150,7 @@ export class JourneyHost {
     return identity.personId === task.offer.owner && this.live(state, actor) && (!identity.agent || this.can(state, actor, identity, 'offer.decide'));
   }
   private taskVisible(state: JourneyState, task: Task, identity: Actor): boolean {
+    if(task.sealed)return !task.assignee&&scalar(task.rule,'status')===1||task.sealed.actors.includes(identity.agent?.id??identity.personId)||!identity.agent&&task.sealed.people.includes(identity.personId)||this.decider(state,task,identity);
     if (!task.offer || task.offer.admitted) return true;
     return state.identities[scalar(task.rule, 'creator') - 1]?.id === (identity.agent?.id ?? identity.personId)
       || !identity.agent && task.offer?.requesterPersonId === identity.personId || this.decider(state, task, identity);
@@ -127,7 +158,7 @@ export class JourneyHost {
   private runnable(state: JourneyState, agent: OfferAgent): boolean {
     return state.agents.some(a => a.id === agent.id && a.owner === agent.owner) && this.can(state, this.slot(state, agent.id), { personId: agent.owner, agent: { id: agent.id, name: agent.name, live: true, card: agent.card } }, 'task.manage');
   }
-  private async changeTask(state: JourneyState, actor: number, identity: Actor, command: Extract<Command, { tool: 'task_create' | 'task_step' }>): Promise<string | undefined> {
+  private async changeTask(state: JourneyState, actor: number, identity: Actor, command: Extract<Command, { tool: 'task_create' | 'task_step' }>): Promise<AllowanceRelease | undefined> {
     if (command.tool === 'task_step') {
       const task = state.tasks.find(t => t.id === command.input.taskId);
       if (task && !this.taskVisible(state, task, identity)) throw new Refused('Task access refused');
@@ -144,10 +175,10 @@ export class JourneyHost {
     await this.storage.transaction(async storage => { await storage.put('journey', JSON.stringify(state)); await this.schedule(state, storage); });
   }
   private taskView(state: JourneyState, task: Task): ToolData {
-    return { taskId: task.id, name: task.name, assignee: task.assignee, deadline: task.deadline,
+    return { taskId: task.id, name: task.name, sealed:task.sealed, assignee: task.assignee, deadline: task.deadline,
       creator: state.identities[scalar(task.rule, 'creator') - 1]?.id,
       claimant: state.identities[scalar(task.rule, 'claimant') - 1]?.id,
-      status: ['none', 'open', 'claimed', 'inRound', 'done', 'expired', 'cancelled', 'requested', 'declined'][scalar(task.rule, 'status')],
+      status: ['none', 'open', 'claimed', 'inRound', 'done', 'expired', 'cancelled', 'requested', 'declined','needsInput','failed'][scalar(task.rule, 'status')],
       offerId: task.offer?.id, offerVersion: task.offer?.version, agentId: task.offer?.agentId,
       input: task.content?.input, output: task.content?.output, reason: task.content?.reason,
       roundsUsed: scalar(task.rule, 'roundsUsed'), maxRounds: scalar(task.rule, 'cap') };
@@ -240,7 +271,7 @@ export class JourneyHost {
       }, { highWaterMark: 16 });
     });
   }
-  private async commit(state: JourneyState, writes: [string, string][] = [], allowance?: string): Promise<void> {
+  private async commit(state: JourneyState, writes: [string, string][] = [], allowance?: AllowanceRelease): Promise<void> {
     let before: JourneyState | undefined;
     try {
       before = await this.load();
@@ -253,9 +284,13 @@ export class JourneyHost {
       });
     } catch (error) {
       // The task transaction aborted. Never release after a successful commit, even if notification fails.
-      if (allowance) { try { await this.offers!.release(allowance); } catch { /* Retain on ambiguity; no extra allowance. */ } }
+      if (allowance) { try { await this.offers!.release(allowance.taskId, allowance.permitOnly); } catch { /* Retain on ambiguity; no extra allowance. */ } }
       throw error;
     }
+    if (this.storage.staged) { this.stagedAllowance = allowance; return; }
+    await this.notifyCommit(before, state);
+  }
+  private async notifyCommit(before: JourneyState | undefined, state: JourneyState): Promise<void> {
     try { await this.flushOffers(state); } catch { /* Durable outbox and alarm retry; the task decision is already committed. */ }
     for (const [controller, personId] of this.watchers) {
       if (!this.has(state, this.slot(state, personId), 'read') || (controller.desiredSize ?? 0) <= 0) {
@@ -266,7 +301,7 @@ export class JourneyHost {
     }
   }
   private async schedule(state: JourneyState, storage: Pick<KeyValueStorage, 'setAlarm' | 'deleteAlarm'> = this.storage): Promise<void> {
-    const active = state.tasks.filter((task) => [1, 2, 3, 7].includes(scalar(task.rule, 'status')));
+    const active = state.tasks.filter((task) => [1, 2, 3, 7, 9].includes(scalar(task.rule, 'status')));
     const deadlines = active.map(task => task.deadline);
     if (state.offerOutbox?.length) deadlines.push(this.now() + 60_000);
     if (deadlines.length) await storage.setAlarm(Math.min(...deadlines));
@@ -288,7 +323,7 @@ export class JourneyHost {
     });
   }
   task(personId: string, method: TaskMethod, taskId: string, resolved?: Actor): Promise<ToolData> {
-    return this.serial.run(async () => {
+    return this.serial.run(() => this.writeRun(personId, resolved, ['task', method, taskId], undefined, async () => {
       const state = await this.load();
       const actor = state ? this.slot(state, resolved?.agent?.id ?? personId) : 0;
       if (!state || !this.can(state, actor, resolved ?? { personId }, 'read')) throw new Refused('Task access refused');
@@ -302,18 +337,18 @@ export class JourneyHost {
       }
       if (method !== 'get') return { resultType: 'complete' };
       const status = scalar(task.rule, 'status');
-      const result: ToolData = { resultType: 'complete', taskId, status: status === 6 ? 'cancelled' : status === 5 || status === 8 ? 'failed' : status === 4 ? 'completed' : 'working',
+      const result: ToolData = { resultType: 'complete', taskId, status: status === 6 ? 'cancelled' : status === 5 || status === 8 || status === 10 ? 'failed' : status === 4 ? 'completed' : status === 9 ? 'input_required' : 'working',
         ...(status === 7 ? { statusMessage: 'awaiting approval' } : {}),
         createdAt: new Date(task.createdAt).toISOString(), lastUpdatedAt: new Date(task.updatedAt).toISOString(), ttlMs: null, pollIntervalMs: 1000 };
-      if ([4, 5, 8].includes(status)) result.result = { content: [{ type: 'text', text: JSON.stringify(this.taskView(state, task)) }], structuredContent: this.taskView(state, task), isError: status !== 4 };
+      if ([4, 5, 8, 10].includes(status)) result.result = { content: [{ type: 'text', text: JSON.stringify(this.taskView(state, task)) }], structuredContent: this.taskView(state, task), isError: status !== 4 };
       return result;
-    });
+    }));
   }
-  execute(personId: string, command: Command, journeyId?: string, resolved?: Actor): Promise<ToolData> {
-    return this.serial.run(async () => {
+  execute(personId: string, command: Command, journeyId?: string, resolved?: Actor, retryId?: string): Promise<ToolData> {
+    return this.serial.run(() => this.writeRun(personId, resolved, command, journeyId, async () => {
       let state = await this.load();
       if (state?.offerOutbox?.length) await this.flushOffers(state);
-      let allowance: string | undefined;
+      let allowance: AllowanceRelease | undefined;
       if (command.tool === 'journey_create') {
         if (state) throw new Refused('Journey already exists');
         if (!journeyId) throw new Refused('Journey identity missing');
@@ -359,7 +394,7 @@ export class JourneyHost {
         }
         if (cap && !ownRemoval) this.requireCapability(state, actor, identity, cap);
         if (command.tool === 'offer_search') {
-          const found = (await this.offers?.directory() ?? []).filter(g => this.runnable(state!, g)).flatMap(g => g.offers.filter(o => o.status === 'published' && (o.journeys === 'all' || o.journeys.includes(state!.id))).map(o => ({ ...offerView(o), agentId: g.id, agentName: g.name, owner: g.owner })));
+          const found = (await this.offers?.directory() ?? []).filter(g => this.runnable(state!, g)).flatMap(g => g.offers.filter(o => o.status === 'published' && journeyEnabled(o, state!.id)).map(o => ({ ...offerView(o), agentId: g.id, agentName: g.name, owner: g.owner })));
           const query = command.input.query?.toLowerCase(), tags = command.input.tags;
           return { journeyId: state.id, offers: found.filter(o => (!query || `${o.name} ${o.description} ${o.tags.join(' ')}`.toLowerCase().includes(query)) && (!tags || tags.every(t => o.tags.includes(t)))) };
         }
@@ -414,7 +449,7 @@ export class JourneyHost {
       const readerId = identity.agent?.id ?? personId;
       if (!this.can(state, this.slot(state, readerId), identity, 'read')) return { journeyId: state.id, accepted: true };
       return this.view(state, personId, identity);
-    });
+    }, retryId));
   }
   private apply(state: JourneyState, actor: number, personId: string, command: Command, resolved?: Actor): void {
     const membershipOps: Partial<Record<Command['tool'], JourneyOp>> = {

@@ -3,6 +3,7 @@ import * as z from 'zod';
 import { inputs, descriptions, relayNote, TOOL_NAMES, parseCommand, Refused, type CoordinationBackend } from './commands.ts';
 import { registerApps } from './apps.ts';
 import { inboxJourney } from './inbox.ts';
+import { sealedInputs } from './sealed-contract.ts';
 
 function subjectOf(extra: Record<string, unknown> | undefined): string | undefined {
   const sub = extra?.['sub'];
@@ -33,17 +34,18 @@ export function buildServer(ctx: Parameters<McpServerFactory>[0], backend?: Coor
     const result = { subject, era: ctx.era, ...details };
     return { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result };
   });
-  for (const name of TOOL_NAMES) {
-    const inputSchema: z.ZodObject<z.ZodRawShape> = inputs[name];
+  const names=backend?.sealedMode?[...new Set([...TOOL_NAMES,...Object.keys(sealedInputs)])]:TOOL_NAMES;
+  for (const name of names) {
+    const inputSchema = backend?.sealedMode&&sealedInputs[name] ? sealedInputs[name]! : inputs[name as keyof typeof inputs];
     server.registerTool(name, {
-      description: `${descriptions[name]}${/^(artifact_|mls_|personal_group_)/.test(name) ? ` ${relayNote}` : ''}`,
+      description: backend?.sealedMode&&sealedInputs[name] ? `Sealed v1 ${name}: bounded opaque content or allowlisted coordination fields; use the local encryption client.` : `${descriptions[name as keyof typeof descriptions]??'Bounded sealed content operation'}${/^(artifact_|mls_|personal_group_)/.test(name) ? ` ${relayNote}` : ''}`,
       inputSchema,
     }, async (args: Record<string, unknown>) => {
       try {
         const subject = subjectOf(ctx.authInfo?.extra);
         if (!subject) throw new Refused('No signed-in account on this request');
         if (!backend) throw new Refused('Coordination storage is not configured');
-        const result = await backend.execute(subject, parseCommand(name, args), ctx.authInfo?.clientId);
+        const result = backend.sealedMode&&sealedInputs[name] ? await backend.sealedExecute!(subject,name,args,ctx.authInfo?.clientId) : await backend.execute(subject, parseCommand(name, args), ctx.authInfo?.clientId);
         return { content: [{ type: 'text' as const, text: JSON.stringify(result) }], structuredContent: result };
       } catch (error) {
         const message = error instanceof Refused ? error.message : 'Coordination operation failed';

@@ -1,4 +1,5 @@
 import * as z from 'zod';
+import { sealedOfferDefinition, type SealedOfferDefinition } from './sealed-descriptors.ts';
 import { Refused } from './errors.ts';
 import type { Snapshot } from './rules.ts';
 
@@ -87,16 +88,21 @@ export function validateData(data: unknown, schema: Record<string, unknown>, lab
   check(data, schema);
 }
 const jsonSchema = z.record(z.string(), z.unknown()).superRefine((s, ctx) => { try { validateJsonSchema(s, 'Schema'); } catch (e) { ctx.addIssue({ code: 'custom', message: e instanceof Error ? e.message : 'Invalid schema' }); } });
+export const journeySettingSchema = z.object({ enabled: z.boolean(), maxRequestsPerDay: z.number().int().min(1).max(1000).optional() }).strict();
+export const journeySettingsSchema = z.record(id, journeySettingSchema).refine(v => Object.keys(v).length <= 128, 'At most 128 offer journeys');
+export type JourneySettings = z.infer<typeof journeySettingsSchema>;
+// Sealed generations use immutable P source and J publication references.
+// Legacy definitions remain supported only by the unsealed generation.
 export const offerDefinitionSchema = z.object({
   id: z.string().regex(/^[a-z0-9][a-z0-9-]{0,59}$/), name: z.string().trim().min(1).max(60), description: z.string().max(1000),
   tags: z.array(z.string().min(1).max(60)).max(10).default([]), examples: z.array(z.string().max(1000)).max(5).default([]),
-  inputSchema: jsonSchema, outputSchema: jsonSchema.optional(), journeys: z.union([z.literal('all'), z.array(id).max(128)]).default('all'),
+  inputSchema: jsonSchema, outputSchema: jsonSchema.optional(), journeySettings: journeySettingsSchema.optional(),
   admission: admissionSchema.optional(), preset: z.enum(['Open', 'Members', 'Ask me', 'Custom']).optional(),
-  resource: z.string().min(1).max(200).optional(), instructions: z.string().max(1000).optional(),
+  resource: z.string().min(1).max(200).optional(), instructions: z.string().max(1000).optional(), sealed: sealedOfferDefinition.optional(),
 }).strict();
 export type OfferDefinition = z.infer<typeof offerDefinitionSchema>;
 export interface OfferContent { name: string; description: string; tags: string[]; examples: string[]; inputSchema: Record<string, unknown>; outputSchema?: Record<string, unknown>; resource?: string; instructions?: string }
-export interface Offer { id: string; content: OfferContent; journeys: 'all' | string[]; admission: AdmissionPolicy; status: 'draft' | 'published' | 'retired'; version: number; createdAt: number; updatedAt: number; agentDefined?: boolean }
+export interface Offer { id: string; content: OfferContent; sealed?: SealedOfferDefinition; contentRevision: number; journeySettings: JourneySettings; admission: AdmissionPolicy; status: 'draft' | 'published' | 'retired'; version: number; createdAt: number; updatedAt: number; agentDefined?: boolean }
 export interface OfferAgent { id: string; name: string; owner: string; card: Snapshot; offers: Offer[]; settings: OwnerOfferSettings }
 export interface StandingDecision { id: string; owner: string; agentId: string; offerId: string; who: { person: string } | { agent: string }; decision: 'allow' | 'deny' }
 // Host-only reservation: identity and guide status come from Journey authority, never tool input.
@@ -106,12 +112,17 @@ export const allowanceRequestSchema = z.object({
 }).strict();
 export type AllowanceRequest = z.infer<typeof allowanceRequestSchema>;
 export interface AllowanceReceipt extends AllowanceRequest { createdAt: number; decision: 'allow' | 'hold' }
+export const permitRequestSchema = z.object({ taskId: id, agentId: id, offerId: id, journeyId: id }).strict();
+export type PermitRequest = z.infer<typeof permitRequestSchema>;
+export interface AdmissionPermit extends PermitRequest { issuedAt: number }
+export interface AllowanceRelease { taskId: string; permitOnly?: boolean }
 export interface OfferPort {
   directory(): Promise<OfferAgent[]>; stand(decision: StandingDecision): Promise<void>;
   reserve(request: AllowanceRequest): Promise<'allow' | 'hold'>;
-  release(taskId: string): Promise<void>;
+  approve(request: PermitRequest): Promise<'allow' | 'hold'>;
+  release(taskId: string, permitOnly?: boolean): Promise<void>;
 }
-export function offerView(o: Offer) { return { id: o.id, name: o.content.name, description: o.content.description, tags: o.content.tags, examples: o.content.examples, inputSchema: o.content.inputSchema, outputSchema: o.content.outputSchema, resource: o.content.resource, instructions: o.content.instructions, journeys: o.journeys, admission: o.admission, status: o.status, version: o.version, createdAt: o.createdAt, updatedAt: o.updatedAt }; }
+export function offerView(o: Offer) { return { id: o.id, sealed: o.sealed, privateDefinition: o.sealed?.privateDefinition, publications: o.sealed?.publications, name: o.content.name, description: o.content.description, tags: o.content.tags, examples: o.content.examples, inputSchema: o.content.inputSchema, outputSchema: o.content.outputSchema, resource: o.content.resource, instructions: o.content.instructions, journeySettings: o.journeySettings, contentRevision: o.contentRevision, admission: o.admission, status: o.status, version: o.version, createdAt: o.createdAt, updatedAt: o.updatedAt }; }
 export function presetPolicy(preset: OfferDefinition['preset']): AdmissionPolicy {
   return structuredClone(preset === 'Open' ? ADMISSION_OPEN : preset === 'Ask me' ? ADMISSION_ASK_ME : ADMISSION_MEMBERS);
 }
@@ -127,3 +138,31 @@ export function matchingRule(policy: AdmissionPolicy, c: AdmissionContext): Admi
   return policy.rules.find(r => (!r.journeys || r.journeys.includes(c.journeyId)) && (r.who === 'members' || r.who === 'owner' && !c.isAgent && c.requesterPersonId === c.owner || r.who === 'guide' && !c.isAgent && c.isGuide || r.who === 'people' && !c.isAgent || r.who === 'agents' && c.isAgent || typeof r.who === 'object' && ('agent' in r.who ? c.isAgent && c.requesterId === r.who.agent : !c.isAgent && c.requesterPersonId === r.who.person)));
 }
 export function periodMs(per: 'hour' | 'day' | 'week'): number { return per === 'hour' ? 3_600_000 : per === 'day' ? 86_400_000 : 604_800_000; }
+
+/** No wildcard: absent entries, including future memberships, are off. */
+export function journeyEnabled(offer: Offer, journeyId: string): boolean {
+  return Object.hasOwn(offer.journeySettings, journeyId) && offer.journeySettings[journeyId]!.enabled && (!offer.sealed || !!offer.sealed.publications[journeyId]);
+}
+export function clampJourneyLimits(offers: Offer[], settings: OwnerOfferSettings, now: number): void {
+  if (!settings.maxRequestsPerDay) return;
+  for (const offer of offers) {
+    let changed = false;
+    for (const row of Object.values(offer.journeySettings)) if (row.maxRequestsPerDay !== undefined && row.maxRequestsPerDay > settings.maxRequestsPerDay) {
+      row.maxRequestsPerDay = settings.maxRequestsPerDay; changed = true;
+    }
+    if (changed) { offer.version++; offer.updatedAt = now; }
+  }
+}
+/** Copy named fields, preserve omitted limits, and reject every agent widening path. */
+export function editJourneySettings(current: JourneySettings, supplied: JourneySettings, settings: OwnerOfferSettings, isAgent: boolean): JourneySettings {
+  const next: JourneySettings = structuredClone(current);
+  for (const [journeyId, row] of Object.entries(supplied)) {
+    const before = Object.hasOwn(current, journeyId) ? current[journeyId] : undefined;
+    const limit = row.maxRequestsPerDay ?? before?.maxRequestsPerDay;
+    if (limit !== undefined && settings.maxRequestsPerDay && limit > settings.maxRequestsPerDay) throw new Refused('Journey limit exceeds agent ceiling');
+    if (isAgent && (row.enabled && !before?.enabled || before?.maxRequestsPerDay !== undefined && (limit === undefined || limit > before.maxRequestsPerDay))) throw new Refused('Agents may only narrow or disable offer journeys');
+    Object.defineProperty(next, journeyId, { value: { enabled: row.enabled, ...(limit === undefined ? {} : { maxRequestsPerDay: limit }) }, enumerable: true, writable: true, configurable: true });
+  }
+  if (Object.keys(next).length > 128) throw new Refused('At most 128 offer journeys');
+  return next;
+}

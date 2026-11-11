@@ -11,18 +11,21 @@ export function fork(state) {
 }
 export function step(params, state, input) {
   const env = {"op": $n(input["op"], "input op"), "actor": $n(input["actor"], "input actor"), "actorIsLive": $n(input["actorIsLive"], "input actorIsLive"), "deadlinePassed": $n(input["deadlinePassed"], "input deadlinePassed"), "maxRounds": $n(input["maxRounds"], "input maxRounds"), "isDecider": $n(input["isDecider"], "input isDecider"), "agent": $n(input["agent"], "input agent")}, s = state.scalars, dft = {...state.defaults}, maps = state.maps;
-  const flag0 = ((env["op"] === 0) && (s["status"] === 0) && (env["actorIsLive"] === 1));
-  const flag1 = ((env["op"] === 7) && (s["status"] === 0) && (env["actorIsLive"] === 1));
-  const flag2 = ((env["op"] === 8) && (s["status"] === 7) && (env["isDecider"] === 1) && (env["actorIsLive"] === 1) && (!(env["deadlinePassed"] === 1)));
-  const flag3 = ((env["op"] === 9) && (s["status"] === 7) && (env["isDecider"] === 1) && (env["actorIsLive"] === 1));
-  const flag4 = ((env["op"] === 1) && (s["status"] === 1) && (env["actorIsLive"] === 1) && (!(env["deadlinePassed"] === 1)));
-  const flag5 = ((env["op"] === 2) && (s["status"] === 2) && ((env["actor"] === s["claimant"]) && (env["actorIsLive"] === 1)) && (s["roundsUsed"] < s["cap"]) && (!(env["deadlinePassed"] === 1)));
-  const flag6 = ((env["op"] === 3) && (s["status"] === 3) && ((env["actor"] === s["claimant"]) && (env["actorIsLive"] === 1)));
-  const flag7 = ((env["op"] === 4) && ((s["status"] === 2) || (s["status"] === 3)) && ((env["actor"] === s["claimant"]) && (env["actorIsLive"] === 1)) && (!(env["deadlinePassed"] === 1)));
-  const flag8 = ((env["op"] === 5) && ((s["status"] === 1) || (s["status"] === 2) || (s["status"] === 3) || (s["status"] === 7)) && ((env["actor"] === s["creator"]) && (env["actorIsLive"] === 1)));
-  const flag9 = ((env["op"] === 6) && ((s["status"] === 1) || (s["status"] === 2) || (s["status"] === 3) || (s["status"] === 7)) && ((env["deadlinePassed"] === 1) || ((!(s["status"] === 7)) && (!(s["status"] === 3)) && (s["cap"] <= s["roundsUsed"]))));
-  const flag10 = (0 < 0);
-  if (!((env["op"] < 10) && (env["actorIsLive"] <= 1) && (env["deadlinePassed"] <= 1) && (env["isDecider"] <= 1))) throw new RangeError("task: the request fails the rule's assumption, so no proof covers the step it would take");
-  const scalars = {...s, "creator": ((flag0 || flag1) ? env["actor"] : s["creator"]), "claimant": (flag1 ? env["agent"] : ((flag4 || (flag2 && (0 < 0))) ? env["actor"] : s["claimant"])), "roundsUsed": ((flag2 && (0 < 0)) ? $x(s["roundsUsed"] + 1) : (flag1 ? 0 : (flag0 ? 0 : (flag5 ? $x(s["roundsUsed"] + 1) : ((flag6 && (0 < 0)) ? Math.max(0, s["roundsUsed"] - 1) : s["roundsUsed"]))))), "cap": (flag1 ? env["maxRounds"] : (flag0 ? env["maxRounds"] : ((flag5 && (0 < 0)) ? $x(s["cap"] + 1) : s["cap"]))), "status": (flag1 ? 7 : ((flag0 || flag10) ? 1 : ((flag4 || flag2) ? 2 : (flag5 ? 3 : (flag6 ? 2 : (flag7 ? 4 : (flag8 ? 6 : (flag9 ? 5 : (flag3 ? 8 : s["status"])))))))))};
+  const flag0 = ((env["op"] === 10) && (s["status"] === 2) && ((env["actor"] === s["claimant"]) && (env["actorIsLive"] === 1)) && (!(env["deadlinePassed"] === 1)));
+  const flag1 = ((env["op"] === 11) && (s["status"] === 9) && ((env["actor"] === s["creator"]) && (env["actorIsLive"] === 1)) && (!(env["deadlinePassed"] === 1)));
+  const flag2 = ((env["op"] === 12) && ((s["status"] === 2) || (s["status"] === 3) || (s["status"] === 9)) && ((env["actor"] === s["claimant"]) && (env["actorIsLive"] === 1)) && (!(env["deadlinePassed"] === 1)));
+  const flag3 = ((env["op"] === 0) && (s["status"] === 0) && (env["actorIsLive"] === 1));
+  const flag4 = ((env["op"] === 7) && (s["status"] === 0) && (env["actorIsLive"] === 1));
+  const flag5 = ((env["op"] === 8) && (s["status"] === 7) && (env["isDecider"] === 1) && (env["actorIsLive"] === 1) && (!(env["deadlinePassed"] === 1)));
+  const flag6 = ((env["op"] === 9) && (s["status"] === 7) && (env["isDecider"] === 1) && (env["actorIsLive"] === 1));
+  const flag7 = ((env["op"] === 1) && (s["status"] === 1) && (env["actorIsLive"] === 1) && (!(env["deadlinePassed"] === 1)));
+  const flag8 = ((env["op"] === 2) && (s["status"] === 2) && ((env["actor"] === s["claimant"]) && (env["actorIsLive"] === 1)) && (s["roundsUsed"] < s["cap"]) && (!(env["deadlinePassed"] === 1)));
+  const flag9 = ((env["op"] === 3) && (s["status"] === 3) && ((env["actor"] === s["claimant"]) && (env["actorIsLive"] === 1)));
+  const flag10 = ((env["op"] === 4) && ((s["status"] === 2) || (s["status"] === 3)) && ((env["actor"] === s["claimant"]) && (env["actorIsLive"] === 1)) && (!(env["deadlinePassed"] === 1)));
+  const flag11 = ((env["op"] === 5) && ((s["status"] === 1) || (s["status"] === 2) || (s["status"] === 3) || (s["status"] === 7) || (s["status"] === 9)) && ((env["actor"] === s["creator"]) && (env["actorIsLive"] === 1)));
+  const flag12 = ((env["op"] === 6) && ((s["status"] === 1) || (s["status"] === 2) || (s["status"] === 3) || (s["status"] === 7) || (s["status"] === 9)) && ((env["deadlinePassed"] === 1) || ((!(s["status"] === 7)) && (!(s["status"] === 9)) && (!(s["status"] === 3)) && (s["cap"] <= s["roundsUsed"]))));
+  const flag13 = (0 < 0);
+  if (!((env["op"] < 13) && (env["actorIsLive"] <= 1) && (env["deadlinePassed"] <= 1) && (env["isDecider"] <= 1))) throw new RangeError("task: the request fails the rule's assumption, so no proof covers the step it would take");
+  const scalars = {...s, "creator": ((flag3 || flag4) ? env["actor"] : s["creator"]), "claimant": (flag4 ? env["agent"] : ((flag7 || (flag5 && (0 < 0))) ? env["actor"] : s["claimant"])), "roundsUsed": ((flag5 && (0 < 0)) ? $x(s["roundsUsed"] + 1) : (flag4 ? 0 : (flag3 ? 0 : (flag8 ? $x(s["roundsUsed"] + 1) : ((flag9 && (0 < 0)) ? Math.max(0, s["roundsUsed"] - 1) : s["roundsUsed"]))))), "cap": (flag4 ? env["maxRounds"] : (flag3 ? env["maxRounds"] : ((flag8 && (0 < 0)) ? $x(s["cap"] + 1) : s["cap"]))), "status": (flag0 ? 9 : (flag1 ? 2 : (flag2 ? 10 : (flag4 ? 7 : ((flag3 || flag13) ? (flag13 ? 2 : 1) : ((flag7 || flag5) ? 2 : (flag8 ? 3 : (flag9 ? 2 : (flag10 ? 4 : (flag11 ? 6 : (flag12 ? 5 : (flag6 ? 8 : s["status"]))))))))))))};
   return Object.keys(dft).length ? {scalars, maps: state.maps, defaults: dft} : {scalars, maps: state.maps};
 }

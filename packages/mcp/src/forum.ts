@@ -45,8 +45,9 @@ export function defaultBoard(state: ForumState, guide: number): void {
   if (scalar(rule, 'exists') !== 1) throw new Refused('Default board creation refused');
   state.boards.push({ id: id(state, 'board'), name: 'General', description: '', rule });
 }
-function targetKey(target: ForumTarget): string { return 'projectId' in target ? `project:${target.projectId}` : 'itemId' in target ? `item:${target.itemId}` : `round:${target.roundId}`; }
+function targetKey(target: ForumTarget): string { return 'projectId' in target ? `project:${target.projectId}` : 'itemId' in target ? `item:${target.itemId}` : 'roundId' in target?`round:${target.roundId}`:`task:${target.taskId}`; }
 function targetName(state: ForumState, target: ForumTarget, access: ForumAccess): string {
+  if('taskId' in target)throw new Refused('Task conversations require the sealed client contract');
   if ('roundId' in target) {
     const round = state.rounds.find(r => r.id === target.roundId);
     if (!round) throw new Refused('Forum round not found');

@@ -1,5 +1,9 @@
 import * as z from 'zod';
+import { verifyDescriptor } from './sealed-identities.ts';
+import { internalDefinition, verifyDefinition } from './sealed-offers.ts';
+import { sealedDescriptor, type SealedDescriptor, sealedOfferDefinition, type DefinitionRef } from './sealed-descriptors.ts';
 import type { OfferAgent, StandingDecision } from './offers.ts';
+import type { WritePort, WritePermit, WriteReceipt, WriteDrain } from './write-permits.ts';
 import { AccountsHost, type Account, type Profiles } from './accounts.ts';
 import { Refused, parseCommand, isRelay, type Command, type CoordinationBackend, type TaskMethod, type ToolData } from './commands.ts';
 import { assertionSchema, allows, requireAccountCapability, type Actor, type ClientIdentity, type CardChange, type PasskeyVerifier } from './agents.ts';
@@ -10,6 +14,8 @@ import { isForumCommand, forumCommandJourney } from './forum.ts';
 import { isRoundCommand, roundJourney } from './rounds.ts';
 import { MemoryStorage } from './storage.ts';
 import { MemoryBlobs, encodeBytes } from './relay.ts';
+import { sealedInputs, sealedRouting, SEALED_NOTICE, type DeviceBinding } from './sealed-contract.ts';
+import type { SealedAuthority } from './sealed-content.ts';
 
 import type { RecordOperation, ConsoleRecord, PasskeyOperation } from './console/contract.ts';
 const namedState = z.object({
@@ -19,7 +25,13 @@ const namedState = z.object({
 import type { OAuthPort, OAuthOperation, AgentConsent } from './oauth-contract.ts';
 import { agentConsent } from './oauth-contract.ts';
 import { cardCaps } from './agents.ts';
-export interface AccountsPort extends OAuthPort {
+export interface AccountsPort extends OAuthPort, WritePort {
+  publishedDescriptors?(journeyId:string,ids:string[]):Promise<ToolData>;
+  setDescriptor?(personId:string,clientId:string,agentId:string|undefined,descriptor:SealedDescriptor):Promise<ToolData>;
+  sealedDevice?(personId:string,clientId:string,tool:string,input:unknown):Promise<ToolData>;
+  deviceBinding?(deviceId:string):Promise<DeviceBinding>;
+  reserveDevice?(expected:DeviceBinding,groupId:string):Promise<DeviceBinding>;
+  drainWrites(personId?: string): Promise<WriteDrain>;
   offerDirectory(): Promise<OfferAgent[]>;
   standingDecision(decision: StandingDecision): Promise<void>;
   consoleRecord(operation: RecordOperation): Promise<ConsoleRecord | undefined>;
@@ -30,7 +42,7 @@ export interface AccountsPort extends OAuthPort {
   names(personIds: string[]): Promise<Record<string, string>>;
   personIdByEmail(email: string): Promise<string | undefined>;
   directory(add?: string): Promise<string[]>;
-  group(personId: string, command: Command): Promise<ToolData>;
+  group(personId: string, command: Command, actor?: Actor): Promise<ToolData>;
   observeClient(personId: string, clientId: string): Promise<void>;
   resolveActor(personId: string, clientId: string, actingAgent?: string): Promise<Actor>;
   agentCommand(personId: string, clientId: string, command: Command): Promise<ToolData>;
@@ -38,6 +50,8 @@ export interface AccountsPort extends OAuthPort {
   completeAuthorization(identity: ClientIdentity, change: CardChange, assertion: AuthenticationResponseJSON | undefined): Promise<ToolData>;
 }
 export interface JourneyPort {
+  sealed?(personId:string,tool:string,input:unknown,actor:Actor,authority:SealedAuthority):Promise<ToolData>;
+  cancelWrite(permit: WritePermit): Promise<WriteReceipt>;
   syncAgent(personId: string, agentId: string, name: string, present: boolean): Promise<void>;
   requireGuide(personId: string, command: Command, actor?: Actor): Promise<void>;
   execute(personId: string, command: Command, journeyId?: string, actor?: Actor): Promise<ToolData>;
@@ -51,7 +65,31 @@ export interface JourneyPort {
 export class Backend implements CoordinationBackend {
   private readonly accounts: AccountsPort;
   private readonly journey: (id: string) => JourneyPort;
-  constructor(accounts: AccountsPort, journey: (id: string) => JourneyPort) { this.accounts = accounts; this.journey = journey; }
+  readonly sealedMode:boolean;
+  constructor(accounts: AccountsPort, journey: (id: string) => JourneyPort, sealedMode=false) { this.accounts = accounts; this.journey = journey;this.sealedMode=sealedMode; }
+  async sealedExecute(subject:string,tool:string,input:unknown,clientId='trusted-host'):Promise<ToolData>{
+    if(!this.sealedMode)throw new Refused('Sealed generation not enabled');
+    if(tool==='task_step')tool='task_exchange';
+    const parsed=sealedInputs[tool]?.safeParse(input);if(!parsed?.success)throw new Refused('Invalid sealed fields or unknown format');const named=parsed.data as Record<string,unknown>;
+    await this.recoverWrites();const account=await this.accounts.provision(subject),actor=await this.accounts.resolveActor(account.personId,clientId);
+    if(actor.agent&&(tool==='content_prepare'||Object.hasOwn(sealedRouting,tool))&&(!allows(actor,'read',true)||!allows(actor,'device.keys',true)))throw new Refused('Sealed content refused: needs read + device.keys; ask the owner to grant both explicitly');
+    const read=(ref:DefinitionRef)=>this.sealedExecute(subject,'sealed_record_read',ref,clientId);
+    if(tool==='agent_create')return this.executeCommand(subject,parseCommand('agent_create',{name:SEALED_NOTICE}),clientId);
+    if(tool==='account_update'||tool==='agent_descriptor_set'){const agentId=tool==='agent_descriptor_set'?String(named.agentId):undefined;const d=sealedDescriptor.parse(named.sealed);if(agentId&&(!account.agents.some(a=>a.id===agentId&&a.live)||actor.agent&&actor.agent.id!==agentId))throw new Refused('Owned live agent required');await verifyDescriptor(d.privateDefinition,account.personId,agentId,d.contentRevision,true,read);for(const [journeyId,ref] of Object.entries(d.publications)){if(ref.journeyId!==journeyId)throw new Refused('Descriptor publication journey mismatch');await verifyDescriptor(ref,account.personId,agentId,d.contentRevision,false,read);}if(!this.accounts.setDescriptor)throw new Refused('Descriptor storage unavailable');return this.accounts.setDescriptor(account.personId,clientId,agentId,d);}
+    if(tool==='offer_set'){
+      const definition=z.object({id:z.string(),sealed:sealedOfferDefinition,journeySettings:z.record(z.string(),z.unknown()),admission:z.unknown()}).parse(named.offer),agentId=String(named.agentId);
+      if(!account.agents.some(a=>a.id===agentId&&a.live)||actor.agent&&actor.agent.id!==agentId)throw new Refused('Owned live agent required');
+      const d=definition.sealed;await verifyDefinition(d.privateDefinition,account.personId,agentId,definition.id,d.contentRevision,true,read);
+      for(const [journeyId,ref] of Object.entries(d.publications)){if(ref.journeyId!==journeyId)throw new Refused('Offer journey publication mismatch');await verifyDefinition(ref,account.personId,agentId,definition.id,d.contentRevision,false,read);}
+      for(const [journeyId,row] of Object.entries(definition.journeySettings))if(z.object({enabled:z.boolean()}).parse(row).enabled&&!d.publications[journeyId])throw new Refused('Enabled journey needs a current sealed publication');
+      return this.executeCommand(subject,parseCommand('offer_set',{agentId,expectedVersion:named.expectedVersion,offer:internalDefinition(definition.id,d,definition.journeySettings,definition.admission)}),clientId);
+    }
+    if(tool==='offer_search'){const result=await this.executeCommand(subject,parseCommand('offer_search',{journeyId:named.journeyId}),clientId);return {journeyId:named.journeyId,offers:z.array(z.record(z.string(),z.unknown())).parse(result.offers).map(o=>({id:o.id,agentId:o.agentId,owner:o.owner,version:o.version,contentRevision:o.contentRevision,status:o.status,admission:o.admission,publication:z.record(z.string(),z.unknown()).parse(o.publications??{})[String(named.journeyId)]}))};}
+    if(tool==='journey_create'){requireAccountCapability(actor,'journey.create');return this.executeCommand(subject,parseCommand('journey_create',{name:SEALED_NOTICE,policy:named.policy,defaultRole:named.defaultRole}),clientId);}
+    if(tool==='sealed_device_register'||tool==='sealed_device_binding'){if(!this.accounts.sealedDevice)throw new Refused('Device binding storage unavailable');return this.accounts.sealedDevice(account.personId,clientId,tool,named);}
+    const journeyId=z.string().min(1).max(200).parse(named.journeyId),port=this.journey(journeyId);if(!port.sealed||!this.accounts.deviceBinding||!this.accounts.reserveDevice)throw new Refused('Sealed storage unavailable');
+    const result=await port.sealed(account.personId,tool,named,actor,{binding:id=>this.accounts.deviceBinding!(id),reserve:(id,group)=>this.accounts.reserveDevice!(id,group)});const revocation=await this.recoverWrites(account.personId);if(revocation.state==='pending')result.revocation={state:'pending',retryAt:revocation.retryAt};return result;
+  }
   oauth(operation: OAuthOperation) { return this.accounts.oauth(operation); }
   async consentAgent(subject: string, id: string, supplied: AgentConsent, assertion?: AuthenticationResponseJSON): Promise<string> {
     const consent = agentConsent.parse(supplied), account = await this.accounts.lookup(subject);
@@ -59,7 +97,7 @@ export class Backend implements CoordinationBackend {
     await this.validateJourneys(account.personId, consent.journeys);
     const result = await this.accounts.oauth({ op: 'consent', id, subject, consent, assertion: assertionSchema.optional().parse(assertion) });
     if (result.kind !== 'agent') throw new Refused('Agent consent refused');
-    await this.syncAgentJourneys(account.personId, result.agentId, consent.name, consent.journeys);
+    await this.syncAgentJourneys(account.personId, result.agentId, this.sealedMode?result.agentId:consent.name, consent.journeys);
     await this.accounts.oauth({ op: 'manage', subject, agentId: result.agentId, journeys: consent.journeys });
     return result.agentId;
   }
@@ -79,6 +117,7 @@ export class Backend implements CoordinationBackend {
     if (!account || (await this.accounts.resolveActor(account.personId, identity.clientId)).agent) throw new Refused('Only a person manages agents');
     const own = account.agents.find(a => a.id === agentId && a.live);
     if (!own) throw new Refused('Owned live agent required');
+    if(this.sealedMode&&name!==agentId)throw new Refused('Agent names must be sealed by an enrolled proxy');
     const parsed = agentConsent.parse({ name, capabilities: cardCaps(own.card), journeys });
     await this.validateJourneys(account.personId, parsed.journeys);
     await this.syncAgentJourneys(account.personId, agentId, parsed.name, parsed.journeys);
@@ -103,7 +142,12 @@ export class Backend implements CoordinationBackend {
   consoleRecord(operation: RecordOperation) { return this.accounts.consoleRecord(operation); }
   passkey(identity: ClientIdentity, operation: PasskeyOperation) { return this.accounts.passkey(identity, operation); }
   beginAuthorization(identity: ClientIdentity, change: CardChange) { return this.accounts.beginAuthorization(identity, change); }
-  completeAuthorization(identity: ClientIdentity, change: CardChange, assertion: AuthenticationResponseJSON | undefined) { return this.accounts.completeAuthorization(identity, change, assertion); }
+  async completeAuthorization(identity: ClientIdentity, change: CardChange, assertion: AuthenticationResponseJSON | undefined): Promise<ToolData> {
+    const result = await this.accounts.completeAuthorization(identity, change, assertion);
+    const account = await this.accounts.lookup(identity.subject), revocation = await this.recoverWrites(account?.personId);
+    if (revocation.state === 'pending') result.revocation = { state: revocation.state, retryAt: revocation.retryAt };
+    return result;
+  }
   private async namedForum(data: ToolData): Promise<ToolData> {
     const row = z.object({ author: z.string(), authorKind: z.enum(['person', 'agent']) }).passthrough();
     const posts = data.posts === undefined ? [] : z.array(row).parse(data.posts);
@@ -123,6 +167,7 @@ export class Backend implements CoordinationBackend {
   private async named(data: ToolData): Promise<ToolData> {
     if (!('members' in data) || !('pending' in data)) return data;
     const { members, pending } = namedState.parse(data);
+    if(this.sealedMode&&this.accounts.publishedDescriptors&&typeof data.journeyId==='string')data={...data,...await this.accounts.publishedDescriptors(data.journeyId,members.map(m=>m.memberId))};
     const names = await this.accounts.names([...members.filter(m => m.kind === 'person').map(m => m.memberId), ...pending.map(p => p.personId)]);
     const agents: ToolData[] = [];
     for (const member of members.filter(m => m.kind === 'agent' && m.owner)) {
@@ -137,13 +182,30 @@ export class Backend implements CoordinationBackend {
       pending: pending.map(p => ({ ...p, name: names[p.personId] ?? 'Wayfinding member' })) };
   }
   private accountView(account: Account): ToolData {
-    return { personId: account.personId, personalGroupId: `personal_${account.personId}`, subject: account.subject, name: account.name, nickname: account.nickname, email: account.email };
+    return { personId: account.personId, personalGroupId: `personal_${account.personId}`, subject: account.subject, name: account.name, nickname: account.nickname, email: account.email,descriptor:account.descriptor, ...(this.sealedMode?{contentFormat:'sealed-v1'}:{}) };
   }
   async execute(subject: string, supplied: Command, clientId = 'trusted-host'): Promise<ToolData> {
+    if(this.sealedMode&&(Object.hasOwn(sealedInputs,supplied.tool)||/^(artifact_|mls_|library_|topic_|post_|conversation_|board_|round_|interview_|project_|task_)/.test(supplied.tool)))throw new Refused(SEALED_NOTICE+'; use the sealed client contract');
+    await this.recoverWrites();
     const result = await this.executeCommand(subject, supplied, clientId);
     const account = await this.accounts.lookup(subject);
+    const revocation = await this.recoverWrites(account?.personId);
+    if (revocation.state === 'pending') result.revocation = { state: revocation.state, retryAt: revocation.retryAt };
     if (account) await this.accounts.observeClient(account.personId, clientId);
     return result;
+  }
+  async recoverWrites(personId?: string): Promise<WriteDrain> {
+    const pending = await this.accounts.drainWrites(personId);
+    if (!pending.permits.length) return pending;
+    // Bound observation, not the write: a timed-out cancellation remains uncertain.
+    const drain = Promise.all(pending.permits.map(async permit => {
+      try { return await this.accounts.settleWrite(await this.journey(permit.target).cancelWrite(permit)); }
+      catch { return; /* Unavailable is pending, never evidence of cancellation. */ }
+    }));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try { await Promise.race([drain, new Promise<void>(resolve => { timer = setTimeout(resolve, 1_000); })]); }
+    finally { if (timer !== undefined) clearTimeout(timer); }
+    return this.accounts.drainWrites(personId);
   }
   private async executeCommand(subject: string, supplied: Command, clientId: string): Promise<ToolData> {
     const command = parseCommand(supplied.tool, supplied.input);
@@ -155,12 +217,12 @@ export class Backend implements CoordinationBackend {
     catch (error) { if (command.tool === 'journey_invite') throw new Refused('Only guides may invite'); throw error; }
     if (command.tool === 'mls_key_package_publish' || command.tool === 'mls_key_package_fetch') {
       requireAccountCapability(actor, 'device.keys');
-      return this.accounts.group(account.personId, command);
+      return this.accounts.group(account.personId, command, actor);
     }
     if (isRelay(command)) {
       if (command.input.groupId.startsWith('personal_')) {
         requireAccountCapability(actor, 'device.keys');
-        return this.accounts.group(account.personId, command);
+        return this.accounts.group(account.personId, command, actor);
       }
       return this.journey(command.input.groupId).execute(account.personId, command, undefined, actor);
     }
@@ -195,7 +257,7 @@ export class Backend implements CoordinationBackend {
         const agents = z.array(z.record(z.string(), z.unknown())).parse(data.agents);
         return { agents: await Promise.all(agents.map(async agent => ({ ...agent, journeys: agent.live ? await this.agentMemberships(account.personId, String(agent.agentId)) : [] }))) };
       }
-      case 'offer_set': case 'offer_list': case 'offer_publish': case 'offer_retire': case 'offer_settings':
+      case 'offer_journey_set': case 'offer_set': case 'offer_list': case 'offer_publish': case 'offer_retire': case 'offer_settings':
         return this.accounts.agentCommand(account.personId, clientId, command);
       case 'agent_create': case 'agent_narrow': case 'agent_card': case 'client_list':
         return this.accounts.agentCommand(account.personId, clientId, command);
@@ -219,7 +281,7 @@ export class Backend implements CoordinationBackend {
       }
       case 'personal_group_add': case 'personal_group_read': case 'personal_group_remove':
         requireAccountCapability(actor, 'device.keys');
-        return this.accounts.group(account.personId, command);
+        return this.accounts.group(account.personId, command, actor);
       case 'journey_invite': {
         const journey = this.journey(command.input.journeyId);
         if (command.input.email === undefined) return this.named(await journey.execute(account.personId, command, undefined, actor));
@@ -250,6 +312,7 @@ export class Backend implements CoordinationBackend {
     const actor = await this.actor(subject, clientId); return this.journey(journeyId).watchInbox(actor.personId, actor);
   }
   async task(subject: string, method: TaskMethod, taskId: string, clientId = 'trusted-host'): Promise<ToolData> {
+    if(this.sealedMode&&method==='update')throw new Refused('Task answers must use the sealed task_step answer exchange; plaintext inputResponses refused');
     const match = /^task_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.exec(taskId);
     if (!match) throw new Refused('Invalid task id');
     const actor = await this.actor(subject, clientId); return this.journey(`journey_${match[1]}`).task(actor.personId, method, taskId, actor);
@@ -260,14 +323,14 @@ export class MemoryBackend extends Backend {
   readonly journeyStores: Map<string, MemoryStorage>;
   readonly blobs: MemoryBlobs;
   readonly accountsHost: AccountsHost;
-  constructor(profiles: Profiles, now: () => number = Date.now, verifier?: PasskeyVerifier) {
+  constructor(profiles: Profiles, now: () => number = Date.now, verifier?: PasskeyVerifier, sealedMode=false) {
     const storage = new MemoryStorage(), stores = new Map<string, MemoryStorage>(), hosts = new Map<string, JourneyHost>(), blobs = new MemoryBlobs();
-    const accounts = new AccountsHost(storage, profiles, blobs, verifier, now);
+    const accounts = new AccountsHost(storage, profiles, blobs, verifier, now,sealedMode);
     super(accounts, id => {
       let host = hosts.get(id);
-      if (!host) { const store = new MemoryStorage(); stores.set(id, store); host = new JourneyHost(store, now, blobs, { directory: () => accounts.offerDirectory(), stand: d => accounts.standingDecision(d), reserve: r => accounts.reserveAllowance(r), release: id => accounts.releaseAllowance(id) }); hosts.set(id, host); }
+      if (!host) { const store = new MemoryStorage(); stores.set(id, store); host = new JourneyHost(store, now, blobs, { directory: () => accounts.offerDirectory(), stand: d => accounts.standingDecision(d), reserve: r => accounts.reserveAllowance(r), approve: r => accounts.approveAllowance(r), release: (id, permitOnly) => accounts.releaseAllowance(id, permitOnly) }, accounts); hosts.set(id, host); }
       return host;
-    });
+    },sealedMode);
     this.accountsHost = accounts; this.accountStorage = storage; this.journeyStores = stores; this.blobs = blobs;
   }
   snapshot(): string {

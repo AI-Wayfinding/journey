@@ -25,6 +25,7 @@ export async function workspacePage(backend: ConsoleBackend, identity: ClientIde
   for (const key of url.searchParams.keys()) if (!allowed.includes(key) || url.searchParams.getAll(key).length !== 1) throw new Refused('Invalid view filter');
   const call = (tool: Parameters<typeof parseCommand>[0], input: Record<string, unknown>) => backend.execute(identity.subject, parseCommand(tool, input), identity.clientId);
   const journey = await call('journey_read', { journeyId });
+  if(backend.sealedMode)return page('Sealed journey',journeyNav(journeyId)+empty('sealed — open in your client','Forum, Library and Sensemaking content is encrypted. Use your local client; this console has no MLS device.'),csrf);
   const root = `/console/journeys/${segment(journeyId)}`;
   const list = (items: string[]) => `<ul>${items.map(i => `<li>${i}</li>`).join('') || '<li>Nothing here yet.</li>'}</ul>`;
   const link = (route: string, name: unknown, className = '') => `<a class="${className}" href="${route}">${escape(name)}</a>`;

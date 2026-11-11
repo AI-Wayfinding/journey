@@ -17,7 +17,7 @@ export class MemoryBlobs implements BlobStore {
     return value ? { async arrayBuffer() { return new Uint8Array(value).buffer; } } : null;
   }
 }
-export function decodeBytes(data: string, maximum: number): Uint8Array {
+export function decodeBytes(data: string, maximum: number): Uint8Array<ArrayBuffer> {
   let raw: string;
   try { raw = atob(data); } catch { throw new Refused('Invalid relay base64'); }
   if (raw.length > maximum || btoa(raw) !== data) throw new Refused('Invalid or oversized relay bytes');
@@ -30,14 +30,21 @@ export function encodeBytes(bytes: Uint8Array): string {
 }
 interface Message { sequence: number; epoch: number; kind: 'handshake' | 'application'; sender: string; key: string; size: number }
 interface Log { sequence: number; epoch: number; messages: Message[] }
+interface BlobVersion { version: number; key: string }
+function blobVersions(raw: unknown, groupId: string, artifactId: string): BlobVersion[] {
+  let versions: (number | BlobVersion)[];
+  try { versions = typeof raw === 'string' ? JSON.parse(raw) : []; }
+  catch { throw new Refused('Invalid stored artifact version index'); }
+  return versions.map(v => typeof v === 'number' ? { version: v, key: objectKey(['artifact', groupId, artifactId, v]) } : v);
+}
 function objectKey(parts: (string | number)[]): string { return JSON.stringify(parts); }
 
 /** Authorization is the host's responsibility; includes every successfully stored version. */
 export async function deleteArtifactBlobs(storage: KeyValueStorage, blobs: BlobStore, groupId: string, artifactId: string): Promise<void> {
   const indexKey = objectKey(['artifactVersions', groupId, artifactId]);
   const raw = await storage.get(indexKey);
-  const versions: number[] = typeof raw === 'string' ? JSON.parse(raw) : [];
-  for (const version of versions) await blobs.delete(objectKey(['artifact', groupId, artifactId, version]));
+  const versions = blobVersions(raw, groupId, artifactId);
+  for (const version of versions) await blobs.delete(version.key);
   await storage.put(indexKey, '[]');
 }
 
@@ -56,7 +63,8 @@ export async function relay(storage: KeyValueStorage, blobs: BlobStore | undefin
       if (log.sequence >= Number.MAX_SAFE_INTEGER || log.messages.length >= 128) throw new Refused('Relay PoC log capacity (128 messages) reached');
       const bytes = decodeBytes(data, 1024 * 1024);
       const sequence = log.sequence + 1;
-      const key = objectKey(['mls', input.groupId, sequence]);
+      // A failed/expired publication must not overwrite an earlier live blob.
+      const key = objectKey(['mls', input.groupId, sequence, crypto.randomUUID()]);
       await blobs.put(key, bytes);
       log.messages.push({ sequence, epoch, kind, sender, key, size: bytes.length });
       log.sequence = sequence; log.epoch = epoch;
@@ -80,18 +88,18 @@ export async function relay(storage: KeyValueStorage, blobs: BlobStore | undefin
     return { deleted: true };
   }
   const { artifactId, version } = command.input;
-  const key = objectKey(['artifact', input.groupId, artifactId, version]);
-  const existing = await blobs.get(key);
+  const indexKey = objectKey(['artifactVersions', input.groupId, artifactId]);
+  const versions = blobVersions(await storage.get(indexKey), input.groupId, artifactId);
+  const reference = versions.find(v => v.version === version);
+  const existing = reference ? await blobs.get(reference.key) : null;
   if (command.tool === 'artifact_blob_get') {
     if (!existing) throw new Refused('Artifact ciphertext not found');
     return { data: encodeBytes(new Uint8Array(await existing.arrayBuffer())) };
   }
   if (existing) throw new Refused('Artifact ciphertext version already exists');
   const bytes = decodeBytes(command.input.data, 10 * 1024 * 1024);
-  const indexKey = objectKey(['artifactVersions', input.groupId, artifactId]);
-  const raw = await storage.get(indexKey);
-  const versions: number[] = typeof raw === 'string' ? JSON.parse(raw) : [];
-  if (!versions.includes(version)) versions.push(version);
+  const key = objectKey(['artifact', input.groupId, artifactId, version, crypto.randomUUID()]);
+  versions.push({ version, key });
   await blobs.put(key, bytes);
   await storage.put(indexKey, JSON.stringify(versions));
   return { stored: true };

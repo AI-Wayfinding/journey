@@ -1,12 +1,109 @@
 # Test the Wayfinding PoC
 
-Wayfinding gives a team and its agents a shared journey: membership, tasks, artifact metadata and bounded agent permissions. A local MCP proxy encrypts and decrypts artifact content. The Cloudflare MCP server coordinates the work and relays ciphertext.
+Wayfinding gives a team and its agents a shared journey with membership, tasks and bounded permissions. In the current sealed-v1 source, the local MCP proxy encrypts descriptive content, including offers, task exchanges and profile/card text. The Cloudflare MCP server coordinates work and relays ciphertext. Routing and authority metadata remain readable.
 
 **Use synthetic data only.** The proxy uses unaudited ts-mls 1.6.4 and WorkOS AuthKit Staging. Do not upload client material, personal data or secrets. This is a proof of concept, not a production service.
 
-## What is new in v2
 
-This revision adds a Worker authorization server without replacing Durable Object classes or clearing existing journeys. It has not been deployed by this change. Existing MCP clients must sign in again after deployment; their AuthKit tokens no longer work at `/mcp`.
+## Sealed content checks (source only)
+
+This stage is not live verification of the public endpoint. Run its tests locally against the in-process Worker and real MLS proxy. The historical walkthroughs below describe older deployments.
+
+### Privacy boundary
+
+- Sealed: journey/project names and purposes; board names/descriptions; topic titles and post bodies; attached conversations; library names, labels, metadata, bodies and versions; round descriptors, guidance, synthesis, interviews and contributions; artifact names and metadata.
+- Also sealed: offer names, descriptions, tags, examples, schemas, resources and instructions; task names, input/output, input requests/answers, decline/failure reasons and conversations; profile name/nickname/email and device/passkey labels; agent/card name and client name.
+- Still readable: authenticated person/agent/device ids, memberships, capabilities, admission rules, ceilings, offer/task ids, pinned offer references/versions, parent links, visibility, statuses, counters, deadlines and byte counts. Accounts retains a keyed email routing index, not raw email. Traffic patterns and ciphertext sizes are visible too.
+- J carries journey material and explicit offer/alias publications; P carries owner-only private items, offer sources and identity descriptors; T carries one task; I carries one participant's private interview. Sharing publishes a separate J copy irreversibly, including to future journey readers. Later interview edits update I and J atomically; the private workspace remains in I.
+- Revocation cannot erase text or keys a former reader already saved. New content requires removal of departed leaves and fresh encryption. Each large revision has a new AES-256-GCM key, even without a group epoch change.
+- Device bindings record the authenticated person/agent, verification key and key package. The client verifies MLS rosters, signatures and content contexts before rendering. An agent without both live `read` and `device.keys` receives an explicit refusal, never an automatic grant.
+- Search terms, labels and kind filters are evaluated locally. A missing audience or retained packet produces `partialIndex`/`contentUnavailable`, not a claim of complete results. Adding a device requires an existing member to re-share entitled live retained history; incomplete local history refuses the transfer.
+- Browser MLS, PRF/recovery and device-trust hardening remain later work. The console shows **sealed — open in your client** for these content views. Personal workspace aliases are device-local. Independent review and an audit of ts-mls remain launch gates; real-data mode is refused.
+
+### Bounds and recovery
+
+A group retains at most 4,096 messages and 32 MiB of ciphertext, without silent eviction. Envelopes are at most 1 MiB, device packages 64 KiB, local payloads 9 MiB and encrypted uploads 10 MiB. Listings are paged at 100 records and 4 MiB. A journey allows 1,024 content records, 128 groups and 128 active preparation tickets; each group allows 128 devices. A separate 32 MiB journey upload budget counts even expired, uncollected ciphertext. Exhausted budgets refuse writes; this stage performs no deletion or cleanup.
+
+Preparation tickets and pending uploads expire after ten minutes. Device checkpoints expire after thirty days without a successful fetch. Large-body uploads become readable only through a committed, entitled record/version reference. Item metadata edits also advance the content revision.
+
+Before final publication, the proxy saves its advanced ratchets and exact pending ciphertext. After a lost reply, it checks the server receipt and either completes locally or retries that same ciphertext. A proved uncommitted, expired ticket can be abandoned without rolling a ratchet back. Unresolved handshake/history delivery fails closed; do not restore an old MLS snapshot.
+
+### Offers, task exchange and private names
+
+Run these checks with synthetic fixtures and enrolled local devices, not the browser console. First use of P creates a personal-workspace journey and requires `journey.create` as well as the action's normal authority and explicit read/device keys. Workspace aliases are device-local; the proxy does not silently add capabilities or recover another device's alias:
+
+1. Define an offer through local `offer_set`. Omit `offer.id` to generate an opaque id; retain the returned id for updates. Supply explicit enabled journey rows. Check `offer_list` opens the private P source for the owner, while `offer_search` opens only the selected J copy. A missing, stale or wrong-group copy must not be discoverable. Search queries and tags must not be sent upstream.
+2. Call `task_prepare` for an offered task. It returns T and `taskId` without creating a task or consuming capacity. The requester creates T. The offering agent and its owner prepare devices, then the requester adds them. Retry local `task_create` with that `taskId` and the original input. A named non-offer assignee follows the same admission step. For an unassigned task, `task_claim_prepare` nominates the claimant, who must join T before claiming.
+3. Supply invalid input through the requester and hostile, correctly encrypted invalid input through the test fixture. The requester must refuse before sealing; the receiver must refuse after opening. A substituted schema snapshot must be refused too. The publication pinned at preparation, not the latest offer or caller-supplied schema, is authoritative. Invalid output must fail at the producer and reader. JSON output without a schema still has the 16 KiB/depth/node limits.
+4. Exercise claim, rounds, `askInput`, requester `answer`, finish, cancel, decline, failure and deadline expiry. A claimant cannot answer for the requester. An unrelated journey member cannot read T or its conversation. Ask/answer/fail use sealed `task_step`; raw MCP `tasks/update` input responses are refused. Tasks extension declarations remain required; get/cancel and working/input-required/completed/failed/cancelled status mapping remain available.
+5. Set private profile fields through local `account_update`. Its optional `publications` map selects journey-specific `{nickname}` copies. Use `agent_descriptor_set` with `{agentId,name,clientName?,publications?}` for private card text and explicit J aliases. `account_read` and `agent_list` open P locally. Omitted publications withdraw current aliases without erasing historical ciphertext. Email and device/passkey labels must never appear in a profile J projection.
+6. Provision an account before enrolling a device: storage must contain neither the fetched AuthKit name nor email. Invitations match trimmed, lower-case authenticated email through HMAC. Editing private profile email must not change routing. Raw nickname/card/passkey rename routes must refuse; OAuth/console controls use ids or the fixed `MCP client` label. Missing `read` or `device.keys` must produce an actionable refusal, never an added grant.
+
+The console can still change authority and admission metadata while locked. Private content uses the browser device below or the local proxy; neither changes the server's ids/status-only view.
+
+### Browser device: unlock, admission and recovery
+
+Use synthetic data only. This is source functionality, not a claim that the public endpoint has been deployed. The hosting Worker can replace both the page and its CSP. MLS and this browser vault have not had an independent security audit.
+
+1. Sign in to `/console`. Add a passkey on **Passkeys**, then return to the page. New registrations request the WebAuthn PRF extension. Older passkeys or unsupported authenticators may need the recovery-code path. Web Locks, IndexedDB, Web Crypto and a secure browser context are required; unavailable storage or locks must refuse rather than fall back to plaintext.
+2. In **Private browser device**, choose the wrapping passkey and select **Create browser device**. Save the random recovery code outside the browser. Retype it and select **I saved the code — create device**. It is displayed only before confirmation, even when PRF works. A cancelled passkey prompt must not enroll a device. With no PRF result, the recovery code is the unlock method. No code or PRF output is sent to the server.
+3. Confirm each fresh passkey prompt for an audience package. The initial personal audience is prepared automatically. First use may create a private workspace, which still needs `journey.create`; enrollment never adds a missing capability. If that audience already exists, its returned `deviceId` needs admission from a surviving member. On the existing device, use `mls_group_add` with the audience, authenticated person id and device id, or fill **Audience id**, **Device id to admit (from its authenticated package)** and **Person id to admit**, then select **Admit device to audience**. On the new browser select **Prepare or synchronize audience** again. Account membership alone does not grant keys.
+4. Open a journey page and select **Prepare journey audience**. Use the same explicit admission path. Read forum/topics/rounds, library items, cards and offers in the private browser panel. It renders validated decrypted values as text, never HTML. **Search library** and **Search offers** decrypt and search locally; results cover only the retained content this device can read. A held/private task may require **Prepare private task audience** and admission to its task group before its content is available.
+5. Try **Seal post**, **Seal library item**, **Seal profile**, **Seal card**, **Seal offer edit**, **Approve sealed** and **Decline sealed**. The post, text, profile/card descriptions, offer definition and decision reason must be absent from outgoing request bodies and server storage. IDs, lifecycle/admission settings and encrypted envelopes remain visible. Legacy authority forms cannot submit descriptive plaintext.
+6. Select **Lock device**. Decrypted output and key access must disappear. **Unlock with passkey** uses PRF locally; **Unlock with recovery code** must refuse a wrong code and open with the saved code. Reload and unlock again to read the committed state. Another tab must refuse concurrent unlock. Lock/logout/pagehide retains the writer fence through pending IndexedDB commits, then releases it. No plaintext cache is stored.
+7. While locked, expand **Listed browser devices**. Revoke one browser. Its linked leaves use the same removal fence as other devices. Keep another admitted device alive, synchronize it and write new content: the removed browser must neither fetch nor decrypt it, even with its old local state. Deleting a wrapping passkey is refused while it has live browser leaves. Previously decrypted content cannot be recalled.
+
+**Recovery is local, not escrow.** A recovery code opens this browser's existing encrypted IndexedDB vault. It cannot recreate missing storage or restore an old MLS ratchet. A new browser creates new keys and needs a surviving member to admit it. Losing all devices and recovery material loses the content; a saved code alone is also insufficient if the local vault is gone. Account recovery does not recover content keys. A lost wrapping passkey cannot authorize a new audience package; use a fresh device with a new passkey and surviving-member admission. No server backup or vault export is supplied.
+
+### Scripted browser proof
+
+Start an isolated Chrome profile with a debugging port, or use `agent-browser --session sealing-proof open about:blank` followed by `agent-browser --session sealing-proof get cdp-url`. Read that port's `/json/list` and use its page-target WebSocket URL:
+
+```sh
+node packages/browser/test/console-e2e.mjs ws://127.0.0.1:PORT/devtools/page/TARGET
+```
+
+The default harness intercepts application requests and serves the in-process console with a synthetic session. It contacts no remote Worker. It adds a CTAP2.1 virtual authenticator with `hasPrf: true`, registers a real PRF passkey, asserts the PRF wrapper exists, creates/unlocks the device, seals a profile, scans HTTP/storage, tests lock/write fencing and wrong/right recovery, and rejects CSP/browser errors. Add `--no-prf` with a different fresh profile to exercise authenticator PRF unavailability, recovery-only creation and code unlock. The rendered marker contains an image/onerror payload and must remain inert text. Chrome with CDP WebAuthn PRF support is required. Use a fresh profile each run: the harness removes its virtual authenticator but deliberately retains encrypted local storage. Close the isolated browser afterwards.
+
+To test a local Worker, first start `npx wrangler dev` from `packages/mcp`, prepare a synthetic signed-in session in that same browser origin and pass `--wrangler http://127.0.0.1:8787` to the script. Only loopback targets are accepted. Configure local AuthKit/console secrets and callback routing yourself; the harness does not mint a real Worker session or deploy anything. This optional forwarding path is supplied but has not been exercised against wrangler in this stage. The in-process real-browser path has passed, including native PRF creation/unlock, encrypted IndexedDB, sealed profile writes, lock/write race and recovery.
+
+### Automated checks
+
+From the repository root:
+
+```sh
+node --test packages/proxy/test/sealed.test.ts packages/proxy/test/sealed-tasks.test.ts packages/proxy/test/sealed-identities.test.ts packages/mcp/test/sealed-contract.test.ts
+node --test packages/browser/test/vault.test.ts packages/mcp/test/sealing-browser.test.ts packages/mcp/test/console-browser.test.ts
+npm run typecheck
+npm test
+npm run check:rules
+(cd packages/mcp && npx wrangler deploy --dry-run)
+```
+
+The storage canary writes distinct markers through the proxy for every sealed field type, then scans all Durable Object values, including side keys, and all blob bytes. It also checks private interview isolation, future-reader history, irreversible sharing and later shared updates, large revision keys and tampering, assigned source isolation, attributed concurrent contributions, closed-round successors, personal copy/move and exact-once lost-reply recovery. A device-revocation race occurs between Journey validation and Accounts permit issuance.
+
+Offer, task and identity canaries additionally scan every new descriptive field, including schema annotations, input/output, requests/answers, decline/failure reasons, conversations, email and device/passkey labels. Scans cover all DO values/side keys and raw blob bytes; early scans detect a leak before an MLS decoder can fail for another reason. Plaintext remote offer/task/identity writes are refused.
+
+The following temporary mutations were each observed to turn a passing test red, then restored:
+
+| Bypassed control | Observed failure |
+| --- | --- |
+| Replace MLS sealing with the clear signed packet | Storage scan finds `CANARY-journey-name-40fa64` |
+| Remove envelope audience equality | Wrong-audience assertion no longer throws |
+| Remove decoded byte-size equality | Size assertion no longer throws |
+| Replace the fixed content-type literal with an arbitrary string | Unknown-format assertion no longer throws |
+| Omit live audience-device checks during permit issuance | Revocation-race publication no longer rejects |
+| Bypass sealing for offer/task/profile/card packets | Three canaries fail on `OFFER-NAME-CANARY`, `TASK-NAME-CANARY` and `PRIVATE-PROFILE-NAME` |
+| Remove receiver validation of opened task input | Hostile invalid-input assertion no longer rejects |
+| Remove envelope audience equality for the new exchange | Wrong-group envelope assertion no longer throws |
+| Derive the recovery key from a constant instead of the supplied code | Recovery test exits 1: `Missing expected rejection` for the wrong code |
+| Add `unsafe-eval` to the console's `script-src` | CSP test exits 1: forbidden-policy assertion fails |
+
+Malformed/plaintext sealed inputs, incomplete multi-envelope manifests, oversized input, noncanonical base64 and unauthorized blob references must leave published content unchanged. Restore every mutation before running the full gates. A dry run bundles only; it does not authorize a deployment.
+
+## Historical v2 walkthrough (not sealed-v1)
+
+The Worker authorization server replaces AuthKit MCP tokens with its own tokens; existing MCP clients must sign in again after deployment. The sealed-v1 source also switches bindings to fresh `JourneySealedV1` and `AccountsSealedV1` classes with an appended migration. Old classes and data remain intact. Neither change is deployed by this work, and changing bindings does not erase old plaintext.
 
 ### Connect and name an agent
 
@@ -16,13 +113,13 @@ This revision adds a Worker authorization server without replacing Durable Objec
 4. Call `whoami`. Check the person ID and the acting agent's ID, name, capabilities and journeys. The connection always acts as that agent. It cannot become the person or choose somebody else's agent.
 5. Sign in again from the same client. The existing live agent must be pre-filled and updated, not duplicated.
 
-### Offers and held requests (source-stage checks)
+### Legacy offers and held requests
 
-These controls have not been deployed by this change. Use synthetic input only: the server can read offer definitions, request input, output and decline reasons. Sealed exchange and a browser encryption device are later stages.
+These steps describe the earlier unsealed implementation. They are not the current sealed-v1 privacy or UI contract; use the source checks above. Use the browser-device steps above for the current sealed implementation.
 
 1. Give an offering agent `task.manage` in a journey where its owner has write authority. Give a separate requesting agent `task.manage` too. To let the offering agent define its own work, its owner must also grant `offer.manage`.
 2. Define an offer with a short name, description, tags, examples and an object input schema. For example, require a string `question` and disallow extra properties. An agent-defined offer must remain a draft until its owner publishes it, unless the owner has enabled publication without review.
-3. Search offers across the journey. The draft must be absent. Publish it and search again. Retire it or remove the offering agent's journey membership; it must disappear from discovery and refuse new requests.
+3. Search offers in the journey. A draft must be absent. Publish it: it must still be absent because a new offer is Off everywhere. On the agent's console page, turn this offer On for this journey. Only that row should appear in discovery. Join another journey later: its row must still be Off. Retire the offer or remove the offering agent's journey membership; discovery and new requests must stop.
 4. Submit a request with `agentId`, `offerId` and `input`, plus a deadline and round cap. Invalid input, extra properties and overly deep or large input must be refused without saving a task. A saved task must record the offer version.
 5. Keep the default Members preset. A request from a person is allowed; a request from an agent is held. Ask me holds non-owner requests. A deny rule must answer only that the request was not accepted and save no task. An allow rule over its count limit must hold the excess request instead of denying it.
 6. Open the offering agent's console page. Its offers and pending requests should appear. Approve one request and decline another. Only the owner, or an authorised agent whose live card includes `offer.decide`, may decide. `task.manage` alone must not suffice. Check a third member cannot see held request content.
@@ -30,10 +127,14 @@ These controls have not been deployed by this change. Use synthetic input only: 
 8. Finish an approved task as the offering agent. When the offer defines an output schema, malformed output must be refused without changing the task. Let another held request reach its deadline: it must expire even if no agent claims it.
 9. Open Offer settings. Try to allow publication without review or raise the admission ceiling without a passkey; the change must be refused. Confirm the exact wider settings with a passkey and check they take effect. Tighten them without a passkey. An agent must never change its owner's ceiling.
 10. Remove a standing rule from the console, then try to submit its stale removal form again. The old form must be refused without removing another rule. New requests must fall through to the remaining rules.
+11. Check the always-visible agent-wide ceiling and per-journey rows. Select **Inherit agent cap**, or **Per-day limit** and a positive value. Zero and a value above a finite agent ceiling must be refused. Save, then try an old form: it must be refused. An omitted API limit preserves its old value; use `clearLimit: true` to restore inheritance. An agent with `offer.manage` must not enable a row, raise its limit or clear a finite limit.
+12. Set the agent ceiling to 1 admitted task per rolling 24 hours. Admit one request. Create another held request and approve it: it must stay held. Repeat approval of the first: usage must remain 1. Try another offer in another journey: it must also stay held. Cancel or finish the admitted task: capacity must not return. At exactly 24 hours after the permit, another approval can succeed. Lower a ceiling below current usage: new work stays held, existing work continues, and row limits clamp without resetting counts.
+13. Set one offer/journey limit to 1, under a larger or unlimited agent ceiling. Requests from different members share that row limit; another row has its own limit, still bounded by the agent ceiling. Turn the row Off: it disappears, new requests fail and held approvals are refused. An already admitted task can finish. Turning it On again must not reset usage or enable another row.
+14. On synthetic legacy fixtures, check both wildcard and explicit-list offers migrate to Off entries and require owner re-enablement. Old receipts conservatively consume permit capacity for 24 hours from migration because earlier manual approvals were not recorded separately. This migration must not claim to encrypt or reset content.
 
 Input and output must be JSON objects, at most 16 KiB, 4,096 values and eight nesting levels. Schemas are also limited to 16 KiB and 12 nesting levels. Supported schema keywords are `type` (one type), `properties`, `required`, boolean `additionalProperties`, `items`, scalar `enum`, `minimum`, `maximum`, `minLength`, `maxLength`, `minItems`, `maxItems`, `title` and `description`. References, patterns and other keywords are refused, not ignored. Output uses the schema saved with the request, even after an offer changes.
 
-Limits use rolling periods within one journey. A per-requester allowance counts every saved request for that offer, including held or ended requests. The owner's optional daily cap counts all of their offering agent's requests in that journey; it is not a cross-journey quota. Held requests remain private to their requester, the requester's person and the offering owner's authorised deciders, including after decline or expiry. Approval admits the task to the journey's shared task list.
+Limits use rolling windows. A per-requester allowance counts every saved request for one offer across every journey, including held or ended requests. The agent-wide daily ceiling counts admission permits across all its offers and journeys, not held rows. An optional journey ceiling counts permits for one offer in that journey across all requesters. Both finite ceilings are hard caps, including manual approvals. Receipts and permits remain for one week; definite precommit failures can release reservations, but committed cancellation, completion and lost replies do not refund them. Held requests remain private to their requester, the requester's person and the offering owner's authorised deciders, including after decline or expiry. Approval admits the task to the journey's shared task list.
 
 MCP Tasks reports pending approval as `working` with an awaiting-approval message, completion as `completed`, expiry or decline as `failed`, and cancellation as `cancelled`. The task-rule status remains available separately.
 
@@ -91,11 +192,27 @@ The MCP endpoint is `https://poc.wayfinding.support/mcp`. Its OAuth issuer is `h
 
 ### Server setup (deployment operator only)
 
-The Worker still needs its existing **`WORKOS_API_KEY` secret** for Staging profile provisioning and **`CONSOLE_SECRET`** (at least 32 bytes) for console sessions. Keep the existing `AUTHKIT_ISSUER`, `AUTHKIT_AUTHORIZE_URL` and `MCP_RESOURCE` variables. No new secret or binding is required. `MCP_RESOURCE` determines the new issuer origin. Keep the current Accounts and Journey Durable Object classes and migrations unchanged. Do not reset data. Retain the AuthKit registration of `/console/client.json` with `/console/callback` as its redirect. Changing secrets can publish a Worker version, so this no-deploy change does not set any.
+The Worker needs the existing **`WORKOS_API_KEY` secret** for Staging profiles and **`CONSOLE_SECRET`** (at least 32 bytes) for console sessions. Keep `AUTHKIT_ISSUER`, `AUTHKIT_AUTHORIZE_URL` and `MCP_RESOURCE`; the resource determines the issuer origin. The sealed-v1 configuration switches bindings to the new sealed classes and appends a migration while retaining old classes and data. Do not reset data or deploy this stage. Retain the AuthKit registration of `/console/client.json` with `/console/callback` as its redirect. Secret changes can publish a Worker version, so this work changes no secret.
+
+## Artifact revision-key checks (source only)
+
+The proxy encrypts artifact bodies and now gives every new revision a fresh key, including when the MLS epoch stays the same. A removed member's cached key must not decrypt a new version of an old artifact. The remaining member must still read it. A failed personal-artifact upload must leave the previous revision readable, including after a proxy restart.
+
+The revision-key cache uses named records. An authenticated MLS artifact id such as `__proto__` must not alter object prototypes. The suite also checks that malformed local JSON does not expose stored content in an error.
+
+Run the focused checks from the repository root:
+
+```sh
+node --test packages/proxy/test/proxy.test.ts
+```
+
+The storage test scans DO values, side keys and blob bytes for an artifact-body marker. It was checked with encryption bypassed: the scan failed on the marker, then passed after encryption was restored. This covers the existing encrypted artifact-body path only. It does not establish privacy for names or metadata.
+
+This historical unsealed artifact test did not protect forum/library/sensemaking metadata. Current sealed-v1 checks above cover those fields, irreversible interview sharing, offers, task exchanges and identity descriptors. They do not establish that the public endpoint has been upgraded or that old plaintext data has been erased.
 
 ## Connect the local proxy
 
-The local proxy remains required to encrypt and decrypt sealed artifact content. Give its agent the account capability `device.keys` at Worker consent. It starts unchecked, including on reauthorization. Select it and confirm with a registered passkey; a fresh login alone cannot grant it. Ordinary remote coordination clients should leave it off. The automated tests cover proxy bootstrap and a sealed-content round-trip with a Worker agent token; this version has not had a live smoke test.
+The local proxy is the stdio client option for sealed content; the console uses its browser device above. Give its agent the account capability `device.keys` at Worker consent. It starts unchecked, including on reauthorization. Select it and confirm with a registered passkey; a fresh login alone cannot grant it. Ordinary remote coordination clients should leave it off. The automated tests cover proxy bootstrap and a sealed-content round-trip with a Worker agent token; this version has not had a live smoke test.
 Add this server to a client's local MCP configuration, for example Claude Code's `.mcp.json`. Replace both absolute paths; JSON arguments do not expand `~`.
 
 ```json

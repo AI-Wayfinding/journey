@@ -15,7 +15,9 @@
     "@hpke/core": "1.9.0",
     "@modelcontextprotocol/client": "2.4.0",
     "@modelcontextprotocol/server": "2.4.0",
+    "@noble/curves": "2.0.1",
     "@noble/hashes": "2.4.0",
+    "@noble/post-quantum": "0.5.2",
     "ts-mls": "1.6.4",
     "zod": "4.6.7"
   },

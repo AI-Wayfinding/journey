@@ -1,0 +1,6 @@
+{
+  "name": "@ai-wayfinding/browser", "version": "0.1.0", "private": true, "type": "module",
+  "scripts": { "build": "node scripts/build.ts", "check": "node scripts/build.ts --check", "typecheck": "tsc --noEmit -p tsconfig.json", "test": "node --test test/*.test.ts" },
+  "dependencies": { "@ai-wayfinding/proxy": "0.1.0", "zod": "4.6.7" },
+  "devDependencies": { "esbuild": "0.28.2", "typescript": "5.9.3", "@types/node": "22.20.5" }
+}

@@ -134,6 +134,12 @@ export async function createMlsGroup(identity: Uint8Array): Promise<MlsGroup> {
   return {
     audited: false,
     library,
+    matchesRoster(packages) {
+      if(!state)return false;
+      const leaves=state.ratchetTree.filter(n=>n?.nodeType==='leaf');
+      const expected=packages.map(keyPackage);
+      return leaves.length===expected.length&&leaves.every(n=>n?.nodeType==='leaf'&&expected.some(k=>sameBytes(n.leaf.signaturePublicKey,k.leafNode.signaturePublicKey)&&n.leaf.credential.credentialType==='basic'&&k.leafNode.credential.credentialType==='basic'&&sameBytes(n.leaf.credential.identity,k.leafNode.credential.identity)));
+    },
     get epoch() { return state ? Number(state.groupContext.epoch) : null },
     keyPackage() {
       return encodeMlsMessage({version: 'mls10', wireformat: 'mls_key_package', keyPackage: publicPackage})
@@ -227,7 +233,7 @@ export async function createMlsGroup(identity: Uint8Array): Promise<MlsGroup> {
       const input = bytes.slice()
       return serial(async () => {
         unused()
-        const parsed: unknown = JSON.parse(textDecoder.decode(input))
+        let parsed:unknown;try{parsed=JSON.parse(textDecoder.decode(input))}catch{throw new Error('Invalid MLS state JSON')}
         const v = record(parsed)
         if (v.format !== 'wayfinding-mls-state' || v.version !== 1 || v.library !== 'ts-mls@1.6.4') throw new Error('Unsupported MLS state format')
         const kp = keyPackage(byteArray(v.keyPackage))

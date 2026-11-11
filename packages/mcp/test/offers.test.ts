@@ -20,7 +20,11 @@ async function fixture() {
   await call('bob', 'agent_add', { journeyId, agentId: requesterId });
   const definition = { id: 'review', name: 'Review', description: 'Synthetic work', inputSchema: { type: 'object', properties: { question: { type: 'string' } }, required: ['question'], additionalProperties: false } };
   const define = (extra: Record<string, unknown> = {}, actingAgent?: string) => call('alice', 'offer_set', { agentId, actingAgent, offer: { ...definition, ...extra } });
-  const publish = () => call('alice', 'offer_publish', { agentId, offerId: 'review' });
+  const publish = async () => {
+    await call('alice', 'offer_publish', { agentId, offerId: 'review' });
+    const offer = ((await call('alice', 'offer_list', { agentId })).offers as { version: number }[])[0]!;
+    await call('alice', 'offer_journey_set', { agentId, offerId: 'review', journeyId, expectedVersion: offer.version, enabled: true });
+  };
   const request = (input: unknown = { question: 'Hello' }, actingAgent?: string) => call('bob', 'task_create', { journeyId, name: 'Review this', agentId, offerId: 'review', input, maxRounds: 2, deadline: now + 3_600_000, actingAgent });
   const tasks = async () => (await call('alice', 'journey_read', { journeyId })).tasks as Record<string, unknown>[];
   return { backend, call, alice, bob, journeyId, agentId, requesterId, define, publish, request, tasks, advance: (ms: number) => { now += ms; } };
@@ -38,7 +42,7 @@ test('offers: schema rejection leaves persisted state unchanged', async () => {
   assert.equal(task.status, 'claimed');
   assert.equal(task.claimant, f.agentId);
   assert.equal(task.offerId, 'review');
-  assert.equal(task.offerVersion, 2);
+  assert.equal(task.offerVersion, 3);
 });
 
 test('offers: a deny leaves no record, while the first matching rule takes precedence', async () => {
@@ -137,12 +141,12 @@ test('offers: output checks use the recorded version and invalid output cannot c
   assert.equal(f.backend.snapshot(), before);
   await f.call('alice', 'task_step', { journeyId: f.journeyId, taskId, action: 'finish', output: { answer: 'Synthetic result' }, actingAgent: f.agentId });
   const result = (await f.tasks())[0]!;
-  assert.equal(result.status, 'done'); assert.equal(result.offerVersion, 2);
+  assert.equal(result.status, 'done'); assert.equal(result.offerVersion, 3);
   assert.deepEqual(result.output, { answer: 'Synthetic result' });
 });
 test('offers: search follows live membership and card authority and supports tags and journey scope', async () => {
   const f = await fixture();
-  await f.define({ tags: ['review'], journeys: [f.journeyId] }); await f.publish();
+  await f.define({ tags: ['review'], journeySettings: { [f.journeyId]: { enabled: false } } }); await f.publish();
   const search = (tags = ['review']) => f.call('bob', 'offer_search', { journeyId: f.journeyId, tags, query: 'REVIEW' });
   assert.equal((await search()).offers instanceof Array, true);
   assert.equal(((await search()).offers as unknown[]).length, 1);
@@ -213,7 +217,7 @@ test('offers: durable adapters retry an ambiguous standing decision once after e
   await new Journey({ storage }, env, () => 1_800_000_060_000).alarm();
   assert.equal((await f.tasks())[0]!.status, 'claimed');
   const offers = (await backend.execute('alice', parseCommand('offer_list', { agentId: f.agentId }))).offers as { version: number; admission: { rules: unknown[] } }[];
-  assert.equal(offers[0]!.version, 3, 'ambiguous retry must not advance the policy version twice');
+  assert.equal(offers[0]!.version, 4, 'ambiguous retry must not advance the policy version twice');
   assert.equal(offers[0]!.admission.rules.length, 2);
   assert.equal(storage.alarmAt, 1_800_003_600_000);
   await f.request();
@@ -266,7 +270,7 @@ test('offers: reservation retries survive eviction and reject conflicting or sta
   const { Accounts } = await import('../src/objects.ts');
   let accounts = new Accounts({ storage: f.backend.accountStorage }, { WORKOS_API_KEY: 'synthetic-unused' });
   const send = (body: Record<string, unknown>) => accounts.fetch(new Request('https://accounts.internal', { method: 'POST', body: JSON.stringify(body) }));
-  const request = { taskId: 'task_synthetic', agentId: f.agentId, offerId: 'review', version: 2, journeyId: f.journeyId, requesterId: f.bob, requesterPersonId: f.bob, isAgent: false, isGuide: false };
+  const request = { taskId: 'task_synthetic', agentId: f.agentId, offerId: 'review', version: 3, journeyId: f.journeyId, requesterId: f.bob, requesterPersonId: f.bob, isAgent: false, isGuide: false };
   const reserve = (r = request) => send({ action: 'reserveAllowance', request: r });
   assert.deepEqual(await (await reserve()).json(), { value: 'allow' });
   const reserved = f.backend.snapshot();
@@ -281,7 +285,7 @@ test('offers: reservation retries survive eviction and reject conflicting or sta
   assert.equal(f.backend.snapshot(), edited, 'stale and malformed reservations must not consume allowance');
   assert.equal((await send({ action: 'releaseAllowance', taskId: request.taskId })).status, 200);
   assert.equal((await send({ action: 'releaseAllowance', taskId: request.taskId })).status, 200);
-  assert.deepEqual(await (await reserve({ ...request, taskId: 'task_new', version: 3 })).json(), { value: 'allow' });
+  assert.deepEqual(await (await reserve({ ...request, taskId: 'task_new', version: 4 })).json(), { value: 'allow' });
 });
 
 test('offers: an aborted journey commit releases the shared allowance', async () => {
@@ -339,6 +343,9 @@ for (const allowance of ['agent', 'requester', 'requester-agent'] as const) for 
       await f.define({ id: 'other', preset: 'Open' });
       await f.call('alice', 'offer_publish', { agentId: f.agentId, offerId: 'other' });
     }
+    const secondOfferId = allowance === 'agent' ? 'other' : 'review';
+    const secondOffer = ((await f.call('alice', 'offer_list', { agentId: f.agentId })).offers as { id: string; version: number }[]).find(o => o.id === secondOfferId)!;
+    await f.call('alice', 'offer_journey_set', { agentId: f.agentId, offerId: secondOfferId, journeyId: second, expectedVersion: secondOffer.version, enabled: true });
     const requestSecond = () => f.call(allowance === 'agent' ? 'eve' : 'bob', 'task_create', {
       journeyId: second, name: 'Second request', agentId: f.agentId, offerId: allowance === 'agent' ? 'other' : 'review',
       actingAgent: allowance === 'requester-agent' ? f.requesterId : undefined, input: { question: 'Synthetic' }, maxRounds: 1, deadline: 1_800_100_000_000,

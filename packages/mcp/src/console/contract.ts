@@ -6,7 +6,13 @@ import type { AuthenticationResponseJSON } from '@simplewebauthn/server';
 
 export const registration = z.object({ id: z.string().min(1).max(2048), rawId: z.string().max(2048), type: z.literal('public-key'), clientExtensionResults: z.object({}).strip(),
   response: z.object({ clientDataJSON: z.string().max(8192), attestationObject: z.string().max(65536), transports: z.array(z.string()).max(10).optional() }).strip() }).strip();
+export const browserBinding = z.object({ deviceId: z.string().regex(/^device_[0-9a-f-]{36}$/), verificationKey: z.string().max(128), data: z.string().max(90000) }).strict();
+const browserFields = { browserId: z.string().uuid(), credentialId: z.string().min(1).max(2048), device: browserBinding };
 export const passkeyOperation = z.discriminatedUnion('op', [
+  z.object({ op: z.literal('browser_list') }).strict(),
+  z.object({ op: z.literal('browser_check'), browserId: z.string().uuid() }).strict(),
+  z.object({ op: z.literal('browser_begin'), ...browserFields }).strict(),
+  z.object({ op: z.literal('browser_finish'), ...browserFields, assertion: z.object({ id: z.string(), rawId: z.string(), type: z.literal('public-key'), clientExtensionResults: z.object({}).strip(), response: z.object({ clientDataJSON: z.string(), authenticatorData: z.string(), signature: z.string(), userHandle: z.string().optional() }).strict() }).strict() }).strict(),
   z.object({ op: z.literal('list') }).strict(),
   z.object({ op: z.literal('begin') }).strict(),
   z.object({ op: z.literal('finish'), credential: registration }).strict(),
@@ -26,6 +32,9 @@ export const recordOperation = z.discriminatedUnion('op', [
 ]);
 export type RecordOperation = z.infer<typeof recordOperation>;
 export interface ConsoleBackend extends CoordinationBackend {
+  readonly sealedMode?:boolean;
+  sealedExecute?(subject:string,tool:string,input:unknown,clientId?:string):Promise<ToolData>;
+  whoami?(subject:string,clientId:string):Promise<ToolData>;
   oauth(operation: import('../oauth-contract.ts').OAuthOperation): Promise<import('../oauth-contract.ts').OAuthResult>;
   consentAgent(subject: string, id: string, consent: import('../oauth-contract.ts').AgentConsent, assertion?: AuthenticationResponseJSON): Promise<string>;
   manageAgent(identity: ClientIdentity, agentId: string, name: string, journeys: string[]): Promise<void>;
@@ -33,6 +42,7 @@ export interface ConsoleBackend extends CoordinationBackend {
   consoleRecord(operation: RecordOperation): Promise<ConsoleRecord | undefined>;
   beginAuthorization(identity: ClientIdentity, change: CardChange): Promise<{ challenge: string }>;
   completeAuthorization(identity: ClientIdentity, change: CardChange, assertion: AuthenticationResponseJSON | undefined): Promise<ToolData>;
+
 }
 export interface ConsoleOptions {
   secret: string;
