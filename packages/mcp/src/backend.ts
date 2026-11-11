@@ -11,6 +11,8 @@ import { isForumCommand, forumCommandJourney } from './forum.ts';
 import { isRoundCommand, roundJourney } from './rounds.ts';
 import { MemoryStorage } from './storage.ts';
 import { MemoryBlobs, encodeBytes } from './relay.ts';
+import { sealedInputs, sealedRouting, SEALED_NOTICE, type DeviceBinding } from './sealed-contract.ts';
+import type { SealedAuthority } from './sealed-content.ts';
 
 import type { RecordOperation, ConsoleRecord, PasskeyOperation } from './console/contract.ts';
 const namedState = z.object({
@@ -21,6 +23,9 @@ import type { OAuthPort, OAuthOperation, AgentConsent } from './oauth-contract.t
 import { agentConsent } from './oauth-contract.ts';
 import { cardCaps } from './agents.ts';
 export interface AccountsPort extends OAuthPort, WritePort {
+  sealedDevice?(personId:string,clientId:string,tool:string,input:unknown):Promise<ToolData>;
+  deviceBinding?(deviceId:string):Promise<DeviceBinding>;
+  reserveDevice?(deviceId:string,groupId:string):Promise<DeviceBinding>;
   drainWrites(personId?: string): Promise<WriteDrain>;
   offerDirectory(): Promise<OfferAgent[]>;
   standingDecision(decision: StandingDecision): Promise<void>;
@@ -40,6 +45,7 @@ export interface AccountsPort extends OAuthPort, WritePort {
   completeAuthorization(identity: ClientIdentity, change: CardChange, assertion: AuthenticationResponseJSON | undefined): Promise<ToolData>;
 }
 export interface JourneyPort {
+  sealed?(personId:string,tool:string,input:unknown,actor:Actor,authority:SealedAuthority):Promise<ToolData>;
   cancelWrite(permit: WritePermit): Promise<WriteReceipt>;
   syncAgent(personId: string, agentId: string, name: string, present: boolean): Promise<void>;
   requireGuide(personId: string, command: Command, actor?: Actor): Promise<void>;
@@ -54,7 +60,18 @@ export interface JourneyPort {
 export class Backend implements CoordinationBackend {
   private readonly accounts: AccountsPort;
   private readonly journey: (id: string) => JourneyPort;
-  constructor(accounts: AccountsPort, journey: (id: string) => JourneyPort) { this.accounts = accounts; this.journey = journey; }
+  readonly sealedMode:boolean;
+  constructor(accounts: AccountsPort, journey: (id: string) => JourneyPort, sealedMode=false) { this.accounts = accounts; this.journey = journey;this.sealedMode=sealedMode; }
+  async sealedExecute(subject:string,tool:string,input:unknown,clientId='trusted-host'):Promise<ToolData>{
+    if(!this.sealedMode)throw new Refused('Sealed generation not enabled');
+    const parsed=sealedInputs[tool]?.safeParse(input);if(!parsed?.success)throw new Refused('Invalid sealed fields or unknown format');const named=parsed.data as Record<string,unknown>;
+    await this.recoverWrites();const account=await this.accounts.provision(subject),actor=await this.accounts.resolveActor(account.personId,clientId);
+    if(actor.agent&&(tool==='content_prepare'||Object.hasOwn(sealedRouting,tool))&&(!allows(actor,'read',true)||!allows(actor,'device.keys',true)))throw new Refused('Sealed content refused: needs read + device.keys; ask the owner to grant both explicitly');
+    if(tool==='journey_create'){requireAccountCapability(actor,'journey.create');return this.executeCommand(subject,parseCommand('journey_create',{name:SEALED_NOTICE,policy:named.policy,defaultRole:named.defaultRole}),clientId);}
+    if(tool==='sealed_device_register'||tool==='sealed_device_binding'){if(!this.accounts.sealedDevice)throw new Refused('Device binding storage unavailable');return this.accounts.sealedDevice(account.personId,clientId,tool,named);}
+    const journeyId=z.string().min(1).max(200).parse(named.journeyId),port=this.journey(journeyId);if(!port.sealed||!this.accounts.deviceBinding||!this.accounts.reserveDevice)throw new Refused('Sealed storage unavailable');
+    const result=await port.sealed(account.personId,tool,named,actor,{binding:id=>this.accounts.deviceBinding!(id),reserve:(id,group)=>this.accounts.reserveDevice!(id,group)});const revocation=await this.recoverWrites(account.personId);if(revocation.state==='pending')result.revocation={state:'pending',retryAt:revocation.retryAt};return result;
+  }
   oauth(operation: OAuthOperation) { return this.accounts.oauth(operation); }
   async consentAgent(subject: string, id: string, supplied: AgentConsent, assertion?: AuthenticationResponseJSON): Promise<string> {
     const consent = agentConsent.parse(supplied), account = await this.accounts.lookup(subject);
@@ -145,9 +162,10 @@ export class Backend implements CoordinationBackend {
       pending: pending.map(p => ({ ...p, name: names[p.personId] ?? 'Wayfinding member' })) };
   }
   private accountView(account: Account): ToolData {
-    return { personId: account.personId, personalGroupId: `personal_${account.personId}`, subject: account.subject, name: account.name, nickname: account.nickname, email: account.email };
+    return { personId: account.personId, personalGroupId: `personal_${account.personId}`, subject: account.subject, name: account.name, nickname: account.nickname, email: account.email, ...(this.sealedMode?{contentFormat:'sealed-v1'}:{}) };
   }
   async execute(subject: string, supplied: Command, clientId = 'trusted-host'): Promise<ToolData> {
+    if(this.sealedMode&&(Object.hasOwn(sealedInputs,supplied.tool)||/^(artifact_|mls_|library_|topic_|post_|conversation_|board_|round_|interview_|project_)/.test(supplied.tool)))throw new Refused(SEALED_NOTICE+'; use the sealed client contract');
     await this.recoverWrites();
     const result = await this.executeCommand(subject, supplied, clientId);
     const account = await this.accounts.lookup(subject);
@@ -284,14 +302,14 @@ export class MemoryBackend extends Backend {
   readonly journeyStores: Map<string, MemoryStorage>;
   readonly blobs: MemoryBlobs;
   readonly accountsHost: AccountsHost;
-  constructor(profiles: Profiles, now: () => number = Date.now, verifier?: PasskeyVerifier) {
+  constructor(profiles: Profiles, now: () => number = Date.now, verifier?: PasskeyVerifier, sealedMode=false) {
     const storage = new MemoryStorage(), stores = new Map<string, MemoryStorage>(), hosts = new Map<string, JourneyHost>(), blobs = new MemoryBlobs();
     const accounts = new AccountsHost(storage, profiles, blobs, verifier, now);
     super(accounts, id => {
       let host = hosts.get(id);
       if (!host) { const store = new MemoryStorage(); stores.set(id, store); host = new JourneyHost(store, now, blobs, { directory: () => accounts.offerDirectory(), stand: d => accounts.standingDecision(d), reserve: r => accounts.reserveAllowance(r), approve: r => accounts.approveAllowance(r), release: (id, permitOnly) => accounts.releaseAllowance(id, permitOnly) }, accounts); hosts.set(id, host); }
       return host;
-    });
+    },sealedMode);
     this.accountsHost = accounts; this.accountStorage = storage; this.journeyStores = stores; this.blobs = blobs;
   }
   snapshot(): string {

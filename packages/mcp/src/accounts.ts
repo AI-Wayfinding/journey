@@ -8,10 +8,11 @@ import { personalGroupRule, RULES, sameRules, sameState, cell, SLOTS, type Snaps
 import { Serial, type KeyValueStorage } from './storage.ts';
 import { relay, decodeBytes, type BlobStore } from './relay.ts';
 import { bindingRule, cardRule, scalar } from './rules.ts';
-import { assertionSchema, changeSchema, changeDigest, base64url, cardCaps, stepCard, requireAccountCapability, WebAuthnVerifier, type AgentAccount, type Actor, type ClientIdentity, type CardChange, type PasskeyVerifier } from './agents.ts';
+import { allows, assertionSchema, changeSchema, changeDigest, base64url, cardCaps, stepCard, requireAccountCapability, WebAuthnVerifier, type AgentAccount, type Actor, type ClientIdentity, type CardChange, type PasskeyVerifier } from './agents.ts';
 import type { AuthenticationResponseJSON } from '@simplewebauthn/server';
 import { oauthOperation, type OAuthOperation, type OAuthResult, type OAuthState } from './oauth-contract.ts';
 import { oauthStep, tokenHash, randomToken } from './oauth-store.ts';
+import { bindingSchema, sealedInputs, type DeviceBinding } from './sealed-contract.ts';
 
 import { recordOperation, consoleRecord, passkeyOperation, type RecordOperation, type ConsoleRecord, type PasskeyOperation } from './console/contract.ts';
 import { managePasskey } from './console/passkeys.ts';
@@ -20,6 +21,7 @@ export interface Profiles { get(subject: string): Promise<Profile> }
 export interface Account extends Profile, AgentAccount { subject: string; personId: string; nickname?: string; group: Snapshot; identities: { id: string; name: string; kind: 'device' | 'agent' }[] }
 interface AccountsState { rulesHash: RulesStamp; accounts: Account[]; journeys: string[]; oauth?: OAuthState; allowances?: AllowanceReceipt[]; permits?: AdmissionPermit[] }
 
+function parseDevice(raw:string):DeviceBinding{try{return bindingSchema.parse(JSON.parse(raw));}catch{throw new Refused('Invalid stored authenticated device binding');}}
 // The Accounts serial is the admission linearisation point for every journey.
 function issuePermit(state: AccountsState, request: PermitRequest, offer: Offer, settings: OwnerOfferSettings, now: number): 'allow' | 'hold' {
   const permits = (state.permits ?? []).filter(p => p.issuedAt > now - periodMs('week'));
@@ -48,7 +50,8 @@ export class AccountsHost {
     const raw = await this.storage.get('accounts');
     if (raw === undefined) return { rulesHash: RULES, accounts: [], journeys: [] };
     if (typeof raw !== 'string') throw new Refused('Invalid stored accounts');
-    const state = JSON.parse(raw) as AccountsState;
+    let state: AccountsState;
+    try { state = JSON.parse(raw) as AccountsState; } catch { throw new Refused('Invalid stored accounts'); }
     if (!sameRules(state.rulesHash)) throw new Refused('Stored accounts use different rules');
     if (state.rulesHash.card !== RULES.card) {
       // Preserve every old capability, including sparse defaults, without inheriting new device authority.
@@ -220,13 +223,37 @@ export class AccountsHost {
   private save(state: AccountsState): Promise<void> {
     return new WriteAuthority(this.storage, this.now).saveAccounts(JSON.stringify(state), state.accounts);
   }
+  private async sealedBinding(state:AccountsState,deviceId:string):Promise<DeviceBinding>{
+    const raw=await this.storage.get(`sealed:device:${deviceId}`);if(typeof raw!=='string')throw new Refused('Unknown authenticated device');
+    const b=parseDevice(raw),account=state.accounts.find(a=>a.personId===b.personId&&a.live);if(!account)throw new Refused('Device owner is not live');
+    this.requireIdentity(account,b.deviceId);const agent=b.agentId?account.agents.find(a=>a.id===b.agentId&&a.live):undefined;
+    if(b.agentId&&(!agent||!cardCaps(agent.card).includes('read')||!cardCaps(agent.card).includes('device.keys')))throw new Refused('Device needs explicit read + device.keys');
+    return b;
+  }
+  deviceBinding(deviceId:string):Promise<DeviceBinding>{return this.serial.run(async()=>this.sealedBinding(await this.load(),deviceId));}
+  reserveDevice(deviceId:string,groupId:string):Promise<DeviceBinding>{return this.serial.run(async()=>{
+    const b=await this.sealedBinding(await this.load(),deviceId),key=`sealed:reservation:${deviceId}`,old=await this.storage.get(key);
+    if(old!==undefined&&old!==groupId)throw new Refused('Key package already reserved for another audience');await this.storage.put(key,groupId);return b;
+  });}
+  sealedDevice(personId:string,clientId:string,tool:string,supplied:unknown):Promise<ToolData>{return this.serial.run(async()=>{
+    const input=sealedInputs[tool]?.parse(supplied) as Record<string,unknown>|undefined;if(!input)throw new Refused('Unknown device operation');
+    const state=await this.load(),account=state.accounts.find(a=>a.personId===personId);if(!account)throw new Refused('Unknown account');const actor=this.resolve(account,clientId);if(!allows(actor,'read',true)||!allows(actor,'device.keys',true))throw new Refused('Sealed content refused: needs read + device.keys; ask the owner to grant both explicitly');
+    if(tool==='sealed_device_binding'){const raw=await this.storage.get(`sealed:device:${String(input.deviceId)}`);if(typeof raw!=='string')throw new Refused('Unknown authenticated device');return parseDevice(raw);}
+    if(tool!=='sealed_device_register')throw new Refused('Unknown device operation');const id=String(input.deviceId);if(await this.storage.get(`sealed:device:${id}`)!==undefined)throw new Refused('Device id already bound');
+    decodeBytes(String(input.data),64*1024);if(decodeBytes(String(input.verificationKey),64).length!==32)throw new Refused('Ed25519 verification key required');
+    const slot=account.identities.length+2;if(slot>=SLOTS)throw new Refused('Device capacity reached');const machine=personalGroupRule(1);account.group=machine.step(account.group,{op:0,subject:slot,kind:actor.agent?3:2,belongsTo:1});
+    account.identities.push({id,name:id,kind:actor.agent?'agent':'device'});const binding:DeviceBinding={deviceId:id,personId,agentId:actor.agent?.id,verificationKey:String(input.verificationKey),data:String(input.data),hash:await tokenHash(String(input.data)),createdAt:this.now()};
+    await this.storage.transaction(async()=>{await this.save(state);await this.storage.put(`sealed:device:${id}`,JSON.stringify(binding));});return binding;
+  });}
   issueWrite(supplied: WriteRequest): Promise<WritePermit> {
     return this.serial.run(async () => {
       const request = writeRequestSchema.parse(supplied), state = await this.load();
       const account = state.accounts.find(a => a.personId === request.actor.personId);
       if (!account || !request.actor.clientId) throw new Refused('Authenticated write identity required');
       const current = this.resolve(account, request.actor.clientId, request.actor.agent?.id);
-      return new WriteAuthority(this.storage, this.now).issue(request, state.accounts, current);
+      const audiencePersonIds:string[]=[];
+      for(const id of request.deviceIds??[]){const binding=await this.sealedBinding(state,id);audiencePersonIds.push(binding.personId);}
+      return new WriteAuthority(this.storage, this.now).issue({...request,audiencePersonIds}, state.accounts, current);
     });
   }
   redeemWrite(permit: WritePermit): Promise<void> { return this.serial.run(() => new WriteAuthority(this.storage, this.now).redeem(permit)); }
@@ -430,7 +457,8 @@ export class AccountsHost {
       await this.storage.put(key, JSON.stringify(command.input.data));
       return { published: true };
     }
-    const data = typeof raw === 'string' ? JSON.parse(raw) as string | null : null;
+    let data: string | null = null;
+    try { if (typeof raw === 'string') data = z.string().nullable().parse(JSON.parse(raw)); } catch { throw new Refused('Invalid stored key package'); }
     if (data !== null) await this.storage.put(key, 'null');
     return { personId: account.personId, deviceId, data };
   }
@@ -486,7 +514,12 @@ export class WorkOSProfiles implements Profiles {
     if (typeof this.apiKey !== 'string' || this.apiKey.trim().length === 0) {
       throw new Refused('Server configuration error: WORKOS_API_KEY is required for account profiles');
     }
-    const response = await this.send(`https://api.workos.com/user_management/users/${encodeURIComponent(subject)}`, {
+    let url: URL;
+    try { url = new URL('https://api.workos.com/user_management/users/'); } catch { throw new Refused('Account profile URL invalid'); }
+    url.pathname += encodeURIComponent(subject);
+    if (url.origin !== 'https://api.workos.com' || !url.pathname.startsWith('/user_management/users/')) throw new Refused('Account profile origin refused');
+    const response = await this.send(url, {
+      redirect: 'error',
       headers: { authorization: `Bearer ${this.apiKey}` }, signal: AbortSignal.timeout(10_000),
     });
     if (!response.ok) throw new Refused('Account profile lookup failed');

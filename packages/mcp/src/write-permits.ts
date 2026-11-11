@@ -6,9 +6,9 @@ import type { BlobStore } from './relay.ts';
 
 export const WRITE_TTL_MS = 30_000;
 const id = z.string().min(1).max(200);
-export const writePermitSchema = z.object({ id, personId: id, target: id, digest: id, epoch: z.number().int().nonnegative(), expiresAt: z.number().int().nonnegative() }).strict();
+export const writePermitSchema = z.object({ id, personId: id, target: id, digest: id, epoch: z.number().int().nonnegative(), expiresAt: z.number().int().nonnegative(), audienceEpochs: z.array(z.object({personId:id,epoch:z.number().int().nonnegative()}).strict()).max(128).optional() }).strict();
 export type WritePermit = z.infer<typeof writePermitSchema>;
-export const writeRequestSchema = z.object({ target: id, digest: id, actor: actorSchema }).strict();
+export const writeRequestSchema = z.object({ target: id, digest: id, actor: actorSchema, deviceIds:z.array(id).max(128).optional(), audiencePersonIds:z.array(id).max(128).optional() }).strict();
 export type WriteRequest = z.infer<typeof writeRequestSchema>;
 export const writeReceiptSchema = z.object({ permit: writePermitSchema, outcome: z.enum(['committed', 'cancelled']) }).strict();
 export type WriteReceipt = z.infer<typeof writeReceiptSchema>;
@@ -21,8 +21,8 @@ export interface WriteDrain { state: 'pending' | 'complete'; permits: WritePermi
 interface Scope { personId: string; fingerprint: string; epoch: number }
 interface AuthorityPermit { permit: WritePermit; phase: 'issued' | 'redeemed' | 'committed' | 'cancelled' }
 interface AuthorityState { scopes: Scope[]; permits: AuthorityPermit[] }
-interface AuthorityAccount { personId: string; live: boolean; bindings: unknown; agents: { id: string; live: boolean; card: unknown }[] }
-function fingerprint(a: AuthorityAccount): string { return JSON.stringify([a.live, a.bindings, a.agents.map(g => [g.id, g.live, g.card])]); }
+interface AuthorityAccount { personId: string; live: boolean; bindings: unknown; group?:unknown; agents: { id: string; live: boolean; card: unknown }[] }
+function fingerprint(a: AuthorityAccount): string { return JSON.stringify([a.live, a.bindings, a.group, a.agents.map(g => [g.id, g.live, g.card])]); }
 function samePermit(a: WritePermit, b: WritePermit): boolean { return JSON.stringify(a) === JSON.stringify(b); }
 
 /** Called only within Accounts' serial turn. Authority and epoch changes share one transaction. */
@@ -46,7 +46,7 @@ export class WriteAuthority {
       const account = accounts.find(a => a.personId === scope.personId), next = account ? fingerprint(account) : 'removed';
       if (next === scope.fingerprint) continue;
       scope.fingerprint = next; scope.epoch++;
-      for (const p of state.permits) if (p.permit.personId === scope.personId && p.phase === 'issued') p.phase = 'cancelled';
+      for (const p of state.permits) if ((p.permit.personId === scope.personId || p.permit.audienceEpochs?.some(e=>e.personId===scope.personId)) && p.phase === 'issued') p.phase = 'cancelled';
     }
     await this.save(state, value);
   }
@@ -70,7 +70,13 @@ export class WriteAuthority {
     if (!scope) { scope = { personId: account.personId, fingerprint: fingerprint(account), epoch: 0 }; state.scopes.push(scope); }
     if (state.permits.some(p => p.permit.personId === account.personId && p.phase === 'redeemed' && p.permit.epoch !== scope.epoch)) throw new Refused('Revocation pending: write receipts must be recovered');
     if (state.permits.filter(p => p.phase === 'issued' || p.phase === 'redeemed').length >= 128) throw new Refused('Write permit capacity reached');
-    const permit: WritePermit = { id: crypto.randomUUID(), personId: account.personId, target: request.target, digest: request.digest, epoch: scope.epoch, expiresAt: this.now() + WRITE_TTL_MS };
+    const audienceEpochs = [...new Set(request.audiencePersonIds ?? [])].map(personId=>{
+      const a=accounts.find(a=>a.personId===personId&&a.live); if(!a)throw new Refused('Audience account is not live');
+      let s=state.scopes.find(s=>s.personId===personId);if(!s){s={personId,fingerprint:fingerprint(a),epoch:0};state.scopes.push(s);}
+      if(state.permits.some(p=>p.phase==='redeemed'&&p.permit.audienceEpochs?.some(e=>e.personId===personId&&e.epoch!==s!.epoch)))throw new Refused('Audience revocation pending');
+      return {personId,epoch:s.epoch};
+    });
+    const permit: WritePermit = { id: crypto.randomUUID(), personId: account.personId, target: request.target, digest: request.digest, epoch: scope.epoch, expiresAt: this.now() + WRITE_TTL_MS, ...(audienceEpochs.length?{audienceEpochs}:{}) };
     state.permits.push({ permit, phase: 'issued' });
     await this.save(state);
     return permit;
@@ -78,7 +84,7 @@ export class WriteAuthority {
   async redeem(supplied: WritePermit): Promise<void> {
     const permit = writePermitSchema.parse(supplied), state = await this.load(); this.expire(state);
     const found = state.permits.find(p => p.permit.id === permit.id), scope = state.scopes.find(s => s.personId === permit.personId);
-    if (!found || !samePermit(found.permit, permit) || found.phase !== 'issued' || scope?.epoch !== permit.epoch || permit.expiresAt <= this.now()) throw new Refused('Write permit revoked, expired or already redeemed');
+    if (!found || !samePermit(found.permit, permit) || found.phase !== 'issued' || scope?.epoch !== permit.epoch || permit.audienceEpochs?.some(e=>state.scopes.find(s=>s.personId===e.personId)?.epoch!==e.epoch) || permit.expiresAt <= this.now()) throw new Refused('Write permit revoked, expired or already redeemed');
     found.phase = 'redeemed';
     await this.save(state);
   }
@@ -101,7 +107,7 @@ export class WriteAuthority {
   }
   async drain(personId?: string, expired = false): Promise<WriteDrain> {
     const state = await this.load(); this.expire(state);
-    const permits = state.permits.filter(p => p.phase === 'redeemed' && (!personId || p.permit.personId === personId) && (p.permit.epoch !== state.scopes.find(s => s.personId === p.permit.personId)?.epoch || expired && p.permit.expiresAt <= this.now())).map(p => p.permit);
+    const permits = state.permits.filter(p => p.phase === 'redeemed' && (!personId || p.permit.personId === personId || p.permit.audienceEpochs?.some(e=>e.personId===personId)) && (p.permit.epoch !== state.scopes.find(s => s.personId === p.permit.personId)?.epoch || p.permit.audienceEpochs?.some(e=>state.scopes.find(s=>s.personId===e.personId)?.epoch!==e.epoch) || expired && p.permit.expiresAt <= this.now())).map(p => p.permit);
     return { state: permits.length ? 'pending' : 'complete', permits, ...(permits.length ? { retryAt: Math.max(this.now(), Math.min(...permits.map(p => p.expiresAt))) } : {}) };
   }
 }
@@ -171,7 +177,7 @@ export class WriteReceiver {
     await this.storage.base.put(this.key(permit.id), JSON.stringify({ permit, outcome: 'cancelled' }));
     return { permit, outcome: 'cancelled' };
   }
-  async run(actor: Actor, target: string, digest: string, operation: () => Promise<ToolData>, retryId?: string, aborted?: () => Promise<void>): Promise<{ value: ToolData; changed: boolean }> {
+  async run(actor: Actor, target: string, digest: string, operation: () => Promise<ToolData>, retryId?: string, aborted?: () => Promise<void>, deviceIds?:()=>string[]): Promise<{ value: ToolData; changed: boolean }> {
     if (retryId) {
       const previous = await this.record(retryId);
       if (!previous || previous.permit.personId !== actor.personId || previous.permit.target !== target || previous.permit.digest !== digest) throw new Refused('Unknown or mismatched write receipt');
@@ -184,7 +190,7 @@ export class WriteReceiver {
       if (!this.storage.staged?.size && !this.blobs?.changed) return { value, changed: false };
       // Membership and publication live in the same object: the serial turn is the local permit.
       // No cross-object prepare is necessary for a person, and refusals retain the atomic no-write contract.
-      if (!actor.agent) {
+      if (!actor.agent && !deviceIds) {
         await this.blobs?.upload();
         try { await this.storage.base.transaction(tx => this.storage.flush(tx)); }
         catch (error) { await aborted?.(); throw error; }
@@ -193,7 +199,7 @@ export class WriteReceiver {
       }
       if (!this.authority) throw new Refused('Agent write authority unavailable');
       // Local membership authority is held by the Journey serial turn throughout preparation and commit.
-      const permit = await this.authority.issueWrite({ actor, target, digest });
+      const permit = await this.authority.issueWrite({ actor, target, digest, ...(deviceIds?{deviceIds:deviceIds()}: {}) });
       if ((await this.record(permit.id))?.outcome === 'cancelled') throw new Refused('Write cancelled');
       await this.storage.base.put(this.key(permit.id), JSON.stringify({ permit, outcome: 'prepared' }));
       await this.hooks?.issued?.(permit);

@@ -13,6 +13,7 @@ import { forum, isForumCommand, defaultBoard, type Board, type Topic, type Post 
 import { rounds, isRoundCommand, type SensemakingRound } from './rounds.ts';
 import { changeTask, type JourneyTask } from './tasks.ts';
 import { journeyEnabled, type AllowanceRelease, offerView, DEFAULT_SETTINGS, type OfferPort, type OfferAgent, type StandingDecision } from './offers.ts';
+import { sealedContent, type SealedAuthority } from './sealed-content.ts';
 
 interface Identity { id: string; name: string }
 interface Project { id: string; name: string; purpose: string; rule: Snapshot }
@@ -47,6 +48,16 @@ export class JourneyHost {
     this.storage = new WriteStorage(storage); this.now = now; this.blobs = blobs ? new WriteBlobs(blobs) : undefined; this.offers = offers;
     this.receiver = new WriteReceiver(this.storage, this.blobs, now, authority, hooks);
   }
+  sealed(personId:string,tool:string,input:unknown,resolved:Actor,authority:SealedAuthority):Promise<ToolData>{return this.serial.run(async()=>{
+    const before=await this.load();if(!before)throw new Refused('Journey not found');
+    const command={tool:'journey_read',input:{journeyId:before.id}} as const,slot=this.actor(before,personId,command,resolved),person=this.slot(before,personId);
+    const deviceIds=new Set<string>(),digest=await tokenHash(JSON.stringify([personId,resolved.agent?.id??null,tool,input]));
+    const result=await this.receiver.run(resolved,before.id,digest,async()=>{
+      if(!this.blobs)throw new Refused('Sealed blob storage unavailable');
+      return sealedContent({state:before,actor:resolved,slot,person,can:c=>this.can(before,slot,resolved,c),livePerson:id=>{const s=this.slot(before,id);return s&&cell(before.membership,'Members',s)===1?s:0;},eligible:b=>{const p=this.slot(before,b.personId),a=this.slot(before,b.agentId??b.personId);return this.has(before,p,'read')&&this.live(before,a)&&(!b.agentId||before.agents.some(g=>g.id===b.agentId&&g.owner===b.personId));},now:this.now(),storage:this.storage,blobs:this.blobs,authority,deviceIds},tool,input);
+    },undefined,undefined,()=>[...deviceIds]);
+    return result.value;
+  });}
   cancelWrite(permit: WritePermit): Promise<WriteReceipt> { return this.serial.run(() => this.receiver.cancel(permit)); }
   private async writeRun(personId: string, resolved: Actor | undefined, intent: unknown, journeyId: string | undefined, operation: () => Promise<ToolData>, retryId?: string): Promise<ToolData> {
     const before = await this.load(), target = journeyId ?? before?.id ?? 'missing';

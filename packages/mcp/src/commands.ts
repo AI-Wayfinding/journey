@@ -167,6 +167,8 @@ export { Refused } from './errors.ts';
 export type ToolData = Record<string, unknown>;
 export type TaskMethod = 'get' | 'update' | 'cancel';
 export interface CoordinationBackend {
+  readonly sealedMode?:boolean;
+  sealedExecute?(subject:string,tool:string,input:unknown,clientId?:string):Promise<ToolData>;
   execute(subject: string, command: Command, clientId?: string): Promise<ToolData>;
   oauth?(operation: import('./oauth-contract.ts').OAuthOperation): Promise<import('./oauth-contract.ts').OAuthResult>;
   whoami?(subject: string, clientId: string): Promise<ToolData>;
