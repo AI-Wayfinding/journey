@@ -16,9 +16,11 @@ export interface MlsGroup {
   readonly audited: false
   readonly library: {readonly name: string; readonly version: string}
   /** null until created or joined; otherwise a natural strictly below 2^53. */
+  matchesRoster(packages: Uint8Array[]): boolean
   readonly epoch: number | null
   /** The public, single-use key package. Never contains private key material. */
   keyPackage(): Uint8Array
+
   create(groupId: Uint8Array): Promise<void>
   add(keyPackage: Uint8Array): Promise<MlsCommit>
   /** Finds the current leaf by the original key package's signature public key. */
