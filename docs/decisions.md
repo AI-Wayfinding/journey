@@ -242,7 +242,7 @@ Dan's brief for v2 was to write the spec, build what seems best, and refine late
 
 ### 35. Seal all non-routing content; scope offers per journey
 
-**Status:** design target, not completed implementation. The current privacy boundary is described in `docs/poc-test-guide.md`. Interview sharing still needs the confirmation declared in `.work/drafts/sealing.md`, section 8, item 5.
+**Status:** staged synthetic-only implementation. The current privacy boundary is described in `docs/poc-test-guide.md`. Interview sharing is resolved for the PoC below.
 
 - **Decided by:** Dan (2026-11-11) set the encryption boundary and per-journey offer switches. The group/API/browser/reset details are proposed in `.work/drafts/sealing.md`; that draft lists unresolved choices.
 - **What:** content not needed for server routing, authorization, admission, bounded storage or coordination laws is encrypted at the device using MLS audiences. This includes post/topic/board text, interviews, contributions, library metadata and versions, project/journey names and purposes, account/card descriptions, offer schemas/instructions and task requests/results/conversations. Descriptive copies and search queries stay off the server too. Authority/capabilities, ownership, memberships, lifecycle/version counters, deadlines, admission policy and byte accounting remain clear and enforced server-side.
@@ -252,6 +252,12 @@ Dan's brief for v2 was to write the spec, build what seems best, and refine late
 - **PoC:** use a sealed-only storage generation and reset synthetic PoC data rather than migrating plaintext. Separately verify and authorise deletion of old synthetic copies; changing bindings alone is not a wipe. ts-mls remains unaudited and the rule/security review gate still blocks real confidential data.
 - **Supersedes:** `.work/drafts/v2.md` design item 9 and decision 27's server-readable PoC privacy exception; decision 33's plaintext content boundary and wildcard offer-journey scope. Decision 9's numeric bound, decision 20's person-only grants and decision 32's explicit device authority remain. Adoption is staged; existing plaintext paths remain until replaced, not made private by this decision entry.
 - **Source:** Dan's sealing/per-journey-offers brief (2026-11-11); `.work/drafts/sealing.md`.
+- **Resolved for the PoC:**
+  - Interview sharing is irreversible publication to the journey, including future readers and later shared updates; only the private workspace stays in I. Commit private/public updates atomically.
+  - Retain at most 4,096 messages and 32 MiB ciphertext per group without silent eviction. Preparation/upload lifetime: 10 minutes. Offline checkpoint lifetime: 30 days. Newcomers receive only entitled live retained history; exhausted budgets refuse writes.
+  - Agents need explicit live read plus `device.keys` to post sealed content. Never silently add read; other agents remain metadata-only with an actionable refusal.
+  - Authenticated device binding is implemented where feasible. Device trust hardening, independent security review and ts-mls audit block real-data launch, not synthetic-only implementation.
+  - Browser PRF/recovery belongs to the later console stage. Reset/deletion, deployment and data migration are not authorised in this stage.
 
 ## Open
 
