@@ -66,6 +66,7 @@ export class Backend implements CoordinationBackend {
   constructor(accounts: AccountsPort, journey: (id: string) => JourneyPort, sealedMode=false) { this.accounts = accounts; this.journey = journey;this.sealedMode=sealedMode; }
   async sealedExecute(subject:string,tool:string,input:unknown,clientId='trusted-host'):Promise<ToolData>{
     if(!this.sealedMode)throw new Refused('Sealed generation not enabled');
+    if(tool==='task_step')tool='task_exchange';
     const parsed=sealedInputs[tool]?.safeParse(input);if(!parsed?.success)throw new Refused('Invalid sealed fields or unknown format');const named=parsed.data as Record<string,unknown>;
     await this.recoverWrites();const account=await this.accounts.provision(subject),actor=await this.accounts.resolveActor(account.personId,clientId);
     if(actor.agent&&(tool==='content_prepare'||Object.hasOwn(sealedRouting,tool))&&(!allows(actor,'read',true)||!allows(actor,'device.keys',true)))throw new Refused('Sealed content refused: needs read + device.keys; ask the owner to grant both explicitly');
@@ -177,7 +178,7 @@ export class Backend implements CoordinationBackend {
     return { personId: account.personId, personalGroupId: `personal_${account.personId}`, subject: account.subject, name: account.name, nickname: account.nickname, email: account.email, ...(this.sealedMode?{contentFormat:'sealed-v1'}:{}) };
   }
   async execute(subject: string, supplied: Command, clientId = 'trusted-host'): Promise<ToolData> {
-    if(this.sealedMode&&(Object.hasOwn(sealedInputs,supplied.tool)||/^(artifact_|mls_|library_|topic_|post_|conversation_|board_|round_|interview_|project_)/.test(supplied.tool)))throw new Refused(SEALED_NOTICE+'; use the sealed client contract');
+    if(this.sealedMode&&(Object.hasOwn(sealedInputs,supplied.tool)||/^(artifact_|mls_|library_|topic_|post_|conversation_|board_|round_|interview_|project_|task_)/.test(supplied.tool)))throw new Refused(SEALED_NOTICE+'; use the sealed client contract');
     await this.recoverWrites();
     const result = await this.executeCommand(subject, supplied, clientId);
     const account = await this.accounts.lookup(subject);
@@ -304,6 +305,7 @@ export class Backend implements CoordinationBackend {
     const actor = await this.actor(subject, clientId); return this.journey(journeyId).watchInbox(actor.personId, actor);
   }
   async task(subject: string, method: TaskMethod, taskId: string, clientId = 'trusted-host'): Promise<ToolData> {
+    if(this.sealedMode&&method==='update')throw new Refused('Task answers must use the sealed task_step answer exchange; plaintext inputResponses refused');
     const match = /^task_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.exec(taskId);
     if (!match) throw new Refused('Invalid task id');
     const actor = await this.actor(subject, clientId); return this.journey(`journey_${match[1]}`).task(actor.personId, method, taskId, actor);

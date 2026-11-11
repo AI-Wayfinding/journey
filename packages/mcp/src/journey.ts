@@ -52,10 +52,11 @@ export class JourneyHost {
     const before=await this.load();if(!before)throw new Refused('Journey not found');
     const command={tool:'journey_read',input:{journeyId:before.id}} as const,slot=this.actor(before,personId,command,resolved),person=this.slot(before,personId);
     const deviceIds=new Set<string>(),digest=await tokenHash(JSON.stringify([personId,resolved.agent?.id??null,tool,input]));
-    const result=await this.receiver.run(resolved,before.id,digest,async()=>{
+    this.stagedAllowance=undefined;const result=await this.receiver.run(resolved,before.id,digest,async()=>{
       if(!this.blobs)throw new Refused('Sealed blob storage unavailable');
-      return sealedContent({state:before,actor:resolved,slot,person,can:c=>this.can(before,slot,resolved,c),livePerson:id=>{const s=this.slot(before,id);return s&&cell(before.membership,'Members',s)===1?s:0;},eligible:b=>{const p=this.slot(before,b.personId),a=this.slot(before,b.agentId??b.personId);return this.has(before,p,'read')&&this.live(before,a)&&(!b.agentId||before.agents.some(g=>g.id===b.agentId&&g.owner===b.personId));},now:this.now(),storage:this.storage,blobs:this.blobs,authority,deviceIds},tool,input);
-    },undefined,undefined,()=>[...deviceIds]);
+      const value=await sealedContent({state:before,offers:this.offers,runnable:async id=>{const a=(await this.offers?.directory())?.find(g=>g.id===id);return !!a&&this.runnable(before,a)&&cell(a.card,'Caps',capabilities.find(c=>c.name==='read')!.id)===1&&cell(a.card,'Caps',capabilities.find(c=>c.name==='device.keys')!.id)===1;},changeTask:async(command,taskId)=>{const allowance=await changeTask(before,command,{actor:slot,personId,actorId:resolved.agent?.id??personId,isAgent:!!resolved.agent,now:this.now(),guide:this.has(before,person,'guide'),creatorId:t=>before.identities[scalar(t.rule,'creator')-1]!.id,live:id=>this.live(before,this.slot(before,id)),slot:id=>this.slot(before,id),decider:t=>this.decider(before,t,resolved),runnable:a=>this.runnable(before,a)},this.offers,taskId);await this.commit(before,[],allowance);},actor:resolved,slot,person,can:c=>this.can(before,slot,resolved,c),livePerson:id=>{const s=this.slot(before,id);return s&&cell(before.membership,'Members',s)===1?s:0;},eligible:b=>{const p=this.slot(before,b.personId),a=this.slot(before,b.agentId??b.personId);return this.has(before,p,'read')&&this.live(before,a)&&(!b.agentId||before.agents.some(g=>g.id===b.agentId&&g.owner===b.personId));},now:this.now(),storage:this.storage,blobs:this.blobs,authority,deviceIds},tool,input);return value;
+    },undefined,async()=>{if(this.stagedAllowance)await this.offers!.release(this.stagedAllowance.taskId,this.stagedAllowance.permitOnly);},()=>[...deviceIds]);
+    if(result.changed){const after=await this.load();if(after)await this.notifyCommit(before,after);}
     return result.value;
   });}
   cancelWrite(permit: WritePermit): Promise<WriteReceipt> { return this.serial.run(() => this.receiver.cancel(permit)); }
@@ -149,6 +150,7 @@ export class JourneyHost {
     return identity.personId === task.offer.owner && this.live(state, actor) && (!identity.agent || this.can(state, actor, identity, 'offer.decide'));
   }
   private taskVisible(state: JourneyState, task: Task, identity: Actor): boolean {
+    if(task.sealed)return !task.assignee&&scalar(task.rule,'status')===1||task.sealed.actors.includes(identity.agent?.id??identity.personId)||!identity.agent&&task.sealed.people.includes(identity.personId)||this.decider(state,task,identity);
     if (!task.offer || task.offer.admitted) return true;
     return state.identities[scalar(task.rule, 'creator') - 1]?.id === (identity.agent?.id ?? identity.personId)
       || !identity.agent && task.offer?.requesterPersonId === identity.personId || this.decider(state, task, identity);
@@ -173,10 +175,10 @@ export class JourneyHost {
     await this.storage.transaction(async storage => { await storage.put('journey', JSON.stringify(state)); await this.schedule(state, storage); });
   }
   private taskView(state: JourneyState, task: Task): ToolData {
-    return { taskId: task.id, name: task.name, assignee: task.assignee, deadline: task.deadline,
+    return { taskId: task.id, name: task.name, sealed:task.sealed, assignee: task.assignee, deadline: task.deadline,
       creator: state.identities[scalar(task.rule, 'creator') - 1]?.id,
       claimant: state.identities[scalar(task.rule, 'claimant') - 1]?.id,
-      status: ['none', 'open', 'claimed', 'inRound', 'done', 'expired', 'cancelled', 'requested', 'declined'][scalar(task.rule, 'status')],
+      status: ['none', 'open', 'claimed', 'inRound', 'done', 'expired', 'cancelled', 'requested', 'declined','needsInput','failed'][scalar(task.rule, 'status')],
       offerId: task.offer?.id, offerVersion: task.offer?.version, agentId: task.offer?.agentId,
       input: task.content?.input, output: task.content?.output, reason: task.content?.reason,
       roundsUsed: scalar(task.rule, 'roundsUsed'), maxRounds: scalar(task.rule, 'cap') };
@@ -299,7 +301,7 @@ export class JourneyHost {
     }
   }
   private async schedule(state: JourneyState, storage: Pick<KeyValueStorage, 'setAlarm' | 'deleteAlarm'> = this.storage): Promise<void> {
-    const active = state.tasks.filter((task) => [1, 2, 3, 7].includes(scalar(task.rule, 'status')));
+    const active = state.tasks.filter((task) => [1, 2, 3, 7, 9].includes(scalar(task.rule, 'status')));
     const deadlines = active.map(task => task.deadline);
     if (state.offerOutbox?.length) deadlines.push(this.now() + 60_000);
     if (deadlines.length) await storage.setAlarm(Math.min(...deadlines));
@@ -335,10 +337,10 @@ export class JourneyHost {
       }
       if (method !== 'get') return { resultType: 'complete' };
       const status = scalar(task.rule, 'status');
-      const result: ToolData = { resultType: 'complete', taskId, status: status === 6 ? 'cancelled' : status === 5 || status === 8 ? 'failed' : status === 4 ? 'completed' : 'working',
+      const result: ToolData = { resultType: 'complete', taskId, status: status === 6 ? 'cancelled' : status === 5 || status === 8 || status === 10 ? 'failed' : status === 4 ? 'completed' : status === 9 ? 'input_required' : 'working',
         ...(status === 7 ? { statusMessage: 'awaiting approval' } : {}),
         createdAt: new Date(task.createdAt).toISOString(), lastUpdatedAt: new Date(task.updatedAt).toISOString(), ttlMs: null, pollIntervalMs: 1000 };
-      if ([4, 5, 8].includes(status)) result.result = { content: [{ type: 'text', text: JSON.stringify(this.taskView(state, task)) }], structuredContent: this.taskView(state, task), isError: status !== 4 };
+      if ([4, 5, 8, 10].includes(status)) result.result = { content: [{ type: 'text', text: JSON.stringify(this.taskView(state, task)) }], structuredContent: this.taskView(state, task), isError: status !== 4 };
       return result;
     }));
   }

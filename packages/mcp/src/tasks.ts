@@ -3,6 +3,7 @@ import { taskRule, scalar, sameState, type Snapshot } from './rules.ts';
 import { journeyEnabled, type AllowanceRelease, boundedJson, validateData, type OfferPort, type OfferAgent, type StandingDecision } from './offers.ts';
 
 export interface JourneyTask {
+  sealed?: {groupId:string;recordId:string;definition?:import('./sealed-descriptors.ts').DefinitionRef;actors:string[];people:string[]};
   id: string; name: string; assignee?: string; deadline: number; createdAt: number; updatedAt: number; rule: Snapshot;
   offer?: { id: string; version: number; agentId: string; owner: string; requesterPersonId: string; requesterIsAgent: boolean; agentDefined: boolean; admitted?: boolean };
   content?: { input: unknown; output?: unknown; reason?: string; outputSchema?: Record<string, unknown>; resource?: string };
@@ -12,15 +13,16 @@ export interface TaskAccess {
   creatorId(task: JourneyTask): string; live(id: string): boolean; slot(id: string): number; decider(task: JourneyTask): boolean; runnable(agent: OfferAgent): boolean;
 }
 export interface TaskState { id: string; tasks: JourneyTask[]; offerOutbox?: StandingDecision[] }
+export const taskOperation=(action:string)=>['create','claim','startRound','endRound','finish','cancel','expire','request','approve','decline','askInput','answer','fail'].indexOf(action);
 export function taskInput(op: number, actor = 0, actorIsLive = false, deadlinePassed = false, maxRounds = 0, isDecider = false, agent = 0) {
   return { op, actor, actorIsLive: +actorIsLive, deadlinePassed: +deadlinePassed, maxRounds, isDecider: +isDecider, agent };
 }
-export async function changeTask(state: TaskState, command: Extract<Command, { tool: 'task_create' | 'task_step' }>, access: TaskAccess, port?: OfferPort): Promise<AllowanceRelease | undefined> {
+export async function changeTask(state: TaskState, command: Extract<Command, { tool: 'task_create' | 'task_step' }>, access: TaskAccess, port?: OfferPort, preparedTaskId?:string): Promise<AllowanceRelease | undefined> {
   const a = access, now = a.now;
   if (command.tool === 'task_create') {
     const input = command.input;
     if (input.deadline <= now) throw new Refused('Task deadline must be in the future');
-    const taskId = `task_${state.id.slice('journey_'.length)}_${crypto.randomUUID()}`;
+    const taskId = preparedTaskId ?? `task_${state.id.slice('journey_'.length)}_${crypto.randomUUID()}`;
     let reserved = false;
     try {
       let assignee = input.assignee;
@@ -30,7 +32,7 @@ export async function changeTask(state: TaskState, command: Extract<Command, { t
         const agent = (await port?.directory())?.find(g => g.id === input.agentId);
         const offer = agent?.offers.find(o => o.id === input.offerId);
         if (!port || !agent || !offer || offer.status !== 'published' || !a.runnable(agent) || !journeyEnabled(offer, state.id)) throw new Refused('Offer is not available');
-        validateData(input.input, offer.content.inputSchema, 'Input');
+        if(!preparedTaskId)validateData(input.input, offer.content.inputSchema, 'Input');
         const decision = await port.reserve({ taskId, agentId: agent.id, offerId: offer.id, version: offer.version, journeyId: state.id,
           requesterId: a.actorId, requesterPersonId: a.personId, isAgent: a.isAgent, isGuide: a.guide });
         reserved = true;
@@ -38,7 +40,7 @@ export async function changeTask(state: TaskState, command: Extract<Command, { t
         rule = taskRule.step(taskRule.init(), taskInput(7, a.actor, true, false, input.maxRounds, false, a.slot(agent.id)));
         if (decision === 'allow') rule = taskRule.step(rule, taskInput(8, a.actor, true, false, 0, true));
         offerRecord = { id: offer.id, version: offer.version, agentId: agent.id, owner: agent.owner, requesterPersonId: a.personId, requesterIsAgent: a.isAgent, agentDefined: !!offer.agentDefined, admitted: decision === 'allow' };
-        content = { input: input.input, outputSchema: offer.content.outputSchema, resource: offer.content.resource };
+        content = preparedTaskId ? undefined : { input: input.input, outputSchema: offer.content.outputSchema, resource: offer.content.resource };
       } else {
         if (assignee !== undefined && !a.live(assignee)) throw new Refused('Task assignee is not a live member');
         rule = taskRule.step(taskRule.init(), taskInput(0, a.actor, true, false, input.maxRounds));
@@ -67,7 +69,7 @@ export async function changeTask(state: TaskState, command: Extract<Command, { t
   if (step.output !== undefined && !task.offer) throw new Refused('Only offer tasks accept output');
   if (step.action === 'finish' && task.content?.outputSchema) validateData(step.output, task.content.outputSchema, 'Output');
   else if (step.output !== undefined) boundedJson(step.output, 'Output');
-  const next = taskRule.step(task.rule, taskInput(['create', 'claim', 'startRound', 'endRound', 'finish', 'cancel', 'expire', 'request', 'approve', 'decline'].indexOf(step.action), a.actor, a.live(a.actorId), deadlinePassed, 0, isDecider));
+  const next = taskRule.step(task.rule, taskInput(taskOperation(step.action), a.actor, a.live(a.actorId), deadlinePassed, 0, isDecider));
   if (sameState(task.rule, next)) throw new Refused('Task change refused by coordination rules');
   if (step.action === 'approve' && task.offer) {
     if (!port) throw new Refused('Offer admission authority unavailable');

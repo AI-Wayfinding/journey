@@ -19,12 +19,14 @@ export function envelopeBytes(value: unknown, groupId: string, epoch: number): U
   if (bytes.length !== envelope.size) throw new Refused('Sealed ciphertext size mismatch');
   return bytes;
 }
-const target = z.union([z.object({projectId:sid}).strict(),z.object({itemId:sid}).strict(),z.object({roundId:sid}).strict()]);
+const target = z.union([z.object({projectId:sid}).strict(),z.object({itemId:sid}).strict(),z.object({roundId:sid}).strict(),z.object({taskId:sid}).strict()]);
 const item = { itemId: sid };
 const round = { roundId: sid };
 // Each action copies only named coordination fields. All descriptive values live inside MLS.
 export const sealedRouting = {
   journey_descriptor: z.object({}).strict(),
+  task_create:z.object({taskId:sid,maxRounds:snat.min(1),deadline:snat.max(8_640_000_000_000_000)}).strict(),
+  task_exchange:z.object({taskId:sid,action:z.enum(['claim','startRound','endRound','finish','cancel','expire','approve','decline','askInput','answer','fail']),standing:z.enum(['always_allow','always_deny']).optional()}).strict(),
   offer_definition: z.object({agentId:sid,offerId:sid,contentRevision:snat.min(1),private:z.boolean()}).strict(),
   project_create: z.object({}).strict(),
   project_update: z.object({projectId:sid,status:z.enum(['gettingStarted','active','lookingForOthers','archived']).optional()}).strict(),
@@ -55,6 +57,10 @@ const ticket = z.object({...ctx,ticketId:sid,devices:z.record(z.string(),sid),en
 export const contentContext=z.object({format:z.literal(SEALED_FORMAT),groupId:sid,parentId:sid,recordId:sid,recordType:sid,revision:snat.min(1),operationId:sid,authorId:sid,epoch:snat}).strict();
 export type ContentContext=z.infer<typeof contentContext>;
 export const sealedInputs: Record<string,z.ZodObject> = {
+  task_prepare:z.object({journeyId:sid,assignee:sid.optional(),agentId:sid.optional(),offerId:sid.optional()}).strict(),
+  task_claim_prepare:z.object({journeyId:sid,taskId:sid}).strict(),
+  task_step:ticket,
+  task_read:z.object({journeyId:sid,taskId:sid}).strict(),
   sealed_record_read:z.object({journeyId:sid,recordId:sid,revision:snat.min(1)}).strict(),
   offer_set:z.object({agentId:sid,offer:z.object({id:sid,sealed:sealedOfferDefinition,journeySettings:journeySettingsSchema,admission:admissionSchema}).strict(),expectedVersion:snat.min(1).optional()}).strict(),
   offer_search:z.object({journeyId:sid}).strict(),

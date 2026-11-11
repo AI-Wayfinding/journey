@@ -2,7 +2,7 @@ import * as z from 'zod';
 import { offerDefinitionSchema, presetPolicy, validateData } from '../../mcp/src/offers.ts';
 import { definitionRef } from '../../mcp/src/sealed-descriptors.ts';
 import type { Client } from '@modelcontextprotocol/client';
-const localInputs={...inputs,library_get:inputs.library_get.safeExtend({version:z.number().int().min(1).optional()}),library_add:inputs.library_add.safeExtend({text:z.string().max(9*1024*1024).optional()}),library_version:inputs.library_version.safeExtend({text:z.string().max(9*1024*1024)})};
+const localInputs={...inputs,task_create:inputs.task_create.safeExtend({taskId:id.optional()}),library_get:inputs.library_get.safeExtend({version:z.number().int().min(1).optional()}),library_add:inputs.library_add.safeExtend({text:z.string().max(9*1024*1024).optional()}),library_version:inputs.library_version.safeExtend({text:z.string().max(9*1024*1024)})};
 import { inputs } from '../../mcp/src/commands.ts';
 import {detectKind} from '../../mcp/src/library.ts';
 import { sealedRouting, sealedInputs, sealedAction, sealedEnvelope, preparedContent, contentContext, bindingSchema, SEALED_FORMAT, SEALED_LIMITS, requireSynthetic, type ContentContext, type DeviceBinding, type SealedEnvelope } from '../../mcp/src/sealed-contract.ts';
@@ -11,7 +11,7 @@ import { encode, decode, json, text, utf8, id, base64, nat } from './codec.ts';
 import type { LocalStore } from './store.ts';
 import { contentKey, encrypt, decrypt } from './crypto.ts';
 
-const payloadSchema=z.object({definition:offerDefinitionSchema.optional(),name:z.string().max(4096).optional(),title:z.string().max(4096).optional(),purpose:z.string().max(4096).optional(),description:z.string().max(4096).optional(),body:z.string().max(9*1024*1024).optional(),text:z.string().max(9*1024*1024).optional(),kind:id.optional(),mimeType:id.optional(),labels:z.array(id).max(64).optional(),url:z.string().max(4096).optional(),summary:z.string().max(4096).optional(),goal:z.string().max(4096).optional(),format:z.string().max(4096).optional(),type:id.optional(),content:z.string().max(9*1024*1024).optional(),blob:z.object({blob:id,key:base64,hash:id,size:nat,groupId:id,recordId:id,revision:nat}).strict().optional()}).strict();
+const payloadSchema=z.object({definition:offerDefinitionSchema.optional(),input:z.unknown().optional(),output:z.unknown().optional(),reason:z.string().max(1000).optional(),inputRequests:z.record(z.string(),z.unknown()).optional(),answers:z.record(z.string(),z.unknown()).optional(),name:z.string().max(4096).optional(),title:z.string().max(4096).optional(),purpose:z.string().max(4096).optional(),description:z.string().max(4096).optional(),body:z.string().max(9*1024*1024).optional(),text:z.string().max(9*1024*1024).optional(),kind:id.optional(),mimeType:id.optional(),labels:z.array(id).max(64).optional(),url:z.string().max(4096).optional(),summary:z.string().max(4096).optional(),goal:z.string().max(4096).optional(),format:z.string().max(4096).optional(),type:id.optional(),content:z.string().max(9*1024*1024).optional(),blob:z.object({blob:id,key:base64,hash:id,size:nat,groupId:id,recordId:id,revision:nat}).strict().optional()}).strict();
 type Payload=z.infer<typeof payloadSchema>;
 const signedSchema=z.object({context:contentContext,deviceId:id,payload:payloadSchema,origin:z.string().max(SEALED_LIMITS.envelope).optional(),signature:base64}).strict();
 type Signed=z.infer<typeof signedSchema>;
@@ -55,6 +55,7 @@ export class SealedClient {
   if(!this.personalJourney){const created=await this.call('journey_create',{name:'Personal workspace',policy:'invite',defaultRole:'read'});this.personalJourney=id.parse(created.journeyId);await this.persist();}
   return this.personalJourney;
  }
+ private async openDefinition(ref:z.infer<typeof definitionRef>){const raw=await this.callRemote('sealed_record_read',ref);await this.sync(ref.journeyId);return offerDefinitionSchema.parse((await this.render(raw)).definition);}
  private async audienceId(groupId:string){if(!groupId.startsWith('personal_'))return groupId;const journey=await this.artifactJourney(groupId);return `private_${journey.slice(8)}_${this.personId}`;}
  async createGroup(groupId:string):Promise<void>{if(groupId.startsWith('personal_')){const journey=await this.artifactJourney(groupId);await this.callRemote('content_prepare',{journeyId:journey,action:'library_add',routing:{visibility:'private'}});return this.createGroup(`private_${journey.slice(8)}_${this.personId}`);}const journeyId=journeyFor(groupId),v=groupView.parse(await this.callRemote('sealed_group',{journeyId,groupId}));if(v.sequence)throw new Error('Audience exists; prepare and request admission');const g=await this.prepare(groupId);await g.mls.create(utf8.encode(groupId));g.saved.roster=[bindingSchema.parse(await this.callRemote('sealed_device_binding',{deviceId:g.saved.deviceId}))];await this.commit(groupId,g,v,'bootstrap',json({}));}
  async prepareGroup(groupId:string){groupId=await this.audienceId(groupId);await this.callRemote('sealed_group',{journeyId:journeyFor(groupId),groupId});const g=await this.prepare(groupId);return {deviceId:g.saved.deviceId};}
@@ -161,6 +162,24 @@ export class SealedClient {
   return {...value,name:descriptor?.name??'sealed — open in your client',projects:records.filter(r=>r.type==='project'),boards:records.filter(r=>r.type==='board'),artifacts:records.filter(r=>r.type==='library'),contentUnavailable:descriptor?.contentUnavailable??!descriptor};
  }
  async call(name:string,supplied:Record<string,unknown>={}):Promise<Record<string,unknown>> {
+  if(name==='task_prepare'){const r=await this.callRemote(name,sealedInputs.task_prepare!.parse(supplied));await this.createGroup(id.parse(r.groupId));return r;}
+  if(name==='task_claim_prepare')return this.callRemote(name,sealedInputs.task_claim_prepare!.parse(supplied));
+  if(name==='task_create'){
+   const input=localInputs.task_create.parse(supplied);let taskId=input.taskId;
+   if(!taskId){const p=await this.call('task_prepare',{journeyId:input.journeyId,assignee:input.assignee,agentId:input.agentId,offerId:input.offerId});taskId=id.parse(p.taskId);if(input.assignee||input.agentId)return {...p,admission:'pending',notice:'Required devices must prepare and be added to this task group; then retry task_create with taskId.'};}
+   let snapshot:z.infer<typeof offerDefinitionSchema>|undefined;const groupId=`taskgroup_${taskId}`;await this.sync(groupId);
+   if(input.agentId){const p=await this.callRemote('sealed_group',{journeyId:input.journeyId,groupId});const ref=definitionRef.parse(p.definition);const definition=await this.openDefinition(ref);validateData(input.input,definition.inputSchema,'Input');snapshot=definition;}
+   return this.write('task_create',input.journeyId,{taskId,maxRounds:input.maxRounds,deadline:input.deadline},payloadSchema.parse({name:input.name,input:input.input,definition:snapshot}));
+  }
+  if(name==='task_read'){
+   const r=await this.callRemote(name,sealedInputs.task_read!.parse(supplied));await this.sync(`taskgroup_${id.parse(r.taskId)}`);const rendered=await this.render(r);
+   if(r.definition){const definition=await this.openDefinition(definitionRef.parse(r.definition));for(const record of z.array(z.record(z.string(),z.unknown())).parse(rendered.records)){if(record.type==='task'){if(JSON.stringify(record.definition)!==JSON.stringify(definition))throw new Error('Task contract does not match the authenticated publication');validateData(record.input,definition.inputSchema,'Input');}if(record.output!==undefined&&definition.outputSchema)validateData(record.output,definition.outputSchema,'Output');}}
+   return rendered;
+  }
+  if(name==='task_step'){
+   const input=inputs.task_step.parse(supplied);if(['claim','startRound','endRound','finish','askInput','answer'].includes(input.action)){const task=await this.call('task_read',{journeyId:input.journeyId,taskId:input.taskId});if(input.action==='finish'&&task.definition){const definition=await this.openDefinition(definitionRef.parse(task.definition));if(definition.outputSchema)validateData(input.output,definition.outputSchema,'Output');}}
+   return this.write('task_exchange',input.journeyId,{taskId:input.taskId,action:input.action,standing:input.standing},payloadSchema.parse({output:input.output,reason:input.reason,inputRequests:input.inputRequests,answers:input.answers}));
+  }
   if(name==='offer_set'){
    const input=inputs.offer_set.parse(supplied),source=input.offer,existing=await this.callRemote('offer_list',{agentId:input.agentId});const previous=z.array(z.object({id,contentRevision:nat})).parse(existing.offers).find(o=>o.id===source.id),contentRevision=(previous?.contentRevision??0)+1;
    const personal=await this.artifactJourney(this.personalAlias),pubs:Record<string,z.infer<typeof definitionRef>>={};
