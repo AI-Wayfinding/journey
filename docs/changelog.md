@@ -2,6 +2,15 @@
 
 What shipped in the Wayfinding rewrite, newest first. Each entry lists the commits, and the live deploy where there was one. The proof of concept runs at https://poc.wayfinding.support. The reasons behind these changes are in `docs/decisions.md`.
 
+## Unreleased: browser encryption device
+
+Source only; no deployment, reset or migration.
+
+- The console can enroll a browser MLS device with a fresh passkey assertion for each audience package. Devices are listed and revocable through the existing removal fence.
+- Private browser storage is encrypted with a random data key, wrapped by passkey PRF and a separately derived recovery key. The recovery code is shown once and must be confirmed. It opens existing local storage only; there is no server escrow or code-only recovery of a lost vault.
+- Unlocked console panels decrypt forum, library, rounds, offers, tasks and private profile/card text. Search stays local. Posts, library items, profiles, cards, offer edits and approval/decline reasons are sealed before sending. Locked pages keep ids/status only.
+- A reproducible, content-addressed browser module uses SRI and a hash-only CSP. Real Chrome tests cover PRF, recovery, encrypted storage and the lock/write race; storage canaries and revoked-device tests cover the server boundary. This does not remove the hosted-JavaScript trust limit or the synthetic-data restriction.
+
 ## 2026-11-03
 
 The rewrite merged to `main` as merge commit `ca48bdd` (pull request 9). The stacked stage pull requests were closed as superseded.

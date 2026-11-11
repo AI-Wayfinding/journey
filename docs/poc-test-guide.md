@@ -39,7 +39,33 @@ Run these checks with synthetic fixtures and enrolled local devices, not the bro
 5. Set private profile fields through local `account_update`. Its optional `publications` map selects journey-specific `{nickname}` copies. Use `agent_descriptor_set` with `{agentId,name,clientName?,publications?}` for private card text and explicit J aliases. `account_read` and `agent_list` open P locally. Omitted publications withdraw current aliases without erasing historical ciphertext. Email and device/passkey labels must never appear in a profile J projection.
 6. Provision an account before enrolling a device: storage must contain neither the fetched AuthKit name nor email. Invitations match trimmed, lower-case authenticated email through HMAC. Editing private profile email must not change routing. Raw nickname/card/passkey rename routes must refuse; OAuth/console controls use ids or the fixed `MCP client` label. Missing `read` or `device.keys` must produce an actionable refusal, never an added grant.
 
-The console can still change authority and admission metadata, but cannot encrypt content or supply a missing offer publication. The browser encryption device is out of scope.
+The console can still change authority and admission metadata while locked. Private content uses the browser device below or the local proxy; neither changes the server's ids/status-only view.
+
+### Browser device: unlock, admission and recovery
+
+Use synthetic data only. This is source functionality, not a claim that the public endpoint has been deployed. The hosting Worker can replace both the page and its CSP. MLS and this browser vault have not had an independent security audit.
+
+1. Sign in to `/console`. Add a passkey on **Passkeys**, then return to the page. New registrations request the WebAuthn PRF extension. Older passkeys or unsupported authenticators may need the recovery-code path. Web Locks, IndexedDB, Web Crypto and a secure browser context are required; unavailable storage or locks must refuse rather than fall back to plaintext.
+2. In **Private browser device**, choose the wrapping passkey and select **Create browser device**. Save the random recovery code outside the browser. Retype it and select **I saved the code — create device**. It is displayed only before confirmation, even when PRF works. A cancelled passkey prompt must not enroll a device. With no PRF result, the recovery code is the unlock method. No code or PRF output is sent to the server.
+3. Confirm each fresh passkey prompt for an audience package. The initial personal audience is prepared automatically. First use may create a private workspace, which still needs `journey.create`; enrollment never adds a missing capability. If that audience already exists, its returned `deviceId` needs admission from a surviving member. On the existing device, use `mls_group_add` with the audience, authenticated person id and device id, or fill **Audience id**, **Device id to admit (from its authenticated package)** and **Person id to admit**, then select **Admit device to audience**. On the new browser select **Prepare or synchronize audience** again. Account membership alone does not grant keys.
+4. Open a journey page and select **Prepare journey audience**. Use the same explicit admission path. Read forum/topics/rounds, library items, cards and offers in the private browser panel. It renders validated decrypted values as text, never HTML. **Search library** and **Search offers** decrypt and search locally; results cover only the retained content this device can read. A held/private task may require **Prepare private task audience** and admission to its task group before its content is available.
+5. Try **Seal post**, **Seal library item**, **Seal profile**, **Seal card**, **Seal offer edit**, **Approve sealed** and **Decline sealed**. The post, text, profile/card descriptions, offer definition and decision reason must be absent from outgoing request bodies and server storage. IDs, lifecycle/admission settings and encrypted envelopes remain visible. Legacy authority forms cannot submit descriptive plaintext.
+6. Select **Lock device**. Decrypted output and key access must disappear. **Unlock with passkey** uses PRF locally; **Unlock with recovery code** must refuse a wrong code and open with the saved code. Reload and unlock again to read the committed state. Another tab must refuse concurrent unlock. Lock/logout/pagehide retains the writer fence through pending IndexedDB commits, then releases it. No plaintext cache is stored.
+7. While locked, expand **Listed browser devices**. Revoke one browser. Its linked leaves use the same removal fence as other devices. Keep another admitted device alive, synchronize it and write new content: the removed browser must neither fetch nor decrypt it, even with its old local state. Deleting a wrapping passkey is refused while it has live browser leaves. Previously decrypted content cannot be recalled.
+
+**Recovery is local, not escrow.** A recovery code opens this browser's existing encrypted IndexedDB vault. It cannot recreate missing storage or restore an old MLS ratchet. A new browser creates new keys and needs a surviving member to admit it. Losing all devices and recovery material loses the content; a saved code alone is also insufficient if the local vault is gone. Account recovery does not recover content keys. A lost wrapping passkey cannot authorize a new audience package; use a fresh device with a new passkey and surviving-member admission. No server backup or vault export is supplied.
+
+### Scripted browser proof
+
+Start an isolated Chrome profile with a debugging port, or use `agent-browser --session sealing-proof open about:blank` followed by `agent-browser --session sealing-proof get cdp-url`. Read that port's `/json/list` and use its page-target WebSocket URL:
+
+```sh
+node packages/browser/test/console-e2e.mjs ws://127.0.0.1:PORT/devtools/page/TARGET
+```
+
+The default harness intercepts application requests and serves the in-process console with a synthetic session. It contacts no remote Worker. It adds a CTAP2.1 virtual authenticator with `hasPrf: true`, registers a real PRF passkey, asserts the PRF wrapper exists, creates/unlocks the device, seals a profile, scans HTTP/storage, tests lock/write fencing and wrong/right recovery, and rejects CSP/browser errors. Add `--no-prf` with a different fresh profile to exercise authenticator PRF unavailability, recovery-only creation and code unlock. The rendered marker contains an image/onerror payload and must remain inert text. Chrome with CDP WebAuthn PRF support is required. Use a fresh profile each run: the harness removes its virtual authenticator but deliberately retains encrypted local storage. Close the isolated browser afterwards.
+
+To test a local Worker, first start `npx wrangler dev` from `packages/mcp`, prepare a synthetic signed-in session in that same browser origin and pass `--wrangler http://127.0.0.1:8787` to the script. Only loopback targets are accepted. Configure local AuthKit/console secrets and callback routing yourself; the harness does not mint a real Worker session or deploy anything. This optional forwarding path is supplied but has not been exercised against wrangler in this stage. The in-process real-browser path has passed, including native PRF creation/unlock, encrypted IndexedDB, sealed profile writes, lock/write race and recovery.
 
 ### Automated checks
 
@@ -47,6 +73,7 @@ From the repository root:
 
 ```sh
 node --test packages/proxy/test/sealed.test.ts packages/proxy/test/sealed-tasks.test.ts packages/proxy/test/sealed-identities.test.ts packages/mcp/test/sealed-contract.test.ts
+node --test packages/browser/test/vault.test.ts packages/mcp/test/sealing-browser.test.ts packages/mcp/test/console-browser.test.ts
 npm run typecheck
 npm test
 npm run check:rules
@@ -69,6 +96,8 @@ The following temporary mutations were each observed to turn a passing test red,
 | Bypass sealing for offer/task/profile/card packets | Three canaries fail on `OFFER-NAME-CANARY`, `TASK-NAME-CANARY` and `PRIVATE-PROFILE-NAME` |
 | Remove receiver validation of opened task input | Hostile invalid-input assertion no longer rejects |
 | Remove envelope audience equality for the new exchange | Wrong-group envelope assertion no longer throws |
+| Derive the recovery key from a constant instead of the supplied code | Recovery test exits 1: `Missing expected rejection` for the wrong code |
+| Add `unsafe-eval` to the console's `script-src` | CSP test exits 1: forbidden-policy assertion fails |
 
 Malformed/plaintext sealed inputs, incomplete multi-envelope manifests, oversized input, noncanonical base64 and unauthorized blob references must leave published content unchanged. Restore every mutation before running the full gates. A dry run bundles only; it does not authorize a deployment.
 
@@ -86,7 +115,7 @@ The Worker authorization server replaces AuthKit MCP tokens with its own tokens;
 
 ### Legacy offers and held requests
 
-These steps describe the earlier unsealed implementation. They are not the current sealed-v1 privacy or UI contract; use the source checks above. The browser encryption device is still deferred.
+These steps describe the earlier unsealed implementation. They are not the current sealed-v1 privacy or UI contract; use the source checks above. Use the browser-device steps above for the current sealed implementation.
 
 1. Give an offering agent `task.manage` in a journey where its owner has write authority. Give a separate requesting agent `task.manage` too. To let the offering agent define its own work, its owner must also grant `offer.manage`.
 2. Define an offer with a short name, description, tags, examples and an object input schema. For example, require a string `question` and disallow extra properties. An agent-defined offer must remain a draft until its owner publishes it, unless the owner has enabled publication without review.
@@ -183,7 +212,7 @@ This historical unsealed artifact test did not protect forum/library/sensemaking
 
 ## Connect the local proxy
 
-The local proxy remains required to encrypt and decrypt sealed artifact content. Give its agent the account capability `device.keys` at Worker consent. It starts unchecked, including on reauthorization. Select it and confirm with a registered passkey; a fresh login alone cannot grant it. Ordinary remote coordination clients should leave it off. The automated tests cover proxy bootstrap and a sealed-content round-trip with a Worker agent token; this version has not had a live smoke test.
+The local proxy is the stdio client option for sealed content; the console uses its browser device above. Give its agent the account capability `device.keys` at Worker consent. It starts unchecked, including on reauthorization. Select it and confirm with a registered passkey; a fresh login alone cannot grant it. Ordinary remote coordination clients should leave it off. The automated tests cover proxy bootstrap and a sealed-content round-trip with a Worker agent token; this version has not had a live smoke test.
 Add this server to a client's local MCP configuration, for example Claude Code's `.mcp.json`. Replace both absolute paths; JSON arguments do not expand `~`.
 
 ```json
