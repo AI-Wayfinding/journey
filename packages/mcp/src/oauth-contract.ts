@@ -1,6 +1,7 @@
 import * as z from 'zod';
 import type { Account } from './accounts.ts';
 import { capabilitySchema, assertionSchema } from './agents.ts';
+import { capabilities } from '../../rules/src/capabilities.ts';
 
 export const oauthId = z.string().min(1).max(2048);
 export const clientMetadata = z.object({
@@ -14,7 +15,7 @@ export type OAuthClient = z.infer<typeof clientMetadata> & { client_id: string }
 export const authorizationRequest = z.object({ clientId: oauthId, clientName: z.string().max(60), redirectUri: oauthId,
   challenge: z.string().regex(/^[A-Za-z0-9_-]{43}$/), state: z.string().max(2048).optional(), expiresAt: z.number() }).strict();
 export type AuthorizationRequest = z.infer<typeof authorizationRequest>;
-export const agentConsent = z.object({ name: z.string().trim().min(1).max(60), capabilities: z.array(capabilitySchema).max(21), journeys: z.array(z.string().min(1).max(200)).max(128) }).strict();
+export const agentConsent = z.object({ name: z.string().trim().min(1).max(60), capabilities: z.array(capabilitySchema).max(capabilities.filter(c => c.name !== 'grant.issue').length), journeys: z.array(z.string().min(1).max(200)).max(128) }).strict();
 export type AgentConsent = z.infer<typeof agentConsent>;
 export const oauthOperation = z.discriminatedUnion('op', [
   z.object({ op: z.literal('register'), client: clientMetadata }),

@@ -37,6 +37,21 @@ async function fixture() {
   return { backend, send, exchanges, login, advance: (ms: number) => { now += ms; }, access: (value: string) => { accessToken = value; } };
 }
 
+test('console: privacy banner describes sealed content and readable routing metadata',async()=>{
+ const f=await fixture(),login=await f.login();
+ for(const path of ['/','/console']){
+  const response=await f.send(path,{headers:{cookie:login.cookie}});
+  assert.equal(response.status,200);
+  const html=await response.text(),note=/<p role="note">([^<]+)<\/p>/.exec(html)![1]!;
+  assert.match(note,/Use synthetic data only/);
+  assert.match(note,/encrypts forum, library, sensemaking, offer, task, profile and card content/);
+  assert.match(note,/The server cannot read sealed content/);
+  assert.match(note,/Routing metadata remains server-readable/);
+  assert.match(note,/Earlier deployments may retain readable data/);
+  assert.doesNotMatch(note,/Profiles, cards, offers and tasks remain server-readable/);
+ }
+});
+
 test('console: an agent page shows its offers and pending requests', async () => {
   const f = await fixture(), login = await f.login();
   const agentId = String((await f.backend.execute('alice', parseCommand('agent_create', { name: 'Offer helper' }), clientId)).agentId);
@@ -45,6 +60,8 @@ test('console: an agent page shows its offers and pending requests', async () =>
   const html = await response.text();
   assert.match(html, /<h2[^>]*>Offers<\/h2>/);
   assert.match(html, /<h2[^>]*>Pending requests<\/h2>/);
+  assert.match(html,/Use your proxy or unlocked browser to read sealed offer and request content/);
+  assert.doesNotMatch(html,/The server can read offer and request content/);
   assert.match(html, /No offers yet/);
   assert.match(html, /No pending requests/);
 });
