@@ -9,16 +9,28 @@ const artifactSchema=z.object({artifactId:id,name:z.string(),type:z.string(),siz
 export type Artifact=z.infer<typeof artifactSchema>;
 const keySchema=base64.refine(k=>decode(k).length===32,'Expected AES-256 key');
 const memberSchema=z.object({personId:id,deviceId:id,keyPackage:base64}).strict();
-const savedGroupSchema=z.object({mls:base64,deviceId:id,cursor:nat,own:z.array(nat),keys:z.record(z.string(),keySchema),artifacts:z.array(artifactSchema),members:z.array(memberSchema),blocked:z.boolean()}).strict();
+const savedGroupSchema=z.object({mls:base64,deviceId:id,cursor:nat,own:z.array(nat),keys:z.record(z.string(),keySchema),revisionKeys:z.array(z.object({artifactId:id,version:nat.min(1),key:keySchema}).strict()).default([]),artifacts:z.array(artifactSchema),members:z.array(memberSchema),blocked:z.boolean()}).strict();
 const stateSchema=z.object({version:z.literal(1),personId:id,groups:z.record(z.string(),savedGroupSchema)}).strict();
 type SavedGroup=z.infer<typeof savedGroupSchema>;
 type Group={saved:SavedGroup;mls:MlsGroup};
+function revisionKey(saved:SavedGroup,artifactId:string,version:number):string|undefined {
+ return saved.revisionKeys.find(k=>k.artifactId===artifactId&&k.version===version)?.key;
+}
+function rememberRevisionKey(saved:SavedGroup,artifactId:string,version:number,key:string):void {
+ const entry=saved.revisionKeys.find(k=>k.artifactId===artifactId&&k.version===version);
+ if(entry)entry.key=key;else saved.revisionKeys.push({artifactId,version,key});
+}
 const handshake=z.object({format:z.literal('wayfinding-handshake-1'),action:z.enum(['add','remove','update']),commit:base64,welcome:base64.optional(),personId:id,deviceId:id,keyPackage:base64}).strict();
 const application=z.discriminatedUnion('action',[
  z.object({action:z.literal('keys'),entries:z.array(z.object({artifact:artifactSchema,key:keySchema}).strict()),members:z.array(memberSchema)}).strict(),
  z.object({action:z.literal('delete'),artifactId:id}).strict(),
 ]);
 const messagesSchema=z.object({messages:z.array(z.object({sequence:nat,epoch:nat,kind:z.enum(['handshake','application']),sender:id,data:base64})),cursor:nat});
+function parseJSON<S extends z.ZodType>(schema:S,value:string):z.output<S> {
+ let parsed:unknown;
+ try{parsed=JSON.parse(value);}catch{throw new Error('Invalid local or MLS JSON');}
+ return schema.parse(parsed);
+}
 export interface CreateArtifact {groupId:string;name:string;type:string;content:string}
 export interface UpdateArtifact {groupId:string;artifactId:string;content:string}
 
@@ -37,7 +49,7 @@ export class WayfindingProxy {
   const account=z.object({personId:id,personalGroupId:id}).parse(await remoteCall(remote,'account_read',{}));
   const proxy=new WayfindingProxy(remote,store,account.personId,account.personalGroupId);
   const raw=await store.read('state');
-  if(raw){const saved=stateSchema.parse(JSON.parse(raw));if(saved.personId!==proxy.personId)throw new Error('Local store belongs to a different account');
+  if(raw){const saved=parseJSON(stateSchema,raw);if(saved.personId!==proxy.personId)throw new Error('Local store belongs to a different account');
    for(const [groupId,s] of Object.entries(saved.groups)){const mls=await createMlsGroup(utf8.encode(s.deviceId));await mls.importState(decode(s.mls));proxy.groups.set(groupId,{saved:s,mls});}
   }
   return proxy;
@@ -58,7 +70,7 @@ export class WayfindingProxy {
   const roster=z.object({members:z.array(z.object({id:id}))}).parse(await remoteCall(this.remote,'personal_group_add',{name:`Wayfinding proxy ${crypto.randomUUID()}`,kind:'device'}));
   const deviceId=roster.members.at(-1)!.id;
   const mls=await createMlsGroup(utf8.encode(deviceId));
-  const g:Group={mls,saved:{mls:'',deviceId,cursor:0,own:[],keys:{},artifacts:[],members:[],blocked:false}};this.groups.set(groupId,g);await this.persist();return g;
+  const g:Group={mls,saved:{mls:'',deviceId,cursor:0,own:[],keys:{},revisionKeys:[],artifacts:[],members:[],blocked:false}};this.groups.set(groupId,g);await this.persist();return g;
  }
  createGroup(groupId:string):Promise<void>{return this.serial(async()=>{
   await this.access(groupId);const log=messagesSchema.parse(await remoteCall(this.remote,'mls_message_fetch',{groupId}));
@@ -103,16 +115,21 @@ export class WayfindingProxy {
     if(m.sequence<=g.saved.cursor)throw new Error('Non-monotone MLS relay');
     if(g.saved.own.includes(m.sequence)){g.saved.own=g.saved.own.filter(n=>n!==m.sequence);}
     else if(m.kind==='handshake'){
-     const h=handshake.parse(JSON.parse(text.decode(decode(m.data))));
+     const h=parseJSON(handshake,text.decode(decode(m.data)));
      if(g.mls.epoch===null){if(h.action==='add'&&h.deviceId===g.saved.deviceId&&h.welcome){await g.mls.processHandshake(decode(h.welcome));g.saved.members.push({personId:h.personId,deviceId:h.deviceId,keyPackage:h.keyPackage});}}
      else {await g.mls.processHandshake(decode(h.commit));
       if(h.action==='add'){g.saved.members.push({personId:h.personId,deviceId:h.deviceId,keyPackage:h.keyPackage});reshare=true;}
       if(h.action==='remove')g.saved.members=g.saved.members.filter(x=>x.deviceId!==h.deviceId);
      }
     }else if(g.mls.epoch!==null){
-     const value=application.parse(JSON.parse(text.decode(await g.mls.open(decode(m.data)))));
-     if(value.action==='keys'){g.saved.members=value.members;for(const e of value.entries){if(g.saved.artifacts.some(a=>a.artifactId===e.artifact.artifactId&&a.deleted))continue;g.saved.keys[e.artifact.artifactId]=e.key;const index=g.saved.artifacts.findIndex(a=>a.artifactId===e.artifact.artifactId);if(index<0)g.saved.artifacts.push(e.artifact);else if(g.saved.artifacts[index]!.version<=e.artifact.version)g.saved.artifacts[index]=e.artifact;}}
-     else {delete g.saved.keys[value.artifactId];const a=g.saved.artifacts.find(a=>a.artifactId===value.artifactId);if(a)a.deleted=true;}
+     const value=parseJSON(application,text.decode(await g.mls.open(decode(m.data))));
+     if(value.action==='keys'){g.saved.members=value.members;for(const e of value.entries){if(g.saved.artifacts.some(a=>a.artifactId===e.artifact.artifactId&&a.deleted))continue;
+      const artifactId=e.artifact.artifactId,index=g.saved.artifacts.findIndex(a=>a.artifactId===artifactId);
+      rememberRevisionKey(g.saved,artifactId,e.artifact.version,e.key);
+      if(index<0){g.saved.artifacts.push(e.artifact);g.saved.keys[artifactId]=e.key;}
+      else if(g.saved.artifacts[index]!.version<=e.artifact.version){g.saved.artifacts[index]=e.artifact;g.saved.keys[artifactId]=e.key;}
+     }}
+     else {delete g.saved.keys[value.artifactId];g.saved.revisionKeys=g.saved.revisionKeys.filter(k=>k.artifactId!==value.artifactId);const a=g.saved.artifacts.find(a=>a.artifactId===value.artifactId);if(a)a.deleted=true;}
     }
     g.saved.cursor=m.sequence;await this.persist();
    }
@@ -129,7 +146,7 @@ export class WayfindingProxy {
  private async share(groupId:string,g:Group):Promise<void>{
   const view=await this.access(groupId);
   const live=groupId===this.personalGroupId?g.saved.artifacts:z.array(artifactSchema).parse(view.artifacts);
-  const entries=live.filter(a=>!a.deleted&&g.saved.keys[a.artifactId]).map(artifact=>({artifact,key:g.saved.keys[artifact.artifactId]!}));
+  const entries=live.filter(a=>!a.deleted&&(revisionKey(g.saved,a.artifactId,a.version)??g.saved.keys[a.artifactId])).map(artifact=>({artifact,key:(revisionKey(g.saved,artifact.artifactId,artifact.version)??g.saved.keys[artifact.artifactId])!}));
   await this.post(groupId,g,'application',await g.mls.seal(json({action:'keys',entries,members:g.saved.members})));
  }
  exportGroup(groupId:string):Promise<string>{return this.serial(async()=>encode(await this.group(groupId).mls.exportState()));}
@@ -153,7 +170,7 @@ export class WayfindingProxy {
  readArtifact(groupId:string,artifactId:string):Promise<Artifact&{content:string}>{return this.serial(()=>this.readInner(groupId,artifactId));}
  private async readInner(groupId:string,artifactId:string):Promise<Artifact&{content:string}>{
   const artifact=(await this.listInner(groupId)).find(a=>a.artifactId===artifactId);if(!artifact)throw new Error('Artifact not found or deleted');
-  const key=this.group(groupId).saved.keys[artifactId];if(!key)throw new Error('Artifact key not available; an existing member must synchronize');
+  const saved=this.group(groupId).saved,key=revisionKey(saved,artifactId,artifact.version)??saved.keys[artifactId];if(!key)throw new Error('Artifact key not available; an existing member must synchronize');
   const blob=z.object({data:base64}).parse(await remoteCall(this.remote,'artifact_blob_get',{groupId,artifactId,version:artifact.version}));
   return {...artifact,content:text.decode(await decrypt(blob.data,decode(key),groupId,artifactId,artifact.version))};
  }
@@ -161,15 +178,20 @@ export class WayfindingProxy {
   const {groupId,artifactId,content}=input;const previous=await this.readInner(groupId,artifactId),g=this.group(groupId);
   const artifact:Artifact={artifactId,name:previous.name,type:previous.type,size:utf8.encode(content).length,version:nat.parse(previous.version+1),deleted:false};
   if(groupId!==this.personalGroupId)await remoteCall(this.remote,'artifact_version',{journeyId:groupId,artifactId,baseVersion:previous.version,size:artifact.size});
-  await remoteCall(this.remote,'artifact_blob_put',{groupId,artifactId,version:artifact.version,data:await encrypt(utf8.encode(content),decode(g.saved.keys[artifactId]!),groupId,artifactId,artifact.version)});
-  g.saved.artifacts=g.saved.artifacts.map(a=>a.artifactId===artifactId?artifact:a);await this.persist();await this.share(groupId,g);return artifact;
+  // An old reader retains prior keys even after its MLS leaf is removed.
+  // Never reuse a content key for a new revision, including within one epoch.
+  const key=contentKey();
+  rememberRevisionKey(g.saved,artifactId,previous.version,revisionKey(g.saved,artifactId,previous.version)??g.saved.keys[artifactId]!);
+  rememberRevisionKey(g.saved,artifactId,artifact.version,encode(key));await this.persist();
+  await remoteCall(this.remote,'artifact_blob_put',{groupId,artifactId,version:artifact.version,data:await encrypt(utf8.encode(content),key,groupId,artifactId,artifact.version)});
+  g.saved.keys[artifactId]=encode(key);g.saved.artifacts=g.saved.artifacts.map(a=>a.artifactId===artifactId?artifact:a);await this.persist();await this.share(groupId,g);return artifact;
  });}
  deleteArtifact(groupId:string,artifactId:string):Promise<void>{return this.serial(()=>this.deleteInner(groupId,artifactId));}
  private async deleteInner(groupId:string,artifactId:string):Promise<void>{
   await this.readInner(groupId,artifactId);const g=this.group(groupId);
   if(groupId===this.personalGroupId)await remoteCall(this.remote,'artifact_blob_delete',{groupId,artifactId});
   else await remoteCall(this.remote,'artifact_delete',{journeyId:groupId,artifactId});
-  delete g.saved.keys[artifactId];const a=g.saved.artifacts.find(a=>a.artifactId===artifactId);if(a)a.deleted=true;await this.persist();
+  delete g.saved.keys[artifactId];g.saved.revisionKeys=g.saved.revisionKeys.filter(k=>k.artifactId!==artifactId);const a=g.saved.artifacts.find(a=>a.artifactId===artifactId);if(a)a.deleted=true;await this.persist();
   await this.post(groupId,g,'application',await g.mls.seal(json({action:'delete',artifactId})));
  }
  copyArtifact(sourceGroupId:string,artifactId:string,destinationGroupId:string,move=false):Promise<Artifact>{return this.serial(async()=>{

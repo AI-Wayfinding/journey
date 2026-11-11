@@ -110,6 +110,84 @@ test('proxy: three local agents share encrypted artifacts, later history, remova
   for(const key of finalKeys){assert.equal(bytes.includes(Buffer.from(decode(String(key)))),false);assert.equal(bytes.includes(Buffer.from(String(key))),false);}
  }
 });
+test('proxy: removed member cannot decrypt a new version of an old artifact with a cached key',async t=>{
+ const {a,b,c,backend}=await fixture(t);
+ const groupId=String((await a.proxy.call('journey_create',{name:'Key rotation',policy:'open',defaultRole:'write'})).journeyId);
+ await b.proxy.call('journey_join',{journeyId:groupId});await c.proxy.call('journey_join',{journeyId:groupId});
+ await a.proxy.createGroup(groupId);
+ for(const member of [b,c]){const prepared=await member.proxy.prepareGroup(groupId);await a.proxy.addMember(groupId,member.proxy.personId,prepared.deviceId);await member.proxy.sync(groupId);}
+ const artifact=await a.proxy.createArtifact({groupId,name:'Revision',type:'text/plain',content:'SYNTHETIC-BEFORE'});
+ assert.equal((await b.proxy.readArtifact(groupId,artifact.artifactId)).content,'SYNTHETIC-BEFORE');
+ const oldKey=JSON.parse((await b.store.read('state'))!).groups[groupId].keys[artifact.artifactId] as string;
+ await a.proxy.call('journey_remove',{journeyId:groupId,memberId:b.proxy.personId});
+ await a.proxy.updateArtifact({groupId,artifactId:artifact.artifactId,content:'SYNTHETIC-AFTER-OLD-ARTIFACT'});
+ assert.equal((await c.proxy.readArtifact(groupId,artifact.artifactId)).content,'SYNTHETIC-AFTER-OLD-ARTIFACT');
+ const {decrypt}=await import('../src/crypto.ts');
+ const {encode}=await import('../src/codec.ts');
+ const versions=[...backend.blobs.data.entries()].filter(([key])=>{const parts=JSON.parse(key);return parts[0]==='artifact'&&parts[1]===groupId&&parts[2]===artifact.artifactId&&parts[3]===2;});
+ assert.equal(versions.length,1);
+ // Test the actual encrypted bytes independently of HTTP denial and the removed flag.
+ await assert.rejects(decrypt(encode(versions[0]![1]),decode(oldKey),groupId,artifact.artifactId,2));
+ const currentKey=JSON.parse((await a.store.read('state'))!).groups[groupId].keys[artifact.artifactId];
+ assert.notEqual(currentKey,oldKey);
+});
+test('proxy: authenticated MLS artifact ids cannot write through the revision cache prototype',async t=>{
+ const {a,b}=await fixture(t);
+ assert.equal(Object.hasOwn(Object.prototype,'1'),false);
+ t.after(()=>{Reflect.deleteProperty(Object.prototype,'1');});
+ const groupId=String((await a.proxy.call('journey_create',{name:'Cache identifiers',policy:'open',defaultRole:'write'})).journeyId);
+ await b.proxy.call('journey_join',{journeyId:groupId});await a.proxy.createGroup(groupId);
+ const prepared=await b.proxy.prepareGroup(groupId);await a.proxy.addMember(groupId,b.proxy.personId,prepared.deviceId);await b.proxy.sync(groupId);
+ const {createMlsGroup}=await import('../src/mls/index.ts');
+ const {encode,json}=await import('../src/codec.ts');
+ const sender=await createMlsGroup(new TextEncoder().encode('synthetic-sender'));await sender.importState(decode(await a.proxy.exportGroup(groupId)));
+ const key=encode(new Uint8Array(32));
+ const message=await sender.seal(json({action:'keys',entries:[{artifact:{artifactId:'__proto__',name:'Synthetic',type:'text',size:0,version:1,deleted:false},key}],members:[]}));
+ const posted=await a.remote.callTool({name:'mls_message_post',arguments:{groupId,epoch:sender.epoch,kind:'application',data:encode(message)}});
+ assert.notEqual(posted.isError,true);const [syncResult]=await Promise.allSettled([b.proxy.sync(groupId)]);
+ assert.equal(Object.hasOwn(Object.prototype,'1'),false,'an authenticated artifact id must not modify Object.prototype');
+ assert.equal(syncResult!.status,'fulfilled');
+});
+test('proxy: every personal artifact revision rotates its key and an aborted upload preserves the old readable revision',async t=>{
+ const {a,backend,connect}=await fixture(t),groupId=a.proxy.personalGroupId;
+ await a.proxy.createGroup(groupId);
+ const artifact=await a.proxy.createArtifact({groupId,name:'Personal revisions',type:'text/plain',content:'SYNTHETIC-V1'});
+ const key1=JSON.parse((await a.store.read('state'))!).groups[groupId].keys[artifact.artifactId];
+ const put=backend.blobs.put.bind(backend.blobs);
+ backend.blobs.put=async(key,value)=>{if(JSON.parse(key)[0]==='artifact'&&JSON.parse(key)[3]===2)throw new Error('Synthetic blob upload failure');await put(key,value);};
+ await assert.rejects(a.proxy.updateArtifact({groupId,artifactId:artifact.artifactId,content:'SYNTHETIC-FAILED-V2'}),{message:'Remote artifact_blob_put refused: [{"type":"text","text":"Coordination operation failed"}]'});
+ assert.equal((await a.proxy.readArtifact(groupId,artifact.artifactId)).content,'SYNTHETIC-V1');
+ const failedKey=JSON.parse((await a.store.read('state'))!).groups[groupId].revisionKeys.find((entry:{artifactId:string;version:number})=>entry.artifactId===artifact.artifactId&&entry.version===2).key;
+ assert.equal(typeof failedKey,'string');
+ await a.store.close();backend.blobs.put=put;
+ const resumed=await connect('alice',a.dir);
+ assert.equal((await resumed.proxy.readArtifact(groupId,artifact.artifactId)).content,'SYNTHETIC-V1');
+ await resumed.proxy.updateArtifact({groupId,artifactId:artifact.artifactId,content:'SYNTHETIC-V2'});
+ const key2=JSON.parse((await resumed.store.read('state'))!).groups[groupId].keys[artifact.artifactId];
+ assert.notEqual(key2,key1);assert.notEqual(key2,failedKey);
+ await resumed.proxy.updateArtifact({groupId,artifactId:artifact.artifactId,content:'SYNTHETIC-V3'});
+ const key3=JSON.parse((await resumed.store.read('state'))!).groups[groupId].keys[artifact.artifactId];
+ assert.notEqual(key3,key2);assert.notEqual(key3,key1);
+ assert.equal((await resumed.proxy.readArtifact(groupId,artifact.artifactId)).content,'SYNTHETIC-V3');
+});
+// This guards the existing artifact body path only, not the still-plaintext forum/library/round paths.
+test('proxy: artifact body canary never reaches DO values side keys or blob bytes',async t=>{
+ const {a,backend}=await fixture(t),groupId=a.proxy.personalGroupId,marker='SYNTHETIC-STORAGE-SCAN-CANARY-ROTATION';
+ await a.proxy.createGroup(groupId);
+ const artifact=await a.proxy.createArtifact({groupId,name:'Storage scan',type:'text/plain',content:marker});
+ const records=[...backend.accountStorage.data.entries(),...[...backend.journeyStores.values()].flatMap(s=>[...s.data.entries()])];
+ assert.ok(records.some(([key])=>key==='accounts'));
+ assert.ok(records.some(([key])=>key===JSON.stringify(['artifactVersions',groupId,artifact.artifactId])));
+ assert.ok([...backend.blobs.data.keys()].some(key=>{const parts=JSON.parse(key);return parts[0]==='artifact'&&parts[1]===groupId&&parts[2]===artifact.artifactId;}));
+ const bytes=[...records.map(([key,value])=>Buffer.from(key+value)),...[...backend.blobs.data.entries()].map(([key,value])=>Buffer.concat([Buffer.from(key),Buffer.from(value)]))];
+ for(const value of bytes)assert.equal(value.includes(Buffer.from(marker)),false,'artifact plaintext marker found in server storage');
+ assert.equal((await a.proxy.readArtifact(groupId,artifact.artifactId)).content,marker);
+});
+test('proxy: malformed local JSON refuses without exposing stored content in errors',async t=>{
+ const {a}=await fixture(t);
+ const store={async read(){return '{"SYNTHETIC-LOCAL-SECRET":';},async write(){throw new Error('Unexpected write');}};
+ await assert.rejects(WayfindingProxy.open(a.remote,store),{message:'Invalid local or MLS JSON'});
+});
 
 test('proxy: stdio-facing MCP exposes artifact lifecycle, MLS controls and coordination but no raw blob bypass',async t=>{
  const {a}=await fixture(t);

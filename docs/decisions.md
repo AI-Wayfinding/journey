@@ -240,8 +240,21 @@ Dan's brief for v2 was to write the spec, build what seems best, and refine late
 - **Supersedes:** decision 33's daily created-request accounting only; its per-requester accounting and authority checks remain. The console shows the agent ceiling, On/Off rows, inherited or per-day limits, admitted usage and held counts.
 - **Source:** `packages/mcp/src/offers.ts`, `packages/mcp/src/agent-offers.ts`, `packages/mcp/src/accounts.ts`, `packages/mcp/src/tasks.ts`; `packages/mcp/test/offer-journeys.test.ts` and console tests.
 
+### 35. Seal all non-routing content; scope offers per journey
+
+**Status:** design target, not completed implementation. The current privacy boundary is described in `docs/poc-test-guide.md`. Interview sharing still needs the confirmation declared in `.work/drafts/sealing.md`, section 8, item 5.
+
+- **Decided by:** Dan (2026-11-11) set the encryption boundary and per-journey offer switches. The group/API/browser/reset details are proposed in `.work/drafts/sealing.md`; that draft lists unresolved choices.
+- **What:** content not needed for server routing, authorization, admission, bounded storage or coordination laws is encrypted at the device using MLS audiences. This includes post/topic/board text, interviews, contributions, library metadata and versions, project/journey names and purposes, account/card descriptions, offer schemas/instructions and task requests/results/conversations. Descriptive copies and search queries stay off the server too. Authority/capabilities, ownership, memberships, lifecycle/version counters, deadlines, admission policy and byte accounting remain clear and enforced server-side.
+- **Groups:** journey material uses the journey group; private interviews and task exchange use narrower groups; private account material uses the personal group. Removing a device/person/agent revokes its leaves before new content. New versions never reuse keys known to a removed member. `device.keys` still needs explicit passkey-confirmed consent and never grants unrelated authority.
+- **Offers:** each offer has explicit on/off settings per journey and may set a lower journey limit. No journey override or approval may bypass the agent-wide hard ceiling. Daily ceilings count idempotent admission permits issued on allow/approve in a rolling 24-hour window; held requests without a permit cannot execute. Both scopes are checked at reservation and approval, while per-requester policy retains created-request receipts.
+- **Clients:** proxy/browser validate decrypted content and schemas. The server accepts bounded envelopes, never plaintext content. Search is device-side. Until the browser MLS device is enrolled/unlocked, the console shows ids/status only. A PRF passkey or recovery code protects browser keys; the hosted JavaScript trust limit is disclosed.
+- **PoC:** use a sealed-only storage generation and reset synthetic PoC data rather than migrating plaintext. Separately verify and authorise deletion of old synthetic copies; changing bindings alone is not a wipe. ts-mls remains unaudited and the rule/security review gate still blocks real confidential data.
+- **Supersedes:** `.work/drafts/v2.md` design item 9 and decision 27's server-readable PoC privacy exception; decision 33's plaintext content boundary and wildcard offer-journey scope. Decision 9's numeric bound, decision 20's person-only grants and decision 32's explicit device authority remain. Adoption is staged; existing plaintext paths remain until replaced, not made private by this decision entry.
+- **Source:** Dan's sealing/per-journey-offers brief (2026-11-11); `.work/drafts/sealing.md`.
+
 ## Open
 
-- **Stage 6, cloud-client opt-in:** not built.
+- **Content sealing:** the target in decision 35 is not implemented for forum, library or sensemaking content. Interview sharing needs the confirmation declared in `.work/drafts/sealing.md`, section 8, item 5.
 - **Stage 7, review:** not done. Dan's formal review of the rules and an independent security review must pass before real users or confidential data arrive.
 - **Dates:** the rewrite plan dates some of Dan's decisions 2026-11-01, but the commits that record them are dated 2026-10-29. The commit dates are what Git records.

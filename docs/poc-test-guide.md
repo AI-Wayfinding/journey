@@ -97,6 +97,22 @@ The MCP endpoint is `https://poc.wayfinding.support/mcp`. Its OAuth issuer is `h
 
 The Worker still needs its existing **`WORKOS_API_KEY` secret** for Staging profile provisioning and **`CONSOLE_SECRET`** (at least 32 bytes) for console sessions. Keep the existing `AUTHKIT_ISSUER`, `AUTHKIT_AUTHORIZE_URL` and `MCP_RESOURCE` variables. No new secret or binding is required. `MCP_RESOURCE` determines the new issuer origin. Keep the current Accounts and Journey Durable Object classes and migrations unchanged. Do not reset data. Retain the AuthKit registration of `/console/client.json` with `/console/callback` as its redirect. Changing secrets can publish a Worker version, so this no-deploy change does not set any.
 
+## Artifact revision-key checks (source only)
+
+The proxy encrypts artifact bodies and now gives every new revision a fresh key, including when the MLS epoch stays the same. A removed member's cached key must not decrypt a new version of an old artifact. The remaining member must still read it. A failed personal-artifact upload must leave the previous revision readable, including after a proxy restart.
+
+The revision-key cache uses named records. An authenticated MLS artifact id such as `__proto__` must not alter object prototypes. The suite also checks that malformed local JSON does not expose stored content in an error.
+
+Run the focused checks from the repository root:
+
+```sh
+node --test packages/proxy/test/proxy.test.ts
+```
+
+The storage test scans DO values, side keys and blob bytes for an artifact-body marker. It was checked with encryption bypassed: the scan failed on the marker, then passed after encryption was restored. This covers the existing encrypted artifact-body path only. It does not establish privacy for names or metadata.
+
+**Forum posts, topic titles, library text, interviews and contributions remain server-readable.** Their sealing, audience registry, idempotent publication and device-local search are not implemented. The source has no sealed-only storage generation or browser encryption device. Decision 35 records the target, not a completed privacy change. Before private/shared interview publication is built, section 8, item 5 of `.work/drafts/sealing.md` requires confirmation that sharing is irreversible and includes future journey readers and later edits.
+
 ## Connect the local proxy
 
 The local proxy remains required to encrypt and decrypt sealed artifact content. Give its agent the account capability `device.keys` at Worker consent. It starts unchecked, including on reauthorization. Select it and confirm with a registered passkey; a fresh login alone cannot grant it. Ordinary remote coordination clients should leave it off. The automated tests cover proxy bootstrap and a sealed-content round-trip with a Worker agent token; this version has not had a live smoke test.
