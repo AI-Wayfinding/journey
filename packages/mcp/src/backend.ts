@@ -195,7 +195,7 @@ export class Backend implements CoordinationBackend {
         const agents = z.array(z.record(z.string(), z.unknown())).parse(data.agents);
         return { agents: await Promise.all(agents.map(async agent => ({ ...agent, journeys: agent.live ? await this.agentMemberships(account.personId, String(agent.agentId)) : [] }))) };
       }
-      case 'offer_set': case 'offer_list': case 'offer_publish': case 'offer_retire': case 'offer_settings':
+      case 'offer_journey_set': case 'offer_set': case 'offer_list': case 'offer_publish': case 'offer_retire': case 'offer_settings':
         return this.accounts.agentCommand(account.personId, clientId, command);
       case 'agent_create': case 'agent_narrow': case 'agent_card': case 'client_list':
         return this.accounts.agentCommand(account.personId, clientId, command);
@@ -265,7 +265,7 @@ export class MemoryBackend extends Backend {
     const accounts = new AccountsHost(storage, profiles, blobs, verifier, now);
     super(accounts, id => {
       let host = hosts.get(id);
-      if (!host) { const store = new MemoryStorage(); stores.set(id, store); host = new JourneyHost(store, now, blobs, { directory: () => accounts.offerDirectory(), stand: d => accounts.standingDecision(d), reserve: r => accounts.reserveAllowance(r), release: id => accounts.releaseAllowance(id) }); hosts.set(id, host); }
+      if (!host) { const store = new MemoryStorage(); stores.set(id, store); host = new JourneyHost(store, now, blobs, { directory: () => accounts.offerDirectory(), stand: d => accounts.standingDecision(d), reserve: r => accounts.reserveAllowance(r), approve: r => accounts.approveAllowance(r), release: (id, permitOnly) => accounts.releaseAllowance(id, permitOnly) }); hosts.set(id, host); }
       return host;
     });
     this.accountsHost = accounts; this.accountStorage = storage; this.journeyStores = stores; this.blobs = blobs;

@@ -10,7 +10,7 @@ import { library, isLibraryCommand, isLibraryArtifact, requireItem, visibleItem,
 import { forum, isForumCommand, defaultBoard, type Board, type Topic, type Post } from './forum.ts';
 import { rounds, isRoundCommand, type SensemakingRound } from './rounds.ts';
 import { changeTask, type JourneyTask } from './tasks.ts';
-import { offerView, DEFAULT_SETTINGS, type OfferPort, type OfferAgent, type StandingDecision } from './offers.ts';
+import { journeyEnabled, type AllowanceRelease, offerView, DEFAULT_SETTINGS, type OfferPort, type OfferAgent, type StandingDecision } from './offers.ts';
 
 interface Identity { id: string; name: string }
 interface Project { id: string; name: string; purpose: string; rule: Snapshot }
@@ -127,7 +127,7 @@ export class JourneyHost {
   private runnable(state: JourneyState, agent: OfferAgent): boolean {
     return state.agents.some(a => a.id === agent.id && a.owner === agent.owner) && this.can(state, this.slot(state, agent.id), { personId: agent.owner, agent: { id: agent.id, name: agent.name, live: true, card: agent.card } }, 'task.manage');
   }
-  private async changeTask(state: JourneyState, actor: number, identity: Actor, command: Extract<Command, { tool: 'task_create' | 'task_step' }>): Promise<string | undefined> {
+  private async changeTask(state: JourneyState, actor: number, identity: Actor, command: Extract<Command, { tool: 'task_create' | 'task_step' }>): Promise<AllowanceRelease | undefined> {
     if (command.tool === 'task_step') {
       const task = state.tasks.find(t => t.id === command.input.taskId);
       if (task && !this.taskVisible(state, task, identity)) throw new Refused('Task access refused');
@@ -240,7 +240,7 @@ export class JourneyHost {
       }, { highWaterMark: 16 });
     });
   }
-  private async commit(state: JourneyState, writes: [string, string][] = [], allowance?: string): Promise<void> {
+  private async commit(state: JourneyState, writes: [string, string][] = [], allowance?: AllowanceRelease): Promise<void> {
     let before: JourneyState | undefined;
     try {
       before = await this.load();
@@ -253,7 +253,7 @@ export class JourneyHost {
       });
     } catch (error) {
       // The task transaction aborted. Never release after a successful commit, even if notification fails.
-      if (allowance) { try { await this.offers!.release(allowance); } catch { /* Retain on ambiguity; no extra allowance. */ } }
+      if (allowance) { try { await this.offers!.release(allowance.taskId, allowance.permitOnly); } catch { /* Retain on ambiguity; no extra allowance. */ } }
       throw error;
     }
     try { await this.flushOffers(state); } catch { /* Durable outbox and alarm retry; the task decision is already committed. */ }
@@ -313,7 +313,7 @@ export class JourneyHost {
     return this.serial.run(async () => {
       let state = await this.load();
       if (state?.offerOutbox?.length) await this.flushOffers(state);
-      let allowance: string | undefined;
+      let allowance: AllowanceRelease | undefined;
       if (command.tool === 'journey_create') {
         if (state) throw new Refused('Journey already exists');
         if (!journeyId) throw new Refused('Journey identity missing');
@@ -359,7 +359,7 @@ export class JourneyHost {
         }
         if (cap && !ownRemoval) this.requireCapability(state, actor, identity, cap);
         if (command.tool === 'offer_search') {
-          const found = (await this.offers?.directory() ?? []).filter(g => this.runnable(state!, g)).flatMap(g => g.offers.filter(o => o.status === 'published' && (o.journeys === 'all' || o.journeys.includes(state!.id))).map(o => ({ ...offerView(o), agentId: g.id, agentName: g.name, owner: g.owner })));
+          const found = (await this.offers?.directory() ?? []).filter(g => this.runnable(state!, g)).flatMap(g => g.offers.filter(o => o.status === 'published' && journeyEnabled(o, state!.id)).map(o => ({ ...offerView(o), agentId: g.id, agentName: g.name, owner: g.owner })));
           const query = command.input.query?.toLowerCase(), tags = command.input.tags;
           return { journeyId: state.id, offers: found.filter(o => (!query || `${o.name} ${o.description} ${o.tags.join(' ')}`.toLowerCase().includes(query)) && (!tags || tags.every(t => o.tags.includes(t)))) };
         }

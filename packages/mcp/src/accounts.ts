@@ -1,6 +1,6 @@
 import * as z from 'zod';
 import { accountOfferCommand } from './agent-offers.ts';
-import { DEFAULT_SETTINGS, offerView, allowanceRequestSchema, matchingRule, clampAdmission, periodMs, type AllowanceRequest, type AllowanceReceipt, type OfferAgent, type StandingDecision } from './offers.ts';
+import { DEFAULT_SETTINGS, offerView, allowanceRequestSchema, permitRequestSchema, journeyEnabled, matchingRule, clampAdmission, clampJourneyLimits, periodMs, type AllowanceRequest, type AllowanceReceipt, type OfferAgent, type StandingDecision, type PermitRequest, type AdmissionPermit, type Offer, type OwnerOfferSettings } from './offers.ts';
 import { PRE_OFFERS_CARD_HASH } from './rules.ts';
 import { Refused, isRelay, type Command, type KeyPackageCommand, type ToolData } from './commands.ts';
 import { personalGroupRule, RULES, sameRules, sameState, cell, SLOTS, type Snapshot, type RulesStamp } from './rules.ts';
@@ -17,8 +17,23 @@ import { managePasskey } from './console/passkeys.ts';
 export interface Profile { name: string; email: string }
 export interface Profiles { get(subject: string): Promise<Profile> }
 export interface Account extends Profile, AgentAccount { subject: string; personId: string; nickname?: string; group: Snapshot; identities: { id: string; name: string; kind: 'device' | 'agent' }[] }
-interface AccountsState { rulesHash: RulesStamp; accounts: Account[]; journeys: string[]; oauth?: OAuthState; allowances?: AllowanceReceipt[] }
+interface AccountsState { rulesHash: RulesStamp; accounts: Account[]; journeys: string[]; oauth?: OAuthState; allowances?: AllowanceReceipt[]; permits?: AdmissionPermit[] }
 
+// The Accounts serial is the admission linearisation point for every journey.
+function issuePermit(state: AccountsState, request: PermitRequest, offer: Offer, settings: OwnerOfferSettings, now: number): 'allow' | 'hold' {
+  const permits = (state.permits ?? []).filter(p => p.issuedAt > now - periodMs('week'));
+  state.permits = permits;
+  const previous = permits.find(p => p.taskId === request.taskId);
+  if (previous) {
+    if (previous.agentId !== request.agentId || previous.offerId !== request.offerId || previous.journeyId !== request.journeyId) throw new Refused('Admission permit mismatch');
+    return 'allow';
+  }
+  const daily = permits.filter(p => p.agentId === request.agentId && p.issuedAt > now - periodMs('day'));
+  const limit = offer.journeySettings[request.journeyId]?.maxRequestsPerDay;
+  if (settings.maxRequestsPerDay && daily.length >= settings.maxRequestsPerDay || limit !== undefined && daily.filter(p => p.offerId === request.offerId && p.journeyId === request.journeyId).length >= limit) return 'hold';
+  permits.push({ taskId: request.taskId, agentId: request.agentId, offerId: request.offerId, journeyId: request.journeyId, issuedAt: now });
+  return 'allow';
+}
 export class AccountsHost {
   private readonly serial = new Serial();
   private readonly storage: KeyValueStorage;
@@ -41,6 +56,23 @@ export class AccountsHost {
       }
     }
     state.rulesHash = RULES;
+    let migrated = false;
+    for (const agent of state.accounts.flatMap(a => a.agents)) for (const offer of agent.offers ?? []) {
+      const legacy = offer as Offer & { journeys?: 'all' | string[] };
+      if (legacy.journeys !== undefined) {
+        // Synthetic PoC migration: preserve explicit scope hints, but require owner re-enablement.
+        const ids = legacy.journeys === 'all' ? agent.journeys ?? [] : legacy.journeys;
+        offer.journeySettings = Object.fromEntries(ids.slice(0, 128).map(id => [id, { enabled: false }]));
+        offer.contentRevision = 1; offer.version++; delete legacy.journeys; migrated = true;
+      }
+    }
+    if (state.permits === undefined) {
+      // Old approvals were not recorded: reserve all retained receipts conservatively for a day.
+      const now = this.now();
+      state.permits = (state.allowances ?? []).filter(r => r.createdAt > now - periodMs('week')).map(r => ({ taskId: r.taskId, agentId: r.agentId, offerId: r.offerId, journeyId: r.journeyId, issuedAt: now }));
+      migrated = true;
+    }
+    if (migrated) await this.storage.put('accounts', JSON.stringify(state));
     return state;
   }
   /** Host-only bounded session registry; a single replacement makes take/delete atomic. */
@@ -206,7 +238,7 @@ export class AccountsHost {
       const account = state.accounts.find(a => a.live && a.agents.some(g => g.id === request.agentId && g.live));
       const agent = account?.agents.find(g => g.id === request.agentId);
       const offer = agent?.offers?.find(o => o.id === request.offerId);
-      if (!account || !agent || !offer || offer.status !== 'published' || offer.version !== request.version || offer.journeys !== 'all' && !offer.journeys.includes(request.journeyId)) throw new Refused('Offer changed; reload before requesting');
+      if (!account || !agent || !offer || offer.status !== 'published' || offer.version !== request.version || !journeyEnabled(offer, request.journeyId)) throw new Refused('Offer changed; reload before requesting');
       const settings = agent.offerSettings ?? DEFAULT_SETTINGS;
       const policy = offer.agentDefined ? clampAdmission(offer.admission, settings) : offer.admission;
       const matched = matchingRule(policy, { requesterId: request.requesterId, requesterPersonId: request.requesterPersonId, isAgent: request.isAgent, isGuide: request.isGuide, journeyId: request.journeyId, owner: account.personId });
@@ -217,20 +249,34 @@ export class AccountsHost {
       const agentReceipts = receipts.filter(r => r.agentId === agent.id);
       const limit = matched?.limit;
       if (decision === 'allow' && limit && agentReceipts.filter(r => r.offerId === offer.id && r.requesterId === request.requesterId && r.isAgent === request.isAgent && r.createdAt > now - periodMs(limit.per)).length >= limit.count) decision = 'hold';
-      if (settings.maxRequestsPerDay && agentReceipts.filter(r => r.createdAt > now - periodMs('day')).length >= settings.maxRequestsPerDay) decision = 'hold';
+      if (decision === 'allow') decision = issuePermit(state, request, offer, settings, now);
       receipts.push({ taskId: request.taskId, agentId: agent.id, offerId: offer.id, version: offer.version, journeyId: request.journeyId, requesterId: request.requesterId, requesterPersonId: request.requesterPersonId, isAgent: request.isAgent, isGuide: request.isGuide, createdAt: now, decision });
       state.allowances = receipts;
       await this.storage.put('accounts', JSON.stringify(state));
       return decision;
     });
   }
-  /** Only the creating journey releases, after a definite failure before its task commit. */
-  releaseAllowance(taskId: string): Promise<void> {
+  /** Host-only approval: identity stays bound to the original created-request receipt. */
+  approveAllowance(supplied: PermitRequest): Promise<'allow' | 'hold'> {
     return this.serial.run(async () => {
-      const state = await this.load(), receipts = state.allowances;
-      if (!receipts?.some(r => r.taskId === taskId)) return;
-      state.allowances = receipts.filter(r => r.taskId !== taskId);
-      if (!state.allowances.length) delete state.allowances;
+      const request = permitRequestSchema.parse(supplied), state = await this.load(), now = this.now();
+      const receipt = state.allowances?.find(r => r.taskId === request.taskId && r.createdAt > now - periodMs('week'));
+      if (!receipt || receipt.agentId !== request.agentId || receipt.offerId !== request.offerId || receipt.journeyId !== request.journeyId) throw new Refused('Approval receipt mismatch or expired');
+      const account = state.accounts.find(a => a.live && a.agents.some(g => g.id === request.agentId && g.live));
+      const agent = account?.agents.find(g => g.id === request.agentId), offer = agent?.offers?.find(o => o.id === request.offerId);
+      if (!agent || !offer || offer.status !== 'published' || !journeyEnabled(offer, request.journeyId)) throw new Refused('Offer is disabled or not available');
+      const decision = issuePermit(state, request, offer, agent.offerSettings ?? DEFAULT_SETTINGS, now);
+      await this.storage.put('accounts', JSON.stringify(state));
+      return decision;
+    });
+  }
+  /** Only the creating journey releases, after a definite failure before its task commit. */
+  releaseAllowance(taskId: string, permitOnly = false): Promise<void> {
+    return this.serial.run(async () => {
+      const state = await this.load();
+      state.permits = state.permits?.filter(p => p.taskId !== taskId);
+      if (!permitOnly) state.allowances = state.allowances?.filter(r => r.taskId !== taskId);
+      if (!state.allowances?.length) delete state.allowances;
       await this.storage.put('accounts', JSON.stringify(state));
     });
   }
@@ -256,12 +302,13 @@ export class AccountsHost {
       const actor = this.resolve(account, clientId, 'actingAgent' in command.input ? command.input.actingAgent : undefined);
       const view = (a: Account['agents'][number]) => ({ agentId: a.id, name: a.name, live: a.live, signed: scalar(a.card, 'signed') === 1, capabilities: cardCaps(a.card), offers: !actor.agent || actor.agent.id === a.id ? (a.offers ?? []).map(offerView) : undefined, clientId: a.clientId, clientName: a.clientName, createdAt: a.createdAt, lastUsedAt: a.lastUsedAt, journeys: a.journeys ?? [] });
       switch (command.tool) {
-        case 'offer_set': case 'offer_list': case 'offer_publish': case 'offer_retire': case 'offer_settings': {
+        case 'offer_journey_set': case 'offer_set': case 'offer_list': case 'offer_publish': case 'offer_retire': case 'offer_settings': {
           const agent = account.agents.find(a => a.id === command.input.agentId && a.live);
           if (!agent) throw new Refused('Only a live agent owner may manage offers');
           const result = accountOfferCommand(actor, agent, command, this.now());
           if (result.changed) await this.storage.put('accounts', JSON.stringify(state));
-          return result.data;
+          const permits = (state.permits ?? []).filter(p => p.agentId === agent.id && p.issuedAt > this.now() - periodMs('day'));
+          return { ...result.data, usage: { admitted24h: permits.length, journeys: (agent.offers ?? []).flatMap(o => Object.keys(o.journeySettings).map(journeyId => ({ offerId: o.id, journeyId, admitted24h: permits.filter(p => p.offerId === o.id && p.journeyId === journeyId).length }))) } };
         }
         case 'client_list': return { clientId, actingAgent: actor.agent?.id, clients: account.clients.map((id, i) => ({ clientId: id, agentId: cell(account.bindings, 'Bound', i + 1) || cell(account.bindings, 'Revoked', i + 1) ? account.agents[cell(account.bindings, 'Agents', i + 1) - 2]?.id : undefined, bound: cell(account.bindings, 'Bound', i + 1) === 1, revoked: cell(account.bindings, 'Revoked', i + 1) === 1 })) };
         case 'agent_list': return { agents: account.agents.map(view) };
@@ -324,6 +371,7 @@ export class AccountsHost {
       else if (change.kind === 'offer_settings') {
         const current = agent.offerSettings ?? DEFAULT_SETTINGS;
         agent.offerSettings = { publishWithoutReview: change.settings.publishWithoutReview ?? current.publishWithoutReview, maxAdmission: change.settings.maxAdmission ?? current.maxAdmission, maxRequestsPerDay: change.settings.maxRequestsPerDay ?? current.maxRequestsPerDay };
+        clampJourneyLimits(agent.offers ?? [], agent.offerSettings, this.now());
       }
       else {
         let client = account.clients.indexOf(change.clientId) + 1;

@@ -142,6 +142,16 @@ export function createConsole(config: ConsoleConfig) {
           await config.backend.execute(session.subject, parseCommand('offer_settings', { agentId, ...offerSettingsForm(body) }), session.clientId);
           return redirect(`/console/agents/${encodeURIComponent(agentId)}`);
         }
+        if (path === '/console/offers/journey') {
+          const agentId = z.string().min(1).max(200).parse(body.agentId);
+          const limitMode = z.enum(['inherit', 'limit']).parse(body.limitMode);
+          const enabled = typeof body.enabled === 'boolean' ? body.enabled : z.enum(['true', 'false']).parse(body.enabled) === 'true';
+          await config.backend.execute(session.subject, parseCommand('offer_journey_set', {
+            agentId, offerId: body.offerId, journeyId: body.journeyId, expectedVersion: z.coerce.number().int().min(1).parse(body.expectedVersion), enabled,
+            ...(limitMode === 'inherit' ? { clearLimit: true } : { maxRequestsPerDay: z.coerce.number().int().min(1).max(1000).parse(body.maxRequestsPerDay) }),
+          }), session.clientId);
+          return redirect(`/console/agents/${encodeURIComponent(agentId)}`);
+        }
         if (path === '/console/offers/publish' || path === '/console/offers/retire') {
           const agentId = z.string().min(1).max(200).parse(body.agentId);
           await config.backend.execute(session.subject, parseCommand(path.endsWith('/publish') ? 'offer_publish' : 'offer_retire', { agentId, offerId: body.offerId }), session.clientId);
@@ -160,7 +170,7 @@ export function createConsole(config: ConsoleConfig) {
           if (!rule || typeof rule.who !== 'object' || rule.who === null) throw new Refused('Standing rule required');
           await config.backend.execute(session.subject, parseCommand('offer_set', { agentId, expectedVersion: version, offer: {
             id: offer.id, name: offer.name, description: offer.description, tags: offer.tags, examples: offer.examples,
-            inputSchema: offer.inputSchema, outputSchema: offer.outputSchema, journeys: offer.journeys, resource: offer.resource, instructions: offer.instructions,
+            inputSchema: offer.inputSchema, outputSchema: offer.outputSchema, journeySettings: offer.journeySettings, resource: offer.resource, instructions: offer.instructions,
             admission: { rules: admission.rules.filter((_, i) => i !== ruleIndex), default: admission.default },
           } }), session.clientId);
           return redirect(`/console/agents/${encodeURIComponent(agentId)}`);
