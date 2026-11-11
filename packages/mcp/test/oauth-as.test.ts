@@ -13,6 +13,8 @@ import { authenticator } from './console-authenticator.ts';
 import { runInNewContext } from 'node:vm';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { WayfindingProxy } from '../../proxy/src/proxy.ts';
+import {capabilities} from '../../rules/src/capabilities.ts';
+import {cardCaps} from '../src/agents.ts';
 
 const signer = await keyPair('oauth-as');
 const origin = RESOURCE.origin, consoleClient = `${origin}/console/client.json`;
@@ -317,6 +319,26 @@ async function deviceConsentFixture() {
   }
   return { ...f, cookie, key, pending };
 }
+
+test('oauth AS: selecting all assignable capabilities succeeds with passkey-confirmed consent',async()=>{
+ const f=await deviceConsentFixture(),pending=await f.pending();
+ const html=await (await f.send(`/oauth/consent?request=${pending.request}`,{headers:{cookie:f.cookie}})).text();
+ const selected=[...html.matchAll(/name="capabilities" value="([^"]+)"/g)].map(m=>m[1]!);
+ const expected=capabilities.filter(c=>c.name!=='grant.issue').map(c=>c.name);
+ assert.deepEqual(new Set(selected),new Set(expected));
+ assert.equal(selected.length,expected.length);
+ const body={...pending,capabilities:selected};
+ const optionsResponse=await f.post('/oauth/consent/options',body,f.cookie);
+ assert.equal(optionsResponse.status,200);
+ const options=await optionsResponse.json() as {challenge:string};
+ const response=await f.post('/oauth/consent',{...body,assertion:await f.key.assert(options.challenge)},f.cookie);
+ assert.equal(response.status,303);
+ const code=new URL(response.headers.get('location')!).searchParams.get('code')!;
+ assert.equal((await f.exchange(code)).status,200);
+ const account=(await f.backend.accountsHost.lookup('alice'))!;
+ assert.equal(account.agents.length,1);
+ assert.deepEqual(new Set(cardCaps(account.agents[0]!.card)),new Set(expected));
+});
 
 test('oauth AS: device.keys passkey is bound to the pending authorization, exact card, person and expiry; cannot replay', async () => {
   const f = await deviceConsentFixture(), body = await f.pending();
