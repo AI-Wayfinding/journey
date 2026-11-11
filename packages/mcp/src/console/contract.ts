@@ -33,6 +33,8 @@ export const recordOperation = z.discriminatedUnion('op', [
 export type RecordOperation = z.infer<typeof recordOperation>;
 export interface ConsoleBackend extends CoordinationBackend {
   readonly sealedMode?:boolean;
+  sealedExecute?(subject:string,tool:string,input:unknown,clientId?:string):Promise<ToolData>;
+  whoami?(subject:string,clientId:string):Promise<ToolData>;
   oauth(operation: import('../oauth-contract.ts').OAuthOperation): Promise<import('../oauth-contract.ts').OAuthResult>;
   consentAgent(subject: string, id: string, consent: import('../oauth-contract.ts').AgentConsent, assertion?: AuthenticationResponseJSON): Promise<string>;
   manageAgent(identity: ClientIdentity, agentId: string, name: string, journeys: string[]): Promise<void>;
@@ -40,6 +42,7 @@ export interface ConsoleBackend extends CoordinationBackend {
   consoleRecord(operation: RecordOperation): Promise<ConsoleRecord | undefined>;
   beginAuthorization(identity: ClientIdentity, change: CardChange): Promise<{ challenge: string }>;
   completeAuthorization(identity: ClientIdentity, change: CardChange, assertion: AuthenticationResponseJSON | undefined): Promise<ToolData>;
+
 }
 export interface ConsoleOptions {
   secret: string;

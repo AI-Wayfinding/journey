@@ -22,7 +22,7 @@ for (const form of document.querySelectorAll('form[data-ceremony]')) form.addEve
     const options = await (await post(form.dataset.options, consent ? { request: fields.get('request'), decision: 'allow', name: fields.get('name'), capabilities: fields.getAll('capabilities'), journeys: fields.getAll('journeys') } : change ? { change } : {})).json();
     options.challenge = decode(options.challenge);
     const registering = form.dataset.ceremony === 'register';
-    if (registering) { options.user.id = decode(options.user.id); options.excludeCredentials = (options.excludeCredentials || []).map(c => ({ ...c, id: decode(c.id) })); }
+    if (registering) { options.extensions = { prf: {} }; options.user.id = decode(options.user.id); options.excludeCredentials = (options.excludeCredentials || []).map(c => ({ ...c, id: decode(c.id) })); }
     else options.allowCredentials = options.allowCredentials.map(c => ({ ...c, id: decode(c.id) }));
     const result = registering ? await navigator.credentials.create({ publicKey: options }) : await navigator.credentials.get({ publicKey: options });
     if (!result) throw new Error('Passkey confirmation was cancelled.');

@@ -18,6 +18,7 @@ export async function browserEnrollment(account:Account,storage:KeyValueStorage,
   if(operation.op!=='browser_begin'&&operation.op!=='browser_finish')throw new Refused('Unknown browser operation');
   const {browserId,credentialId,device}=operation;
   if(!account.passkeys.some(c=>c.id===credentialId))throw new Refused('Registered wrapping passkey required');
+  if(browsers.some(b=>b.id!==browserId&&b.devices.includes(device.deviceId)))throw new Refused('Device belongs to another browser');
   const old=browsers.find(b=>b.id===browserId);
   if(old&&(old.credentialId!==credentialId||!old.devices.every(live)))throw new Refused('Browser device revoked or wrapping credential changed');
   if(!old&&browsers.length>=16)throw new Refused('Browser capacity reached');
@@ -30,7 +31,7 @@ export async function browserEnrollment(account:Account,storage:KeyValueStorage,
   if(!pending||pending.digest!==digest||pending.expiresAt<=now)throw new Refused('Fresh exact browser enrollment assertion required');
   const proof=await verifier.verify(operation.assertion,pending.challenge,account.passkeys);
   if(proof.credentialId!==credentialId)throw new Refused('Wrapping passkey mismatch');
-  const binding=await register(device);const browser=old??{id:browserId,credentialId,devices:[]};browser.devices.push(device.deviceId);if(!old)browsers.push(browser);account.browsers=browsers;
+  const binding=await register(device);const browser=old??{id:browserId,credentialId,devices:[]};if(!browser.devices.includes(device.deviceId))browser.devices.push(device.deviceId);if(!old)browsers.push(browser);account.browsers=browsers;
   const credential=account.passkeys.find(c=>c.id===credentialId)!;credential.counter=proof.counter;credential.lastUsedAt=now;
   await storage.put(key,'null');return binding;
 }

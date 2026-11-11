@@ -17,7 +17,7 @@ export class MemoryBlobs implements BlobStore {
     return value ? { async arrayBuffer() { return new Uint8Array(value).buffer; } } : null;
   }
 }
-export function decodeBytes(data: string, maximum: number): Uint8Array {
+export function decodeBytes(data: string, maximum: number): Uint8Array<ArrayBuffer> {
   let raw: string;
   try { raw = atob(data); } catch { throw new Refused('Invalid relay base64'); }
   if (raw.length > maximum || btoa(raw) !== data) throw new Refused('Invalid or oversized relay bytes');

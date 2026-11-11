@@ -3,7 +3,7 @@ function parseJSON(text: string): unknown { try { return JSON.parse(text); } cat
 import { Refused } from '../commands.ts';
 
 /** Bound all browser input before decoding JSON or URL-encoded form fields. */
-export async function formBody(request: Request, csrf: string, origin: string): Promise<Record<string, unknown>> {
+export async function formBody(request: Request, csrf: string, origin: string, maxBytes=96*1024): Promise<Record<string, unknown>> {
   // Browsers may send `Origin: null` for privacy; then accept only a browser-set Sec-Fetch-Site: same-origin, which pages cannot forge.
   const sent = request.headers.get('origin');
   const sameOrigin = sent === origin || (sent === 'null' && request.headers.get('sec-fetch-site') === 'same-origin');
@@ -17,7 +17,7 @@ export async function formBody(request: Request, csrf: string, origin: string): 
       const chunk = await reader.read();
       if (chunk.done) break;
       size += chunk.value.length;
-      if (size > 96 * 1024) throw new Refused('Form too large');
+      if (size > maxBytes) throw new Refused('Form too large');
       text += decoder.decode(chunk.value, { stream: true });
     }
     text += decoder.decode();
