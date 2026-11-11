@@ -8,6 +8,7 @@ export const SEALED_FORMAT = 'application/vnd.wayfinding.sealed+json;v=1' as con
 export const SEALED_NOTICE = 'sealed — open in your client';
 export const SEALED_LIMITS = Object.freeze({ blob: 10 * 1024 * 1024, envelope: 1024 * 1024, package: 64 * 1024, messages: 4096, bytes: 32 * 1024 * 1024, pageBytes: 4 * 1024 * 1024, page: 100, pending: 600_000, checkpoint: 30 * 86400_000 });
 export const sid = z.string().min(1).max(200);
+export const sealedOfferId = z.string().regex(/^offer-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
 export const snat = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 export const sealedEnvelope = z.object({ groupId: sid, epoch: snat, ciphertext: z.string().min(4).max(4 * Math.ceil(SEALED_LIMITS.envelope / 3)), contentType: z.literal(SEALED_FORMAT), size: snat.min(1).max(SEALED_LIMITS.envelope) }).strict();
 export type SealedEnvelope = z.infer<typeof sealedEnvelope>;
@@ -28,7 +29,7 @@ export const sealedRouting = {
   task_create:z.object({taskId:sid,maxRounds:snat.min(1),deadline:snat.max(8_640_000_000_000_000)}).strict(),
   task_exchange:z.object({taskId:sid,action:z.enum(['claim','startRound','endRound','finish','cancel','expire','approve','decline','askInput','answer','fail']),standing:z.enum(['always_allow','always_deny']).optional()}).strict(),
   identity_descriptor:z.object({kind:z.enum(['profile','card']),agentId:sid.optional(),contentRevision:snat.min(1),private:z.boolean()}).strict().refine(v=>(v.kind==='card')===(v.agentId!==undefined)),
-  offer_definition: z.object({agentId:sid,offerId:sid,contentRevision:snat.min(1),private:z.boolean()}).strict(),
+  offer_definition: z.object({agentId:sid,offerId:sealedOfferId,contentRevision:snat.min(1),private:z.boolean()}).strict(),
   project_create: z.object({}).strict(),
   project_update: z.object({projectId:sid,status:z.enum(['gettingStarted','active','lookingForOthers','archived']).optional()}).strict(),
   board_create: z.object({}).strict(),
@@ -66,7 +67,7 @@ export const sealedInputs: Record<string,z.ZodObject> = {
   task_step:ticket,
   task_read:z.object({journeyId:sid,taskId:sid}).strict(),
   sealed_record_read:z.object({journeyId:sid,recordId:sid,revision:snat.min(1)}).strict(),
-  offer_set:z.object({agentId:sid,offer:z.object({id:sid,sealed:sealedOfferDefinition,journeySettings:journeySettingsSchema,admission:admissionSchema}).strict(),expectedVersion:snat.min(1).optional()}).strict(),
+  offer_set:z.object({agentId:sid,offer:z.object({id:sealedOfferId,sealed:sealedOfferDefinition,journeySettings:journeySettingsSchema,admission:admissionSchema}).strict(),expectedVersion:snat.min(1).optional()}).strict(),
   offer_search:z.object({journeyId:sid}).strict(),
   journey_create:z.object({policy:z.enum(['request','open','invite']).default('request'),defaultRole:z.enum(['read','write']).default('read')}).strict(),
   sealed_catalog:z.object({...ctx,cursor:snat.default(0)}).strict(),
