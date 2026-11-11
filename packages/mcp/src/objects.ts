@@ -1,4 +1,5 @@
 import * as z from 'zod';
+import { writeRequestSchema, writePermitSchema, writeReceiptSchema, type WritePermit, type WriteReceipt } from './write-permits.ts';
 import { allowanceRequestSchema, permitRequestSchema, type OfferAgent, type StandingDecision } from './offers.ts';
 const standingSchema = z.object({ id: z.string().min(1).max(200), owner: z.string().min(1).max(200), agentId: z.string().min(1).max(200), offerId: z.string().min(1).max(200), who: z.union([z.object({ person: z.string().min(1).max(200) }).strict(), z.object({ agent: z.string().min(1).max(200) }).strict()]), decision: z.enum(['allow', 'deny']) }).strict();
 import { AccountsHost, WorkOSProfiles, type Account } from './accounts.ts';
@@ -46,6 +47,10 @@ export class Journey {
       reserve: request => call<'allow' | 'hold'>(env.ACCOUNTS!, 'accounts', { action: 'reserveAllowance', request }),
       approve: request => call<'allow' | 'hold'>(env.ACCOUNTS!, 'accounts', { action: 'approveAllowance', request }),
       release: (taskId, permitOnly = false) => call<void>(env.ACCOUNTS!, 'accounts', { action: 'releaseAllowance', taskId, permitOnly }),
+    } : undefined, env?.ACCOUNTS ? {
+      issueWrite: request => call<WritePermit>(env.ACCOUNTS!, 'accounts', { action: 'issueWrite', request }),
+      redeemWrite: permit => call<void>(env.ACCOUNTS!, 'accounts', { action: 'redeemWrite', permit }),
+      settleWrite: receipt => call<void>(env.ACCOUNTS!, 'accounts', { action: 'settleWrite', receipt }),
     } : undefined);
   }
   alarm(): Promise<void> { return this.host.alarm(); }
@@ -53,6 +58,7 @@ export class Journey {
     try {
       if (request.method !== 'POST') throw new Refused('Internal requests must be POST');
       const body = record(await request.json());
+      if (body['action'] === 'cancelWrite') return respond(() => this.host.cancelWrite(writePermitSchema.parse(body['permit'])));
       const personId = field(body, 'personId');
       const actor = body['actor'] === undefined ? undefined : actorSchema.parse(body['actor']);
       if (body['action'] === 'watchInbox') return new Response(await this.host.watchInbox(personId, actor), { headers: { 'content-type': 'application/x-ndjson' } });
@@ -80,6 +86,10 @@ export class Accounts {
     return respond(async () => {
       if (request.method !== 'POST') throw new Refused('Internal requests must be POST');
       const body = record(await request.json());
+      if (body['action'] === 'issueWrite') return this.host.issueWrite(writeRequestSchema.parse(body['request']));
+      if (body['action'] === 'redeemWrite') return this.host.redeemWrite(writePermitSchema.parse(body['permit']));
+      if (body['action'] === 'settleWrite') return this.host.settleWrite(writeReceiptSchema.parse(body['receipt']));
+      if (body['action'] === 'drainWrites') return this.host.drainWrites(body['personId'] === undefined ? undefined : field(body, 'personId'));
       if (body['action'] === 'offerDirectory') return this.host.offerDirectory();
       if (body['action'] === 'standingDecision') return this.host.standingDecision(standingSchema.parse(body['decision']));
       if (body['action'] === 'reserveAllowance') return this.host.reserveAllowance(allowanceRequestSchema.parse(body['request']));
@@ -106,7 +116,7 @@ export class Accounts {
       if (body['action'] === 'names') return this.host.names(z.array(z.string().min(1).max(200)).max(128).parse(body['personIds']));
       if (body['action'] === 'personIdByEmail') return this.host.personIdByEmail(z.email().max(320).parse(body['email']));
       if (body['action'] === 'directory') return this.host.directory(typeof body['add'] === 'string' ? field(body, 'add') : undefined);
-      if (body['action'] === 'group') return this.host.group(field(body, 'personId'), command(body));
+      if (body['action'] === 'group') return this.host.group(field(body, 'personId'), command(body), body['actor'] === undefined ? undefined : actorSchema.parse(body['actor']));
       throw new Refused('Unknown accounts operation');
     });
   }
@@ -126,6 +136,10 @@ async function watch(namespace: ObjectNamespace, id: string, personId: string, a
 }
 export function durableBackend(env: ObjectBindings): Backend {
   const accounts: AccountsPort = {
+    issueWrite: request => call(env.ACCOUNTS, 'accounts', { action: 'issueWrite', request }),
+    redeemWrite: permit => call(env.ACCOUNTS, 'accounts', { action: 'redeemWrite', permit }),
+    settleWrite: receipt => call(env.ACCOUNTS, 'accounts', { action: 'settleWrite', receipt }),
+    drainWrites: personId => call(env.ACCOUNTS, 'accounts', { action: 'drainWrites', personId }),
     offerDirectory: () => call<OfferAgent[]>(env.ACCOUNTS, 'accounts', { action: 'offerDirectory' }),
     standingDecision: decision => call<void>(env.ACCOUNTS, 'accounts', { action: 'standingDecision', decision }),
     oauth: operation => call(env.ACCOUNTS, 'accounts', { action: 'oauth', operation }),
@@ -137,7 +151,7 @@ export function durableBackend(env: ObjectBindings): Backend {
     names: (personIds) => call<Record<string, string>>(env.ACCOUNTS, 'accounts', { action: 'names', personIds }),
     personIdByEmail: (email) => call<string | undefined>(env.ACCOUNTS, 'accounts', { action: 'personIdByEmail', email }),
     directory: (add) => call<string[]>(env.ACCOUNTS, 'accounts', { action: 'directory', add }),
-    group: (personId, command) => call<ToolData>(env.ACCOUNTS, 'accounts', { action: 'group', personId, tool: command.tool, input: command.input }),
+    group: (personId, command, actor) => call<ToolData>(env.ACCOUNTS, 'accounts', { action: 'group', personId, tool: command.tool, input: command.input, actor }),
     observeClient: (personId, clientId) => call<void>(env.ACCOUNTS, 'accounts', { action: 'observeClient', personId, clientId }),
     resolveActor: (personId, clientId, actingAgent) => call<Actor>(env.ACCOUNTS, 'accounts', { action: 'resolveActor', personId, clientId, actingAgent }),
     agentCommand: (personId, clientId, command) => call<ToolData>(env.ACCOUNTS, 'accounts', { action: 'agentCommand', personId, clientId, tool: command.tool, input: command.input }),
@@ -145,6 +159,7 @@ export function durableBackend(env: ObjectBindings): Backend {
     completeAuthorization: (identity, change, assertion) => call(env.ACCOUNTS, 'accounts', { action: 'completeAuthorization', subject: identity.subject, clientId: identity.clientId, change, assertion }),
   };
   return new Backend(accounts, (id): JourneyPort => ({
+    cancelWrite: permit => call<WriteReceipt>(env.JOURNEYS, id, { action: 'cancelWrite', permit }),
     syncAgent: (personId, agentId, name, present) => call(env.JOURNEYS, id, { action: 'syncAgent', personId, agentId, name, present }),
     requireGuide: (personId, command, actor) => call<void>(env.JOURNEYS, id, { action: 'requireGuide', personId, tool: command.tool, input: command.input, actor }),
     execute: (personId, command, journeyId, actor) => call<ToolData>(env.JOURNEYS, id, { personId, journeyId, tool: command.tool, input: command.input, actor }),

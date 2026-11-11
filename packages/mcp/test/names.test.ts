@@ -21,16 +21,17 @@ async function fixture(t: TestContext) {
   const storage = new MemoryStorage(), stores = new Map<string, MemoryStorage>();
   const blobs = new MemoryBlobs();
   let emailLookups = 0;
-  const backend = durableBackend({ WORKOS_API_KEY: 'synthetic', BLOBS: blobs,
+  const env: import('../src/objects.ts').ObjectBindings = { WORKOS_API_KEY: 'synthetic', BLOBS: blobs,
     ACCOUNTS: { getByName() { return { async fetch(request) {
       const body = await request.clone().json() as Data;
       if (body.action === 'personIdByEmail') emailLookups++;
       return new Accounts({ storage }, { WORKOS_API_KEY: 'synthetic', BLOBS: blobs }, testPasskeys).fetch(request);
     } }; } },
     JOURNEYS: { getByName(id) { let store = stores.get(id); if (!store) { store = new MemoryStorage(); stores.set(id, store); }
-      return { fetch: (request) => new Journey({ storage: store }, { BLOBS: blobs }).fetch(request) };
+      return { fetch: (request) => new Journey({ storage: store }, env).fetch(request) };
     } },
-  });
+  };
+  const backend = durableBackend(env);
   const snapshot = () => JSON.stringify({ accounts: [...storage.data], journeys: [...stores].map(([id, s]) => [id, [...s.data]]), writes: [storage.writes, ...[...stores.values()].map(s => s.writes)] });
   async function connect(sub: string, mode: 'auto' | 'legacy' = 'auto') {
     const client = new Client({ name: 'names-test', version: '1.0.0' }, { versionNegotiation: { mode } });

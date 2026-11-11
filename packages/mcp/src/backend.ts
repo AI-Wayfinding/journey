@@ -1,5 +1,6 @@
 import * as z from 'zod';
 import type { OfferAgent, StandingDecision } from './offers.ts';
+import type { WritePort, WritePermit, WriteReceipt, WriteDrain } from './write-permits.ts';
 import { AccountsHost, type Account, type Profiles } from './accounts.ts';
 import { Refused, parseCommand, isRelay, type Command, type CoordinationBackend, type TaskMethod, type ToolData } from './commands.ts';
 import { assertionSchema, allows, requireAccountCapability, type Actor, type ClientIdentity, type CardChange, type PasskeyVerifier } from './agents.ts';
@@ -19,7 +20,8 @@ const namedState = z.object({
 import type { OAuthPort, OAuthOperation, AgentConsent } from './oauth-contract.ts';
 import { agentConsent } from './oauth-contract.ts';
 import { cardCaps } from './agents.ts';
-export interface AccountsPort extends OAuthPort {
+export interface AccountsPort extends OAuthPort, WritePort {
+  drainWrites(personId?: string): Promise<WriteDrain>;
   offerDirectory(): Promise<OfferAgent[]>;
   standingDecision(decision: StandingDecision): Promise<void>;
   consoleRecord(operation: RecordOperation): Promise<ConsoleRecord | undefined>;
@@ -30,7 +32,7 @@ export interface AccountsPort extends OAuthPort {
   names(personIds: string[]): Promise<Record<string, string>>;
   personIdByEmail(email: string): Promise<string | undefined>;
   directory(add?: string): Promise<string[]>;
-  group(personId: string, command: Command): Promise<ToolData>;
+  group(personId: string, command: Command, actor?: Actor): Promise<ToolData>;
   observeClient(personId: string, clientId: string): Promise<void>;
   resolveActor(personId: string, clientId: string, actingAgent?: string): Promise<Actor>;
   agentCommand(personId: string, clientId: string, command: Command): Promise<ToolData>;
@@ -38,6 +40,7 @@ export interface AccountsPort extends OAuthPort {
   completeAuthorization(identity: ClientIdentity, change: CardChange, assertion: AuthenticationResponseJSON | undefined): Promise<ToolData>;
 }
 export interface JourneyPort {
+  cancelWrite(permit: WritePermit): Promise<WriteReceipt>;
   syncAgent(personId: string, agentId: string, name: string, present: boolean): Promise<void>;
   requireGuide(personId: string, command: Command, actor?: Actor): Promise<void>;
   execute(personId: string, command: Command, journeyId?: string, actor?: Actor): Promise<ToolData>;
@@ -103,7 +106,12 @@ export class Backend implements CoordinationBackend {
   consoleRecord(operation: RecordOperation) { return this.accounts.consoleRecord(operation); }
   passkey(identity: ClientIdentity, operation: PasskeyOperation) { return this.accounts.passkey(identity, operation); }
   beginAuthorization(identity: ClientIdentity, change: CardChange) { return this.accounts.beginAuthorization(identity, change); }
-  completeAuthorization(identity: ClientIdentity, change: CardChange, assertion: AuthenticationResponseJSON | undefined) { return this.accounts.completeAuthorization(identity, change, assertion); }
+  async completeAuthorization(identity: ClientIdentity, change: CardChange, assertion: AuthenticationResponseJSON | undefined): Promise<ToolData> {
+    const result = await this.accounts.completeAuthorization(identity, change, assertion);
+    const account = await this.accounts.lookup(identity.subject), revocation = await this.recoverWrites(account?.personId);
+    if (revocation.state === 'pending') result.revocation = { state: revocation.state, retryAt: revocation.retryAt };
+    return result;
+  }
   private async namedForum(data: ToolData): Promise<ToolData> {
     const row = z.object({ author: z.string(), authorKind: z.enum(['person', 'agent']) }).passthrough();
     const posts = data.posts === undefined ? [] : z.array(row).parse(data.posts);
@@ -140,10 +148,26 @@ export class Backend implements CoordinationBackend {
     return { personId: account.personId, personalGroupId: `personal_${account.personId}`, subject: account.subject, name: account.name, nickname: account.nickname, email: account.email };
   }
   async execute(subject: string, supplied: Command, clientId = 'trusted-host'): Promise<ToolData> {
+    await this.recoverWrites();
     const result = await this.executeCommand(subject, supplied, clientId);
     const account = await this.accounts.lookup(subject);
+    const revocation = await this.recoverWrites(account?.personId);
+    if (revocation.state === 'pending') result.revocation = { state: revocation.state, retryAt: revocation.retryAt };
     if (account) await this.accounts.observeClient(account.personId, clientId);
     return result;
+  }
+  async recoverWrites(personId?: string): Promise<WriteDrain> {
+    const pending = await this.accounts.drainWrites(personId);
+    if (!pending.permits.length) return pending;
+    // Bound observation, not the write: a timed-out cancellation remains uncertain.
+    const drain = Promise.all(pending.permits.map(async permit => {
+      try { return await this.accounts.settleWrite(await this.journey(permit.target).cancelWrite(permit)); }
+      catch { return; /* Unavailable is pending, never evidence of cancellation. */ }
+    }));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try { await Promise.race([drain, new Promise<void>(resolve => { timer = setTimeout(resolve, 1_000); })]); }
+    finally { if (timer !== undefined) clearTimeout(timer); }
+    return this.accounts.drainWrites(personId);
   }
   private async executeCommand(subject: string, supplied: Command, clientId: string): Promise<ToolData> {
     const command = parseCommand(supplied.tool, supplied.input);
@@ -155,12 +179,12 @@ export class Backend implements CoordinationBackend {
     catch (error) { if (command.tool === 'journey_invite') throw new Refused('Only guides may invite'); throw error; }
     if (command.tool === 'mls_key_package_publish' || command.tool === 'mls_key_package_fetch') {
       requireAccountCapability(actor, 'device.keys');
-      return this.accounts.group(account.personId, command);
+      return this.accounts.group(account.personId, command, actor);
     }
     if (isRelay(command)) {
       if (command.input.groupId.startsWith('personal_')) {
         requireAccountCapability(actor, 'device.keys');
-        return this.accounts.group(account.personId, command);
+        return this.accounts.group(account.personId, command, actor);
       }
       return this.journey(command.input.groupId).execute(account.personId, command, undefined, actor);
     }
@@ -219,7 +243,7 @@ export class Backend implements CoordinationBackend {
       }
       case 'personal_group_add': case 'personal_group_read': case 'personal_group_remove':
         requireAccountCapability(actor, 'device.keys');
-        return this.accounts.group(account.personId, command);
+        return this.accounts.group(account.personId, command, actor);
       case 'journey_invite': {
         const journey = this.journey(command.input.journeyId);
         if (command.input.email === undefined) return this.named(await journey.execute(account.personId, command, undefined, actor));
@@ -265,7 +289,7 @@ export class MemoryBackend extends Backend {
     const accounts = new AccountsHost(storage, profiles, blobs, verifier, now);
     super(accounts, id => {
       let host = hosts.get(id);
-      if (!host) { const store = new MemoryStorage(); stores.set(id, store); host = new JourneyHost(store, now, blobs, { directory: () => accounts.offerDirectory(), stand: d => accounts.standingDecision(d), reserve: r => accounts.reserveAllowance(r), approve: r => accounts.approveAllowance(r), release: (id, permitOnly) => accounts.releaseAllowance(id, permitOnly) }); hosts.set(id, host); }
+      if (!host) { const store = new MemoryStorage(); stores.set(id, store); host = new JourneyHost(store, now, blobs, { directory: () => accounts.offerDirectory(), stand: d => accounts.standingDecision(d), reserve: r => accounts.reserveAllowance(r), approve: r => accounts.approveAllowance(r), release: (id, permitOnly) => accounts.releaseAllowance(id, permitOnly) }, accounts); hosts.set(id, host); }
       return host;
     });
     this.accountsHost = accounts; this.accountStorage = storage; this.journeyStores = stores; this.blobs = blobs;

@@ -5,6 +5,8 @@ import { capabilities, type Capability } from '../../rules/src/capabilities.ts';
 import { allows, type Actor } from './agents.ts';
 import { Refused, isRelay, type Command, type TaskMethod, type ToolData } from './commands.ts';
 import { Serial, type KeyValueStorage } from './storage.ts';
+import { tokenHash } from './oauth-store.ts';
+import { WriteStorage, WriteBlobs, WriteReceiver, type WritePort, type WriteHooks, type WritePermit, type WriteReceipt } from './write-permits.ts';
 import { relay, deleteArtifactBlobs, type BlobStore } from './relay.ts';
 import { library, isLibraryCommand, isLibraryArtifact, requireItem, visibleItem, type LibraryArtifact, type LibraryAccess, type LibraryCommand } from './library.ts';
 import { forum, isForumCommand, defaultBoard, type Board, type Topic, type Post } from './forum.ts';
@@ -35,11 +37,27 @@ function requireChange(before: Snapshot, after: Snapshot, what: string, ignore: 
 export class JourneyHost {
   private readonly watchers = new Map<ReadableStreamDefaultController<Uint8Array>, string>();
   private readonly serial = new Serial();
-  private readonly storage: KeyValueStorage;
+  private readonly storage: WriteStorage;
+  private readonly receiver: WriteReceiver;
+  private stagedAllowance: AllowanceRelease | undefined;
   private readonly now: () => number;
-  private readonly blobs: BlobStore | undefined;
+  private readonly blobs: WriteBlobs | undefined;
   private readonly offers: OfferPort | undefined;
-  constructor(storage: KeyValueStorage, now: () => number = Date.now, blobs?: BlobStore, offers?: OfferPort) { this.storage = storage; this.now = now; this.blobs = blobs; this.offers = offers; }
+  constructor(storage: KeyValueStorage, now: () => number = Date.now, blobs?: BlobStore, offers?: OfferPort, authority?: WritePort, hooks?: WriteHooks) {
+    this.storage = new WriteStorage(storage); this.now = now; this.blobs = blobs ? new WriteBlobs(blobs) : undefined; this.offers = offers;
+    this.receiver = new WriteReceiver(this.storage, this.blobs, now, authority, hooks);
+  }
+  cancelWrite(permit: WritePermit): Promise<WriteReceipt> { return this.serial.run(() => this.receiver.cancel(permit)); }
+  private async writeRun(personId: string, resolved: Actor | undefined, intent: unknown, journeyId: string | undefined, operation: () => Promise<ToolData>, retryId?: string): Promise<ToolData> {
+    const before = await this.load(), target = journeyId ?? before?.id ?? 'missing';
+    const digest = await tokenHash(JSON.stringify([personId, resolved?.agent?.id ?? null, intent]));
+    this.stagedAllowance = undefined;
+    const result = await this.receiver.run(resolved ?? { personId }, target, digest, operation, retryId, async () => {
+      if (this.stagedAllowance) await this.offers!.release(this.stagedAllowance.taskId, this.stagedAllowance.permitOnly);
+    });
+    if (result.changed) { const state = await this.load(); if (state) await this.notifyCommit(before, state); }
+    return result.value;
+  }
   private async load(): Promise<JourneyState | undefined> {
     const raw = await this.storage.get('journey');
     if (raw === undefined) return undefined;
@@ -256,6 +274,10 @@ export class JourneyHost {
       if (allowance) { try { await this.offers!.release(allowance.taskId, allowance.permitOnly); } catch { /* Retain on ambiguity; no extra allowance. */ } }
       throw error;
     }
+    if (this.storage.staged) { this.stagedAllowance = allowance; return; }
+    await this.notifyCommit(before, state);
+  }
+  private async notifyCommit(before: JourneyState | undefined, state: JourneyState): Promise<void> {
     try { await this.flushOffers(state); } catch { /* Durable outbox and alarm retry; the task decision is already committed. */ }
     for (const [controller, personId] of this.watchers) {
       if (!this.has(state, this.slot(state, personId), 'read') || (controller.desiredSize ?? 0) <= 0) {
@@ -288,7 +310,7 @@ export class JourneyHost {
     });
   }
   task(personId: string, method: TaskMethod, taskId: string, resolved?: Actor): Promise<ToolData> {
-    return this.serial.run(async () => {
+    return this.serial.run(() => this.writeRun(personId, resolved, ['task', method, taskId], undefined, async () => {
       const state = await this.load();
       const actor = state ? this.slot(state, resolved?.agent?.id ?? personId) : 0;
       if (!state || !this.can(state, actor, resolved ?? { personId }, 'read')) throw new Refused('Task access refused');
@@ -307,10 +329,10 @@ export class JourneyHost {
         createdAt: new Date(task.createdAt).toISOString(), lastUpdatedAt: new Date(task.updatedAt).toISOString(), ttlMs: null, pollIntervalMs: 1000 };
       if ([4, 5, 8].includes(status)) result.result = { content: [{ type: 'text', text: JSON.stringify(this.taskView(state, task)) }], structuredContent: this.taskView(state, task), isError: status !== 4 };
       return result;
-    });
+    }));
   }
-  execute(personId: string, command: Command, journeyId?: string, resolved?: Actor): Promise<ToolData> {
-    return this.serial.run(async () => {
+  execute(personId: string, command: Command, journeyId?: string, resolved?: Actor, retryId?: string): Promise<ToolData> {
+    return this.serial.run(() => this.writeRun(personId, resolved, command, journeyId, async () => {
       let state = await this.load();
       if (state?.offerOutbox?.length) await this.flushOffers(state);
       let allowance: AllowanceRelease | undefined;
@@ -414,7 +436,7 @@ export class JourneyHost {
       const readerId = identity.agent?.id ?? personId;
       if (!this.can(state, this.slot(state, readerId), identity, 'read')) return { journeyId: state.id, accepted: true };
       return this.view(state, personId, identity);
-    });
+    }, retryId));
   }
   private apply(state: JourneyState, actor: number, personId: string, command: Command, resolved?: Actor): void {
     const membershipOps: Partial<Record<Command['tool'], JourneyOp>> = {

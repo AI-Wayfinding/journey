@@ -1,4 +1,5 @@
 import * as z from 'zod';
+import { WriteAuthority, WriteStorage, WriteBlobs, WriteReceiver, writeRequestSchema, type WriteRequest, type WritePermit, type WriteReceipt, type WriteDrain } from './write-permits.ts';
 import { accountOfferCommand } from './agent-offers.ts';
 import { DEFAULT_SETTINGS, offerView, allowanceRequestSchema, permitRequestSchema, journeyEnabled, matchingRule, clampAdmission, clampJourneyLimits, periodMs, type AllowanceRequest, type AllowanceReceipt, type OfferAgent, type StandingDecision, type PermitRequest, type AdmissionPermit, type Offer, type OwnerOfferSettings } from './offers.ts';
 import { PRE_OFFERS_CARD_HASH } from './rules.ts';
@@ -36,12 +37,13 @@ function issuePermit(state: AccountsState, request: PermitRequest, offer: Offer,
 }
 export class AccountsHost {
   private readonly serial = new Serial();
-  private readonly storage: KeyValueStorage;
+  private readonly storage: WriteStorage;
+  private readonly groupReceiver: WriteReceiver;
   private readonly profiles: Profiles;
-  private readonly blobs: BlobStore | undefined;
+  private readonly blobs: WriteBlobs | undefined;
   private readonly verifier: PasskeyVerifier;
   private readonly now: () => number;
-  constructor(storage: KeyValueStorage, profiles: Profiles, blobs?: BlobStore, verifier: PasskeyVerifier = new WebAuthnVerifier(), now: () => number = Date.now) { this.storage = storage; this.profiles = profiles; this.blobs = blobs; this.verifier = verifier; this.now = now; }
+  constructor(storage: KeyValueStorage, profiles: Profiles, blobs?: BlobStore, verifier: PasskeyVerifier = new WebAuthnVerifier(), now: () => number = Date.now) { this.storage = new WriteStorage(storage); this.profiles = profiles; this.blobs = blobs ? new WriteBlobs(blobs) : undefined; this.verifier = verifier; this.now = now; this.groupReceiver = new WriteReceiver(this.storage, this.blobs, now); }
   private async load(): Promise<AccountsState> {
     const raw = await this.storage.get('accounts');
     if (raw === undefined) return { rulesHash: RULES, accounts: [], journeys: [] };
@@ -72,7 +74,7 @@ export class AccountsHost {
       state.permits = (state.allowances ?? []).filter(r => r.createdAt > now - periodMs('week')).map(r => ({ taskId: r.taskId, agentId: r.agentId, offerId: r.offerId, journeyId: r.journeyId, issuedAt: now }));
       migrated = true;
     }
-    if (migrated) await this.storage.put('accounts', JSON.stringify(state));
+    if (migrated) await this.save(state);
     return state;
   }
   /** Host-only bounded session registry; a single replacement makes take/delete atomic. */
@@ -111,7 +113,7 @@ export class AccountsHost {
           const challenge = randomToken();
           account.assertions = account.assertions.filter(a => a.expiresAt > this.now() && a.digest !== digest).slice(-15);
           account.assertions.push({ challenge, digest, expiresAt: Math.min(this.now() + 300_000, request.request.expiresAt) });
-          await this.storage.put('accounts', JSON.stringify(state));
+          await this.save(state);
           return { kind: 'assertion', challenge, credentials: account.passkeys.map(c => c.id) };
         }
         const pending = account.assertions.find(a => a.digest === digest && a.expiresAt > this.now());
@@ -125,7 +127,7 @@ export class AccountsHost {
       }
       const result = await oauthStep(state, operation, this.now(), deviceAsserted);
       // Persist errors too: refresh reuse must revoke before the error is returned.
-      if (operation.op !== 'client' && !(operation.op === 'request' && !operation.request)) await this.storage.put('accounts', JSON.stringify(state));
+      if (operation.op !== 'client' && !(operation.op === 'request' && !operation.request)) await this.save(state);
       return result;
     });
   }
@@ -142,7 +144,7 @@ export class AccountsHost {
       const group = groupRule.step(groupRule.init(), { op: 0, subject: 1, kind: 1, belongsTo: 1 });
       const account: Account = { subject, personId: `person_${crypto.randomUUID()}`, name: profile.name, email: profile.email, group, identities: [], agents: [], clients: [], bindings: bindingRule.init(), passkeys: [], assertions: [], live: true };
       state.accounts.push(account);
-      await this.storage.put('accounts', JSON.stringify(state));
+      await this.save(state);
       return account;
     });
   }
@@ -151,7 +153,7 @@ export class AccountsHost {
       const state = await this.load();
       if (add !== undefined && !state.journeys.includes(add)) {
         state.journeys.push(add);
-        await this.storage.put('accounts', JSON.stringify(state));
+        await this.save(state);
       }
       return state.journeys;
     });
@@ -162,7 +164,7 @@ export class AccountsHost {
       const account = state.accounts.find(a => a.personId === personId);
       if (!account) throw new Refused('Account not found');
       account.nickname = nickname;
-      await this.storage.put('accounts', JSON.stringify(state));
+      await this.save(state);
       return account;
     });
   }
@@ -189,7 +191,7 @@ export class AccountsHost {
     const agentId = scalar(next, 'asAgent') === 1 ? bound?.id : actingAgent;
     const agent = agentId === undefined ? undefined : account.agents.find(a => a.id === agentId && a.live);
     if (agentId !== undefined && !agent) throw new Refused('Only your own live agent may act');
-    return { personId: account.personId, ...(agent ? { agent } : {}) };
+    return { personId: account.personId, clientId, ...(agent ? { agent } : {}) };
   }
   observeClient(personId: string, clientId: string): Promise<void> {
     return this.serial.run(async () => {
@@ -197,7 +199,7 @@ export class AccountsHost {
       if (!account || !account.live) throw new Refused('Live account required');
       if (!account.clients.includes(clientId)) {
         account.clients.push(clientId);
-        await this.storage.put('accounts', JSON.stringify(state));
+        await this.save(state);
       }
     });
   }
@@ -212,9 +214,24 @@ export class AccountsHost {
         account.bindings = bindingRule.step(account.bindings, { op: 2, client: 0, agent: i + 2, personAsserted: 0, agentIsOwnLive: 0, personLive: 0, boundAgentLive: 0 });
       }
       account.assertions = [];
-      await this.storage.put('accounts', JSON.stringify(state));
+      await this.save(state);
     });
   }
+  private save(state: AccountsState): Promise<void> {
+    return new WriteAuthority(this.storage, this.now).saveAccounts(JSON.stringify(state), state.accounts);
+  }
+  issueWrite(supplied: WriteRequest): Promise<WritePermit> {
+    return this.serial.run(async () => {
+      const request = writeRequestSchema.parse(supplied), state = await this.load();
+      const account = state.accounts.find(a => a.personId === request.actor.personId);
+      if (!account || !request.actor.clientId) throw new Refused('Authenticated write identity required');
+      const current = this.resolve(account, request.actor.clientId, request.actor.agent?.id);
+      return new WriteAuthority(this.storage, this.now).issue(request, state.accounts, current);
+    });
+  }
+  redeemWrite(permit: WritePermit): Promise<void> { return this.serial.run(() => new WriteAuthority(this.storage, this.now).redeem(permit)); }
+  settleWrite(receipt: WriteReceipt): Promise<void> { return this.serial.run(() => new WriteAuthority(this.storage, this.now).settle(receipt)); }
+  drainWrites(personId?: string): Promise<WriteDrain> { return this.serial.run(() => new WriteAuthority(this.storage, this.now).drain(personId, true)); }
   resolveActor(personId: string, clientId: string, actingAgent?: string): Promise<Actor> {
     return this.serial.run(async () => {
       const account = (await this.load()).accounts.find(a => a.personId === personId);
@@ -252,7 +269,7 @@ export class AccountsHost {
       if (decision === 'allow') decision = issuePermit(state, request, offer, settings, now);
       receipts.push({ taskId: request.taskId, agentId: agent.id, offerId: offer.id, version: offer.version, journeyId: request.journeyId, requesterId: request.requesterId, requesterPersonId: request.requesterPersonId, isAgent: request.isAgent, isGuide: request.isGuide, createdAt: now, decision });
       state.allowances = receipts;
-      await this.storage.put('accounts', JSON.stringify(state));
+      await this.save(state);
       return decision;
     });
   }
@@ -266,7 +283,7 @@ export class AccountsHost {
       const agent = account?.agents.find(g => g.id === request.agentId), offer = agent?.offers?.find(o => o.id === request.offerId);
       if (!agent || !offer || offer.status !== 'published' || !journeyEnabled(offer, request.journeyId)) throw new Refused('Offer is disabled or not available');
       const decision = issuePermit(state, request, offer, agent.offerSettings ?? DEFAULT_SETTINGS, now);
-      await this.storage.put('accounts', JSON.stringify(state));
+      await this.save(state);
       return decision;
     });
   }
@@ -277,7 +294,7 @@ export class AccountsHost {
       state.permits = state.permits?.filter(p => p.taskId !== taskId);
       if (!permitOnly) state.allowances = state.allowances?.filter(r => r.taskId !== taskId);
       if (!state.allowances?.length) delete state.allowances;
-      await this.storage.put('accounts', JSON.stringify(state));
+      await this.save(state);
     });
   }
   /** Idempotent delivery of a decision already committed by the journey. */
@@ -292,7 +309,7 @@ export class AccountsHost {
       offer.admission.rules = [{ who, decision: decision.decision }, ...offer.admission.rules.filter(r => JSON.stringify(r.who) !== JSON.stringify(who))].slice(0, 50);
       offer.version++; offer.updatedAt = this.now();
       agent.standingReceipts = [...(agent.standingReceipts ?? []), decision.id];
-      await this.storage.put('accounts', JSON.stringify(state));
+      await this.save(state);
     });
   }
   agentCommand(personId: string, clientId: string, command: Command): Promise<ToolData> {
@@ -306,7 +323,7 @@ export class AccountsHost {
           const agent = account.agents.find(a => a.id === command.input.agentId && a.live);
           if (!agent) throw new Refused('Only a live agent owner may manage offers');
           const result = accountOfferCommand(actor, agent, command, this.now());
-          if (result.changed) await this.storage.put('accounts', JSON.stringify(state));
+          if (result.changed) await this.save(state);
           const permits = (state.permits ?? []).filter(p => p.agentId === agent.id && p.issuedAt > this.now() - periodMs('day'));
           return { ...result.data, usage: { admitted24h: permits.length, journeys: (agent.offers ?? []).flatMap(o => Object.keys(o.journeySettings).map(journeyId => ({ offerId: o.id, journeyId, admitted24h: permits.filter(p => p.offerId === o.id && p.journeyId === journeyId).length }))) } };
         }
@@ -315,7 +332,7 @@ export class AccountsHost {
         case 'agent_create': {
           if (actor.agent) throw new Refused('Only a person adds agents');
           const agent = { id: `agent_${crypto.randomUUID()}`, name: command.input.name, live: true, card: cardRule.init() };
-          account.agents.push(agent); await this.storage.put('accounts', JSON.stringify(state)); return view(agent);
+          account.agents.push(agent); await this.save(state); return view(agent);
         }
         case 'agent_capabilities': case 'agent_narrow': case 'agent_card': case 'agent_remove': {
           const agent = account.agents.find(a => a.id === command.input.agentId && a.live);
@@ -333,7 +350,7 @@ export class AccountsHost {
             const keep = command.tool === 'agent_card' ? [] : cardCaps(agent.card).filter(c => !command.input.remove.includes(c));
             agent.card = stepCard(agent.card, command.tool === 'agent_card' ? 'withdraw' : 'narrow', keep);
           }
-          await this.storage.put('accounts', JSON.stringify(state)); return view(agent);
+          await this.save(state); return view(agent);
         }
         default: throw new Refused('Not an account agent command');
       }
@@ -350,7 +367,7 @@ export class AccountsHost {
       const challenge = base64url(new TextEncoder().encode(base64url(nonce) + digest));
       account.assertions = account.assertions.filter(a => a.expiresAt > this.now() && a.digest !== digest).slice(-15);
       account.assertions.push({ challenge, digest, expiresAt: this.now() + 300_000 });
-      await this.storage.put('accounts', JSON.stringify(state)); return { challenge };
+      await this.save(state); return { challenge };
     });
   }
   completeAuthorization(identity: ClientIdentity, supplied: CardChange, assertion: AuthenticationResponseJSON | undefined): Promise<ToolData> {
@@ -381,7 +398,7 @@ export class AccountsHost {
       const credential = account.passkeys.find(c => c.id === verified.credentialId);
       if (credential) { credential.counter = verified.counter; credential.lastUsedAt = this.now(); }
       account.assertions = account.assertions.filter(a => a !== pending);
-      await this.storage.put('accounts', JSON.stringify(state)); return { accepted: true };
+      await this.save(state); return { accepted: true };
     });
   }
   passkey(identity: ClientIdentity, supplied: PasskeyOperation): Promise<ToolData> {
@@ -390,7 +407,7 @@ export class AccountsHost {
       if (!account || this.resolve(account, identity.clientId).agent) throw new Refused('Only a live person manages passkeys');
       const operation = passkeyOperation.parse(supplied);
       const result = await managePasskey(account, state.accounts, this.storage, operation, this.now());
-      if (operation.op === 'finish' || operation.op === 'delete' || operation.op === 'rename') await this.storage.put('accounts', JSON.stringify(state));
+      if (operation.op === 'finish' || operation.op === 'delete' || operation.op === 'rename') await this.save(state);
       return result;
     });
   }
@@ -417,11 +434,15 @@ export class AccountsHost {
     if (data !== null) await this.storage.put(key, 'null');
     return { personId: account.personId, deviceId, data };
   }
-  group(personId: string, command: Command): Promise<ToolData> {
+  group(personId: string, command: Command, resolved?: Actor): Promise<ToolData> {
     return this.serial.run(async () => {
       const state = await this.load();
       const account = state.accounts.find((a) => a.personId === personId);
       if (!account) throw new Refused('Account not found');
+      const current = this.resolve(account, resolved?.clientId ?? 'trusted-host', resolved?.agent?.id);
+      requireAccountCapability(current, 'device.keys');
+      const digest = await tokenHash(JSON.stringify([personId, current.agent?.id ?? null, command]));
+      const result = await this.groupReceiver.run({ personId }, `personal_${personId}`, digest, async () => {
       if (command.tool === 'mls_key_package_publish' || command.tool === 'mls_key_package_fetch') return this.keyPackage(state, account, command);
       if (isRelay(command)) {
         if (command.input.groupId !== `personal_${personId}`) throw new Refused('Only the personal group owner may relay');
@@ -447,8 +468,10 @@ export class AccountsHost {
         account.group = next;
       } else if (command.tool !== 'personal_group_read') throw new Refused('Not a personal group command');
       // Reading never writes. Refusals above never put partially changed data.
-      if (command.tool !== 'personal_group_read') await this.storage.put('accounts', JSON.stringify(state));
+      if (command.tool !== 'personal_group_read') await this.save(state);
       return { owner: personId, members: [{ id: personId, kind: 'person' }, ...account.identities.filter((_, i) => cell(account.group, 'Members', i + 2) !== 0)] };
+      });
+      return result.value;
     });
   }
 }
