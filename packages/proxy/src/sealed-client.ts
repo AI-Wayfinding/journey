@@ -3,7 +3,9 @@ import { offerDefinitionSchema, presetPolicy, validateData, boundedJson } from '
 import { privateProfile, publicProfile, cardDescriptor, sealedDescriptor, definitionRef } from '../../mcp/src/sealed-descriptors.ts';
 import type { Client } from '@modelcontextprotocol/client';
 export type SealedRemote = Pick<Client, 'callTool' | 'listTools'>;
-const localInputs={...inputs,offer_set:inputs.offer_set.extend({offer:offerDefinitionSchema.omit({sealed:true}).extend({id:sealedOfferId.optional()})}),account_update:privateProfile.partial().extend({publications:z.record(id,publicProfile).optional()}).strict(),agent_descriptor_set:cardDescriptor.extend({agentId:id,publications:z.record(id,cardDescriptor).optional()}).strict(),task_create:inputs.task_create.safeExtend({taskId:id.optional()}),library_get:inputs.library_get.safeExtend({version:z.number().int().min(1).optional()}),library_add:inputs.library_add.safeExtend({text:z.string().max(9*1024*1024).optional()}),library_version:inputs.library_version.safeExtend({text:z.string().max(9*1024*1024)})};
+// Closed list of content-free queries and explicitly handled task operations outside commands.ts.
+const metadataInputs={whoami:z.object({}).strict(),task_prepare:sealedInputs.task_prepare!,task_claim_prepare:sealedInputs.task_claim_prepare!,task_read:sealedInputs.task_read!};
+const localInputs={...inputs,...metadataInputs,offer_set:inputs.offer_set.extend({offer:offerDefinitionSchema.omit({sealed:true}).extend({id:sealedOfferId.optional()})}),account_update:privateProfile.partial().extend({publications:z.record(id,publicProfile).optional()}).strict(),agent_descriptor_set:cardDescriptor.extend({agentId:id,publications:z.record(id,cardDescriptor).optional()}).strict(),task_create:inputs.task_create.safeExtend({taskId:id.optional()}),library_get:inputs.library_get.safeExtend({version:z.number().int().min(1).optional()}),library_add:inputs.library_add.safeExtend({text:z.string().max(9*1024*1024).optional()}),library_version:inputs.library_version.safeExtend({text:z.string().max(9*1024*1024)})};
 import { inputs } from '../../mcp/src/commands.ts';
 import {detectKind} from '../../mcp/src/library.ts';
 import { sealedRouting, sealedInputs, sealedOfferId, sealedAction, sealedEnvelope, preparedContent, contentContext, bindingSchema, SEALED_FORMAT, SEALED_LIMITS, requireSynthetic, type ContentContext, type DeviceBinding, type SealedEnvelope } from '../../mcp/src/sealed-contract.ts';
@@ -251,6 +253,7 @@ export class SealedClient {
   }
   return this.callRemote(name,parsed);
  }
- async tools(){const tools=(await this.remote.listTools()).tools;return tools.filter(t=>!t.name.startsWith('artifact_')&&!t.name.startsWith('mls_')&&!t.name.startsWith('sealed_')&&!t.name.startsWith('content_')).map(t=>{const schema=localInputs[t.name as keyof typeof localInputs];return schema?{...t,inputSchema:z.toJSONSchema(schema,{io:'input'})}:t;});}
+ // A remote registration is not permission to forward plaintext. Unknown tools stay hidden.
+ async tools(){const tools=(await this.remote.listTools()).tools;return tools.filter(t=>Object.hasOwn(localInputs,t.name)&&!t.name.startsWith('artifact_')&&!t.name.startsWith('mls_')&&!t.name.startsWith('sealed_')&&!t.name.startsWith('content_')).map(t=>({...t,inputSchema:z.toJSONSchema(localInputs[t.name as keyof typeof localInputs],{io:'input'})}));}
  async exportGroup(groupId:string){return encode(await this.group(await this.audienceId(groupId)).mls.exportState());}
 }
