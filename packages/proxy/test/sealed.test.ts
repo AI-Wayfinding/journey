@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {Client,StreamableHTTPClientTransport} from '@modelcontextprotocol/client';
 import {MemoryBackend} from '../../mcp/src/backend.ts';
 import {app,bridge,keyPair,RESOURCE,token,testPasskeys,setAgentCard} from '../../mcp/test/helpers.ts';
-import {SealedClient} from '../src/sealed-client.ts';
+import {SealedClient,type SealedRemote} from '../src/sealed-client.ts';
 import {WayfindingProxy} from '../src/proxy.ts';
 import {parseCommand} from '../../mcp/src/commands.ts';
 import * as z from 'zod';
@@ -15,6 +15,57 @@ async function fixture(t:TestContext){
 }
 const records=(value:Record<string,unknown>)=>z.array(z.record(z.string(),z.unknown())).parse(value.records);
 const recordId=(value:Record<string,unknown>,type:string)=>String(records(value).find(r=>r.type===type)!.recordId);
+
+test('sealed proxy whoami reports the authenticated person and acting agent',async t=>{
+ const {a}=await fixture(t);
+ const remote=await a.remote.callTool({name:'whoami',arguments:{}});
+ assert.deepEqual(await a.client.call('whoami'),remote.structuredContent);
+});
+
+test('sealed proxy advertised tools all reach a local handler or input validation',async t=>{
+ const {a}=await fixture(t),unhandled:string[]=[];
+ const tools=await a.client.tools();
+ for(const tool of tools){
+  try{await a.client.call(tool.name,{});}catch(error){
+   if(error instanceof Error&&error.message==='Unknown local content tool')unhandled.push(tool.name);
+   else assert.ok(error instanceof z.ZodError,`${tool.name}: ${String(error)}`);
+  }
+ }
+ assert.deepEqual(unhandled,[]);
+ const names=new Set(tools.map(tool=>tool.name));
+ for(const name of ['whoami','agent_descriptor_set','task_prepare','task_claim_prepare','task_read'])assert.ok(names.has(name),`${name} stays available`);
+});
+
+test('sealed proxy unhandled tools stay hidden and cannot forward plaintext',async t=>{
+ const {a}=await fixture(t);
+ // Wire operations need local sealing; view/App wrappers need local rendering or sealing.
+ const hidden=[
+  'journey_descriptor','task_exchange','identity_descriptor','offer_definition',
+  'forum_view','forum_topic_create_view','forum_post_create_view','library_view','apps_v2_library',
+  'round_view','apps_v2_round','agent_capabilities_view','apps_v2_agents','forum_view_v3','apps_v2_forum',
+  'apps_v2_topic','apps_v2_reply','apps_v2_interview_read','apps_v2_interview_write',
+  'apps_v2_interview_share','apps_v2_contribute','journey_view','project_view',
+  'apps_journey_refresh','apps_project_refresh','apps_artifacts_refresh','apps_journey_policy',
+  'apps_journey_invite','apps_project_update','apps_artifact_rename',
+ ];
+ const listed=await a.remote.listTools(),remoteNames=new Set(listed.tools.map(tool=>tool.name));
+ for(const name of hidden)assert.ok(remoteNames.has(name),`${name} is registered remotely`);
+ const forwarded:unknown[]=[];
+ const remote:SealedRemote={
+  async listTools(){return {...listed,tools:[...listed.tools,{name:'future_content_write',inputSchema:{type:'object',properties:{body:{type:'string'}}}}]};},
+  async callTool(request){forwarded.push(request);return a.remote.callTool(request);},
+ };
+ const client=await SealedClient.open(remote,a.store,a.client.personId);forwarded.length=0;
+ const tools=await client.tools(),names=new Set(tools.map(tool=>tool.name));
+ for(const name of [...hidden,'future_content_write']){
+  assert.equal(names.has(name),false,`${name} must not be advertised`);
+  await assert.rejects(client.call(name,{body:'NEVER-FORWARD-PLAINTEXT'}),/Unknown local content tool/);
+ }
+ for(const tool of tools)assert.doesNotMatch(tool.name,/^(artifact_|mls_|sealed_|content_)/);
+ await assert.rejects(client.call('whoami',{body:'NEVER-FORWARD-PLAINTEXT'}),z.ZodError);
+ assert.deepEqual(forwarded,[]);
+ await client.call('whoami');assert.deepEqual(forwarded,[{name:'whoami',arguments:{}}]);
+});
 
 test('sealed proxy storage canary covers forum library versions projects rounds interviews and contributions',async t=>{
  const {backend,a}=await fixture(t);const markers:string[]=[];const canary=(field:string)=>{const v=`CANARY-${field}-40fa64`;markers.push(v);return v;};
