@@ -6,20 +6,21 @@ import { PRE_OFFERS_CARD_HASH } from './rules.ts';
 import { Refused, isRelay, type Command, type KeyPackageCommand, type ToolData } from './commands.ts';
 import { personalGroupRule, RULES, sameRules, sameState, cell, SLOTS, type Snapshot, type RulesStamp } from './rules.ts';
 import { Serial, type KeyValueStorage } from './storage.ts';
-import { relay, decodeBytes, type BlobStore } from './relay.ts';
+import { relay, encodeBytes, decodeBytes, type BlobStore } from './relay.ts';
 import { bindingRule, cardRule, scalar } from './rules.ts';
 import { allows, assertionSchema, changeSchema, changeDigest, base64url, cardCaps, stepCard, requireAccountCapability, WebAuthnVerifier, type AgentAccount, type Actor, type ClientIdentity, type CardChange, type PasskeyVerifier } from './agents.ts';
 import type { AuthenticationResponseJSON } from '@simplewebauthn/server';
 import { oauthOperation, type OAuthOperation, type OAuthResult, type OAuthState } from './oauth-contract.ts';
 import { oauthStep, tokenHash, randomToken } from './oauth-store.ts';
-import { bindingSchema, sealedInputs, type DeviceBinding } from './sealed-contract.ts';
+import { sealedDescriptor, type SealedDescriptor } from './sealed-descriptors.ts';
+import { SEALED_NOTICE, bindingSchema, sealedInputs, type DeviceBinding } from './sealed-contract.ts';
 
 import { recordOperation, consoleRecord, passkeyOperation, type RecordOperation, type ConsoleRecord, type PasskeyOperation } from './console/contract.ts';
 import { managePasskey } from './console/passkeys.ts';
 export interface Profile { name: string; email: string }
 export interface Profiles { get(subject: string): Promise<Profile> }
-export interface Account extends Profile, AgentAccount { subject: string; personId: string; nickname?: string; group: Snapshot; identities: { id: string; name: string; kind: 'device' | 'agent' }[] }
-interface AccountsState { rulesHash: RulesStamp; accounts: Account[]; journeys: string[]; oauth?: OAuthState; allowances?: AllowanceReceipt[]; permits?: AdmissionPermit[] }
+export interface Account extends Profile, AgentAccount { descriptor?:SealedDescriptor; emailIndex?:string; subject: string; personId: string; nickname?: string; group: Snapshot; identities: { id: string; name: string; kind: 'device' | 'agent' }[] }
+interface AccountsState { emailKey?:string; rulesHash: RulesStamp; accounts: Account[]; journeys: string[]; oauth?: OAuthState; allowances?: AllowanceReceipt[]; permits?: AdmissionPermit[] }
 
 function parseDevice(raw:string):DeviceBinding{try{return bindingSchema.parse(JSON.parse(raw));}catch{throw new Refused('Invalid stored authenticated device binding');}}
 // The Accounts serial is the admission linearisation point for every journey.
@@ -45,7 +46,8 @@ export class AccountsHost {
   private readonly blobs: WriteBlobs | undefined;
   private readonly verifier: PasskeyVerifier;
   private readonly now: () => number;
-  constructor(storage: KeyValueStorage, profiles: Profiles, blobs?: BlobStore, verifier: PasskeyVerifier = new WebAuthnVerifier(), now: () => number = Date.now) { this.storage = new WriteStorage(storage); this.profiles = profiles; this.blobs = blobs ? new WriteBlobs(blobs) : undefined; this.verifier = verifier; this.now = now; this.groupReceiver = new WriteReceiver(this.storage, this.blobs, now); }
+  private readonly sealedMode:boolean;
+  constructor(storage: KeyValueStorage, profiles: Profiles, blobs?: BlobStore, verifier: PasskeyVerifier = new WebAuthnVerifier(), now: () => number = Date.now, sealedMode=false) { this.sealedMode=sealedMode;this.storage = new WriteStorage(storage); this.profiles = profiles; this.blobs = blobs ? new WriteBlobs(blobs) : undefined; this.verifier = verifier; this.now = now; this.groupReceiver = new WriteReceiver(this.storage, this.blobs, now); }
   private async load(): Promise<AccountsState> {
     const raw = await this.storage.get('accounts');
     if (raw === undefined) return { rulesHash: RULES, accounts: [], journeys: [] };
@@ -60,6 +62,7 @@ export class AccountsHost {
         if (agent.card.defaults) delete agent.card.defaults.Caps;
       }
     }
+    if(this.sealedMode&&state.accounts.some(a=>a.name!==a.personId||a.email!==''||a.nickname!==undefined||a.identities.some(i=>i.name!==i.id)||a.agents.some(g=>g.name!==g.id||g.clientName!==undefined)||a.passkeys.some(k=>k.name!==undefined||k.aaguid!==undefined)))throw new Refused('Unsealed account state refused; no implicit migration or deletion');
     state.rulesHash = RULES;
     let migrated = false;
     for (const agent of state.accounts.flatMap(a => a.agents)) for (const offer of agent.offers ?? []) {
@@ -103,6 +106,8 @@ export class AccountsHost {
   oauth(supplied: OAuthOperation): Promise<OAuthResult> {
     return this.serial.run(async () => {
       const operation = oauthOperation.parse(supplied), state = await this.load();
+      if(this.sealedMode&&(operation.op==='consent-options'||operation.op==='consent')){const request=state.oauth?.requests.find(r=>r.id===operation.id)?.request;if(!request||operation.consent.name!=='MCP client')throw new Refused('Names must be sealed by an enrolled proxy; consent uses client id only');}
+      if(this.sealedMode&&operation.op==='manage'&&operation.name!==undefined&&operation.name!==operation.agentId)throw new Refused('Agent names must be sealed by an enrolled proxy');
       let deviceAsserted = false;
       if ((operation.op === 'consent-options' || operation.op === 'consent') && operation.consent.capabilities.includes('device.keys')) {
         const account = state.accounts.find(a => a.subject === operation.subject && a.live);
@@ -128,7 +133,7 @@ export class AccountsHost {
         account.assertions = account.assertions.filter(a => a !== pending);
         deviceAsserted = true;
       }
-      const result = await oauthStep(state, operation, this.now(), deviceAsserted);
+      const result = await oauthStep(state, operation, this.now(), deviceAsserted, this.sealedMode);
       // Persist errors too: refresh reuse must revoke before the error is returned.
       if (operation.op !== 'client' && !(operation.op === 'request' && !operation.request)) await this.save(state);
       return result;
@@ -145,7 +150,8 @@ export class AccountsHost {
       const profile = await this.profiles.get(subject);
       const groupRule = personalGroupRule(1);
       const group = groupRule.step(groupRule.init(), { op: 0, subject: 1, kind: 1, belongsTo: 1 });
-      const account: Account = { subject, personId: `person_${crypto.randomUUID()}`, name: profile.name, email: profile.email, group, identities: [], agents: [], clients: [], bindings: bindingRule.init(), passkeys: [], assertions: [], live: true };
+      const personId=`person_${crypto.randomUUID()}`;
+      const account: Account = { subject, personId, name: this.sealedMode?personId:profile.name, email: this.sealedMode?'':profile.email,...(this.sealedMode?{emailIndex:await this.emailIndex(state,profile.email)}:{}), group, identities: [], agents: [], clients: [], bindings: bindingRule.init(), passkeys: [], assertions: [], live: true };
       state.accounts.push(account);
       await this.save(state);
       return account;
@@ -166,6 +172,7 @@ export class AccountsHost {
       const state = await this.load();
       const account = state.accounts.find(a => a.personId === personId);
       if (!account) throw new Refused('Account not found');
+      if(this.sealedMode)throw new Refused('Profile names must be sealed by an enrolled proxy');
       account.nickname = nickname;
       await this.save(state);
       return account;
@@ -183,8 +190,16 @@ export class AccountsHost {
     });
   }
   personIdByEmail(email: string): Promise<string | undefined> {
-    return this.serial.run(async () => (await this.load()).accounts.find(a => a.email.toLowerCase() === email.toLowerCase())?.personId);
+    return this.serial.run(async () => {const state=await this.load();if(!this.sealedMode)return state.accounts.find(a=>a.email.toLowerCase()===email.toLowerCase())?.personId;const index=await this.emailIndex(state,email);return state.accounts.find(a=>a.emailIndex===index)?.personId;});
   }
+  private async emailIndex(state:AccountsState,email:string):Promise<string>{
+    state.emailKey??=encodeBytes(crypto.getRandomValues(new Uint8Array(32)));const key=await crypto.subtle.importKey('raw',decodeBytes(state.emailKey,32),{name:'HMAC',hash:'SHA-256'},false,['sign']);return encodeBytes(new Uint8Array(await crypto.subtle.sign('HMAC',key,new TextEncoder().encode(email.trim().toLowerCase()))));
+  }
+  publishedDescriptors(journeyId:string,ids:string[]):Promise<ToolData>{return this.serial.run(async()=>{const state=await this.load(),descriptors:Record<string,import('./sealed-descriptors.ts').DefinitionRef>={};for(const a of state.accounts.filter(a=>a.live)){if(ids.includes(a.personId)&&a.descriptor?.publications[journeyId])descriptors[a.personId]=a.descriptor.publications[journeyId]!;for(const agent of a.agents.filter(g=>g.live))if(ids.includes(agent.id)&&agent.descriptor?.publications[journeyId])descriptors[agent.id]=agent.descriptor.publications[journeyId]!;}return {descriptors};});}
+  setDescriptor(personId:string,clientId:string,agentId:string|undefined,supplied:SealedDescriptor):Promise<ToolData>{return this.serial.run(async()=>{
+    if(!this.sealedMode)throw new Refused('Sealed generation required');const state=await this.load(),account=state.accounts.find(a=>a.personId===personId&&a.live);if(!account)throw new Refused('Live account required');const actor=this.resolve(account,clientId);if(!allows(actor,'read',true)||!allows(actor,'device.keys',true))throw new Refused('Sealed descriptors need read + device.keys; ask the owner to grant both explicitly');
+    const agent=agentId?account.agents.find(a=>a.id===agentId&&a.live):undefined;if(agentId&&(!agent||actor.agent&&actor.agent.id!==agentId))throw new Refused('Only owned live agent descriptor');if(!agentId)requireAccountCapability(actor,'account.nickname');const target=agent??account,value=sealedDescriptor.parse(supplied);if(value.contentRevision!==(target.descriptor?.contentRevision??0)+1)throw new Refused('Descriptor revision changed');target.descriptor=value;await this.save(state);return {descriptor:value};
+  });}
   private resolve(account: Account, clientId: string, actingAgent?: string): Actor {
     const client = account.clients.indexOf(clientId) + 1;
     const bound = account.agents[cell(account.bindings, 'Agents', client) - 2];
@@ -344,7 +359,7 @@ export class AccountsHost {
       const state = await this.load(), account = state.accounts.find(a => a.personId === personId);
       if (!account) throw new Refused('Account not found');
       const actor = this.resolve(account, clientId, 'actingAgent' in command.input ? command.input.actingAgent : undefined);
-      const view = (a: Account['agents'][number]) => ({ agentId: a.id, name: a.name, live: a.live, signed: scalar(a.card, 'signed') === 1, capabilities: cardCaps(a.card), offers: !actor.agent || actor.agent.id === a.id ? (a.offers ?? []).map(offerView) : undefined, clientId: a.clientId, clientName: a.clientName, createdAt: a.createdAt, lastUsedAt: a.lastUsedAt, journeys: a.journeys ?? [] });
+      const view = (a: Account['agents'][number]) => ({ agentId: a.id, name: a.name, descriptor:a.descriptor, live: a.live, signed: scalar(a.card, 'signed') === 1, capabilities: cardCaps(a.card), offers: !actor.agent || actor.agent.id === a.id ? (a.offers ?? []).map(offerView) : undefined, clientId: a.clientId, clientName: a.clientName, createdAt: a.createdAt, lastUsedAt: a.lastUsedAt, journeys: a.journeys ?? [] });
       switch (command.tool) {
         case 'offer_journey_set': case 'offer_set': case 'offer_list': case 'offer_publish': case 'offer_retire': case 'offer_settings': {
           const agent = account.agents.find(a => a.id === command.input.agentId && a.live);
@@ -358,7 +373,8 @@ export class AccountsHost {
         case 'agent_list': return { agents: account.agents.map(view) };
         case 'agent_create': {
           if (actor.agent) throw new Refused('Only a person adds agents');
-          const agent = { id: `agent_${crypto.randomUUID()}`, name: command.input.name, live: true, card: cardRule.init() };
+          if(this.sealedMode&&command.input.name!==SEALED_NOTICE)throw new Refused('Agent names must be sealed');const id=`agent_${crypto.randomUUID()}`;
+          const agent = { id, name: this.sealedMode?id:command.input.name, live: true, card: cardRule.init() };
           account.agents.push(agent); await this.save(state); return view(agent);
         }
         case 'agent_capabilities': case 'agent_narrow': case 'agent_card': case 'agent_remove': {
@@ -433,7 +449,7 @@ export class AccountsHost {
       const state = await this.load(), account = state.accounts.find(a => a.subject === identity.subject);
       if (!account || this.resolve(account, identity.clientId).agent) throw new Refused('Only a live person manages passkeys');
       const operation = passkeyOperation.parse(supplied);
-      const result = await managePasskey(account, state.accounts, this.storage, operation, this.now());
+      const result = await managePasskey(account, state.accounts, this.storage, operation, this.now(),this.sealedMode);
       if (operation.op === 'finish' || operation.op === 'delete' || operation.op === 'rename') await this.save(state);
       return result;
     });
@@ -481,6 +497,7 @@ export class AccountsHost {
       }
       const machine = personalGroupRule(1);
       if (command.tool === 'personal_group_add') {
+        if(this.sealedMode)throw new Refused('Use authenticated device enrollment; seal labels in the private profile');
         const slot = account.identities.length + 2;
         if (slot >= SLOTS) throw new Refused('Personal group is full');
         const next = machine.step(account.group, { op: 0, subject: slot, kind: command.input.kind === 'device' ? 2 : 3, belongsTo: 1 });

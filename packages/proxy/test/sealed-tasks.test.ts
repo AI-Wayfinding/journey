@@ -14,6 +14,7 @@ test('sealed task canary, narrow audience, input exchange and finality',async t=
  const journeyId=String((await a.client.call('journey_create',{name:'Tasks',policy:'open',defaultRole:'write'})).journeyId);await b.client.call('journey_join',{journeyId});await c.client.call('journey_join',{journeyId});
  const markers=['TASK-NAME-CANARY','TASK-REQUEST-CANARY','TASK-ANSWER-CANARY','TASK-OUTPUT-CANARY','TASK-CONVERSATION-CANARY','TASK-FAILURE-CANARY'] as const;
  const created=await a.client.call('task_create',{journeyId,name:markers[0],maxRounds:3,deadline:Date.now()+300000});const taskId=String(z.array(z.object({recordId:z.string()})).parse(created.records)[0]!.recordId),groupId=`taskgroup_${taskId}`;
+ for(const bytes of backend.blobs.data.values())for(const marker of markers)assert.ok(!new TextDecoder().decode(bytes).includes(marker),`blob leaked ${marker}`);
  await assert.rejects(c.client.call('task_read',{journeyId,taskId}),/Task access refused/);
  const candidate=await b.client.call('task_claim_prepare',{journeyId,taskId});assert.equal(candidate.groupId,groupId);const device=await b.client.prepareGroup(groupId);await a.client.addMember(groupId,b.client.personId,device.deviceId);
  await b.client.call('task_step',{journeyId,taskId,action:'claim'});await b.client.call('task_step',{journeyId,taskId,action:'askInput',inputRequests:{question:markers[1]}});

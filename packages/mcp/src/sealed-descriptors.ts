@@ -11,3 +11,9 @@ export const sealedOfferDefinition = z.object({
   contentRevision: snat.min(1),
 }).strict();
 export type SealedOfferDefinition = z.infer<typeof sealedOfferDefinition>;
+export const sealedDescriptor = sealedOfferDefinition;
+export type SealedDescriptor = z.infer<typeof sealedDescriptor>;
+const label = z.string().max(4096);
+export const privateProfile = z.object({name:label,nickname:label.optional(),email:z.email().max(320).optional(),deviceLabels:z.record(sid,label).optional(),passkeyLabels:z.record(sid,label).optional()}).strict();
+export const publicProfile = z.object({nickname:label}).strict();
+export const cardDescriptor = z.object({name:label,clientName:label.optional()}).strict();

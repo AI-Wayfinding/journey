@@ -1,6 +1,7 @@
 import * as z from 'zod';
+import { verifyDescriptor } from './sealed-identities.ts';
 import { internalDefinition, verifyDefinition } from './sealed-offers.ts';
-import { sealedOfferDefinition, type DefinitionRef } from './sealed-descriptors.ts';
+import { sealedDescriptor, type SealedDescriptor, sealedOfferDefinition, type DefinitionRef } from './sealed-descriptors.ts';
 import type { OfferAgent, StandingDecision } from './offers.ts';
 import type { WritePort, WritePermit, WriteReceipt, WriteDrain } from './write-permits.ts';
 import { AccountsHost, type Account, type Profiles } from './accounts.ts';
@@ -25,6 +26,8 @@ import type { OAuthPort, OAuthOperation, AgentConsent } from './oauth-contract.t
 import { agentConsent } from './oauth-contract.ts';
 import { cardCaps } from './agents.ts';
 export interface AccountsPort extends OAuthPort, WritePort {
+  publishedDescriptors?(journeyId:string,ids:string[]):Promise<ToolData>;
+  setDescriptor?(personId:string,clientId:string,agentId:string|undefined,descriptor:SealedDescriptor):Promise<ToolData>;
   sealedDevice?(personId:string,clientId:string,tool:string,input:unknown):Promise<ToolData>;
   deviceBinding?(deviceId:string):Promise<DeviceBinding>;
   reserveDevice?(deviceId:string,groupId:string):Promise<DeviceBinding>;
@@ -71,6 +74,8 @@ export class Backend implements CoordinationBackend {
     await this.recoverWrites();const account=await this.accounts.provision(subject),actor=await this.accounts.resolveActor(account.personId,clientId);
     if(actor.agent&&(tool==='content_prepare'||Object.hasOwn(sealedRouting,tool))&&(!allows(actor,'read',true)||!allows(actor,'device.keys',true)))throw new Refused('Sealed content refused: needs read + device.keys; ask the owner to grant both explicitly');
     const read=(ref:DefinitionRef)=>this.sealedExecute(subject,'sealed_record_read',ref,clientId);
+    if(tool==='agent_create')return this.executeCommand(subject,parseCommand('agent_create',{name:SEALED_NOTICE}),clientId);
+    if(tool==='account_update'||tool==='agent_descriptor_set'){const agentId=tool==='agent_descriptor_set'?String(named.agentId):undefined;const d=sealedDescriptor.parse(named.sealed);if(agentId&&(!account.agents.some(a=>a.id===agentId&&a.live)||actor.agent&&actor.agent.id!==agentId))throw new Refused('Owned live agent required');await verifyDescriptor(d.privateDefinition,account.personId,agentId,d.contentRevision,true,read);for(const [journeyId,ref] of Object.entries(d.publications)){if(ref.journeyId!==journeyId)throw new Refused('Descriptor publication journey mismatch');await verifyDescriptor(ref,account.personId,agentId,d.contentRevision,false,read);}if(!this.accounts.setDescriptor)throw new Refused('Descriptor storage unavailable');return this.accounts.setDescriptor(account.personId,clientId,agentId,d);}
     if(tool==='offer_set'){
       const definition=z.object({id:z.string(),sealed:sealedOfferDefinition,journeySettings:z.record(z.string(),z.unknown()),admission:z.unknown()}).parse(named.offer),agentId=String(named.agentId);
       if(!account.agents.some(a=>a.id===agentId&&a.live)||actor.agent&&actor.agent.id!==agentId)throw new Refused('Owned live agent required');
@@ -92,7 +97,7 @@ export class Backend implements CoordinationBackend {
     await this.validateJourneys(account.personId, consent.journeys);
     const result = await this.accounts.oauth({ op: 'consent', id, subject, consent, assertion: assertionSchema.optional().parse(assertion) });
     if (result.kind !== 'agent') throw new Refused('Agent consent refused');
-    await this.syncAgentJourneys(account.personId, result.agentId, consent.name, consent.journeys);
+    await this.syncAgentJourneys(account.personId, result.agentId, this.sealedMode?result.agentId:consent.name, consent.journeys);
     await this.accounts.oauth({ op: 'manage', subject, agentId: result.agentId, journeys: consent.journeys });
     return result.agentId;
   }
@@ -112,6 +117,7 @@ export class Backend implements CoordinationBackend {
     if (!account || (await this.accounts.resolveActor(account.personId, identity.clientId)).agent) throw new Refused('Only a person manages agents');
     const own = account.agents.find(a => a.id === agentId && a.live);
     if (!own) throw new Refused('Owned live agent required');
+    if(this.sealedMode&&name!==agentId)throw new Refused('Agent names must be sealed by an enrolled proxy');
     const parsed = agentConsent.parse({ name, capabilities: cardCaps(own.card), journeys });
     await this.validateJourneys(account.personId, parsed.journeys);
     await this.syncAgentJourneys(account.personId, agentId, parsed.name, parsed.journeys);
@@ -161,6 +167,7 @@ export class Backend implements CoordinationBackend {
   private async named(data: ToolData): Promise<ToolData> {
     if (!('members' in data) || !('pending' in data)) return data;
     const { members, pending } = namedState.parse(data);
+    if(this.sealedMode&&this.accounts.publishedDescriptors&&typeof data.journeyId==='string')data={...data,...await this.accounts.publishedDescriptors(data.journeyId,members.map(m=>m.memberId))};
     const names = await this.accounts.names([...members.filter(m => m.kind === 'person').map(m => m.memberId), ...pending.map(p => p.personId)]);
     const agents: ToolData[] = [];
     for (const member of members.filter(m => m.kind === 'agent' && m.owner)) {
@@ -175,7 +182,7 @@ export class Backend implements CoordinationBackend {
       pending: pending.map(p => ({ ...p, name: names[p.personId] ?? 'Wayfinding member' })) };
   }
   private accountView(account: Account): ToolData {
-    return { personId: account.personId, personalGroupId: `personal_${account.personId}`, subject: account.subject, name: account.name, nickname: account.nickname, email: account.email, ...(this.sealedMode?{contentFormat:'sealed-v1'}:{}) };
+    return { personId: account.personId, personalGroupId: `personal_${account.personId}`, subject: account.subject, name: account.name, nickname: account.nickname, email: account.email,descriptor:account.descriptor, ...(this.sealedMode?{contentFormat:'sealed-v1'}:{}) };
   }
   async execute(subject: string, supplied: Command, clientId = 'trusted-host'): Promise<ToolData> {
     if(this.sealedMode&&(Object.hasOwn(sealedInputs,supplied.tool)||/^(artifact_|mls_|library_|topic_|post_|conversation_|board_|round_|interview_|project_|task_)/.test(supplied.tool)))throw new Refused(SEALED_NOTICE+'; use the sealed client contract');
@@ -318,7 +325,7 @@ export class MemoryBackend extends Backend {
   readonly accountsHost: AccountsHost;
   constructor(profiles: Profiles, now: () => number = Date.now, verifier?: PasskeyVerifier, sealedMode=false) {
     const storage = new MemoryStorage(), stores = new Map<string, MemoryStorage>(), hosts = new Map<string, JourneyHost>(), blobs = new MemoryBlobs();
-    const accounts = new AccountsHost(storage, profiles, blobs, verifier, now);
+    const accounts = new AccountsHost(storage, profiles, blobs, verifier, now,sealedMode);
     super(accounts, id => {
       let host = hosts.get(id);
       if (!host) { const store = new MemoryStorage(); stores.set(id, store); host = new JourneyHost(store, now, blobs, { directory: () => accounts.offerDirectory(), stand: d => accounts.standingDecision(d), reserve: r => accounts.reserveAllowance(r), approve: r => accounts.approveAllowance(r), release: (id, permitOnly) => accounts.releaseAllowance(id, permitOnly) }, accounts); hosts.set(id, host); }

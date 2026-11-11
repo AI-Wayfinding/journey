@@ -5,7 +5,7 @@ import { durableBackend, type ObjectBindings } from './objects.ts';
 export { Journey, Accounts } from './objects.ts';
 // v2 changed the stored rules stamp, so v2 state lives in fresh classes and v1 objects stay untouched.
 export { Journey as JourneyV2, Accounts as AccountsV2 } from './objects.ts';
-export { Journey as JourneySealedV1, Accounts as AccountsSealedV1 } from './objects.ts';
+export { Journey as JourneySealedV1, AccountsSealedV1 } from './objects.ts';
 
 export interface Env extends ObjectBindings {
   AUTHKIT_ISSUER: string;

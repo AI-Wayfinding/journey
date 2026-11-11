@@ -19,7 +19,7 @@ export const changeSchema = z.discriminatedUnion('kind', [
 ]);
 export type CardChange = z.infer<typeof changeSchema>;
 export interface ClientIdentity { subject: string; clientId: string }
-export interface AccountAgent { id: string; name: string; live: boolean; card: Snapshot; clientId?: string; clientName?: string; createdAt?: number; lastUsedAt?: number; journeys?: string[]; authorizationPending?: boolean; pendingConsentId?: string; offers?: Offer[]; offerSettings?: OwnerOfferSettings; standingReceipts?: string[] }
+export interface AccountAgent { descriptor?:import('./sealed-descriptors.ts').SealedDescriptor; id: string; name: string; live: boolean; card: Snapshot; clientId?: string; clientName?: string; createdAt?: number; lastUsedAt?: number; journeys?: string[]; authorizationPending?: boolean; pendingConsentId?: string; offers?: Offer[]; offerSettings?: OwnerOfferSettings; standingReceipts?: string[] }
 export interface Actor { personId: string; clientId?: string; agent?: AccountAgent }
 /** aaguid names the provider (e.g. 1Password); name is the person's own label. Older records lack the optional fields. */
 export interface PasskeyCredential { id: string; publicKey: number[]; counter: number; aaguid?: string; name?: string; createdAt?: number; lastUsedAt?: number }

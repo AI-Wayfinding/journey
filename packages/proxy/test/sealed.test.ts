@@ -136,7 +136,7 @@ test('sealed concurrent contributions both publish once without overwriting each
 test('sealed capability-only authors receive an actionable refusal without a silent read or device grant',async()=>{
  const backend=new MemoryBackend({async get(s){return {name:s,email:`${s}@example.test`};}},Date.now,testPasskeys,true);
  const journey=await backend.sealedExecute('alice','journey_create',{policy:'open',defaultRole:'write'}),journeyId=String(journey.journeyId);
- const agentId=String((await backend.execute('alice',parseCommand('agent_create',{name:'Capability-only writer'}))).agentId);
+ const agentId=String((await backend.sealedExecute('alice','agent_create',{})).agentId);
  await backend.execute('alice',parseCommand('agent_add',{journeyId,agentId}));
  const identity={subject:'alice',clientId:'test-console'},change={kind:'bind' as const,clientId:'writer',agentId};const {challenge}=await backend.beginAuthorization(identity,change);
  await backend.completeAuthorization(identity,change,{id:'synthetic',rawId:'synthetic',type:'public-key',clientExtensionResults:{},response:{clientDataJSON:challenge,authenticatorData:'',signature:'test-valid'}});
@@ -155,6 +155,7 @@ test('sealed offers keep definitions private and publish current authenticated j
  const markers=['OFFER-NAME-CANARY','OFFER-DESCRIPTION-CANARY','OFFER-TAG-CANARY','OFFER-EXAMPLE-CANARY','OFFER-SCHEMA-CANARY','OFFER-INSTRUCTIONS-CANARY','OFFER-RESOURCE-CANARY'];
  const definition={id:'sealed-offer',name:markers[0],description:markers[1],tags:[markers[2]],examples:[markers[3]],inputSchema:{type:'object',properties:{value:{type:'string',description:markers[4]}},required:['value'],additionalProperties:false},outputSchema:{type:'object'},instructions:markers[5],resource:markers[6],journeySettings:{[journeyId]:{enabled:true}}};
  await a.client.call('offer_set',{agentId,offer:definition});await a.client.call('offer_publish',{agentId,offerId:definition.id});
+ for(const bytes of backend.blobs.data.values())for(const marker of markers)assert.ok(!new TextDecoder().decode(bytes).includes(marker),`blob leaked ${marker}`);
  const result=await a.client.call('offer_search',{journeyId,query:markers[0],tags:[markers[2]]});assert.equal(z.array(z.object({name:z.string()})).parse(result.offers)[0]!.name,markers[0]);
  const b=await connect('bob');await b.client.call('journey_join',{journeyId});const device=await b.client.prepareGroup(journeyId);await a.client.addMember(journeyId,b.client.personId,device.deviceId);const found=await b.client.call('offer_search',{journeyId});assert.equal(z.array(z.object({description:z.string()})).parse(found.offers)[0]!.description,markers[1]);
  const metadata=await backend.sealedExecute('bob','offer_search',{journeyId});assert.equal(JSON.stringify(metadata).includes('privateDefinition'),false);

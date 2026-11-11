@@ -1,5 +1,5 @@
 import * as z from 'zod';
-import { sealedOfferDefinition } from './sealed-descriptors.ts';
+import { sealedDescriptor, sealedOfferDefinition } from './sealed-descriptors.ts';
 import { admissionSchema, journeySettingsSchema } from './offers.ts';
 import { decodeBytes } from './relay.ts';
 import { Refused } from './errors.ts';
@@ -27,6 +27,7 @@ export const sealedRouting = {
   journey_descriptor: z.object({}).strict(),
   task_create:z.object({taskId:sid,maxRounds:snat.min(1),deadline:snat.max(8_640_000_000_000_000)}).strict(),
   task_exchange:z.object({taskId:sid,action:z.enum(['claim','startRound','endRound','finish','cancel','expire','approve','decline','askInput','answer','fail']),standing:z.enum(['always_allow','always_deny']).optional()}).strict(),
+  identity_descriptor:z.object({kind:z.enum(['profile','card']),agentId:sid.optional(),contentRevision:snat.min(1),private:z.boolean()}).strict().refine(v=>(v.kind==='card')===(v.agentId!==undefined)),
   offer_definition: z.object({agentId:sid,offerId:sid,contentRevision:snat.min(1),private:z.boolean()}).strict(),
   project_create: z.object({}).strict(),
   project_update: z.object({projectId:sid,status:z.enum(['gettingStarted','active','lookingForOthers','archived']).optional()}).strict(),
@@ -57,6 +58,9 @@ const ticket = z.object({...ctx,ticketId:sid,devices:z.record(z.string(),sid),en
 export const contentContext=z.object({format:z.literal(SEALED_FORMAT),groupId:sid,parentId:sid,recordId:sid,recordType:sid,revision:snat.min(1),operationId:sid,authorId:sid,epoch:snat}).strict();
 export type ContentContext=z.infer<typeof contentContext>;
 export const sealedInputs: Record<string,z.ZodObject> = {
+  agent_create:z.object({}).strict(),
+  account_update:z.object({sealed:sealedDescriptor}).strict(),
+  agent_descriptor_set:z.object({agentId:sid,sealed:sealedDescriptor}).strict(),
   task_prepare:z.object({journeyId:sid,assignee:sid.optional(),agentId:sid.optional(),offerId:sid.optional()}).strict(),
   task_claim_prepare:z.object({journeyId:sid,taskId:sid}).strict(),
   task_step:ticket,

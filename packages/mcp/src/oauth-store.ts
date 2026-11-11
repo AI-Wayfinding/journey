@@ -7,7 +7,7 @@ export const randomToken = () => base64url(crypto.getRandomValues(new Uint8Array
 export const tokenHash = async (value: string) => base64url(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))));
 
 /** Runs inside AccountsHost's serial turn; its caller atomically replaces accounts, including these records. */
-export async function oauthStep(state: OAuthAccounts, op: OAuthOperation, now: number, deviceAsserted = false): Promise<OAuthResult> {
+export async function oauthStep(state: OAuthAccounts, op: OAuthOperation, now: number, deviceAsserted = false, sealedMode=false): Promise<OAuthResult> {
   const db = state.oauth ??= { clients: [], requests: [], codes: [], access: [], refresh: [] };
   db.requests = db.requests.filter(r => r.request.expiresAt > now);
   db.codes = db.codes.filter(r => r.expiresAt > now);
@@ -36,7 +36,7 @@ export async function oauthStep(state: OAuthAccounts, op: OAuthOperation, now: n
   switch (op.op) {
     case 'register': {
       if (db.clients.length >= 1024) throw new Refused('Client registration capacity reached');
-      const client = { client_id: `client_${randomToken()}`, client_name: op.client.client_name, redirect_uris: op.client.redirect_uris,
+      const client = { client_id: `client_${randomToken()}`, client_name: sealedMode?'MCP client':op.client.client_name, redirect_uris: op.client.redirect_uris,
         token_endpoint_auth_method: op.client.token_endpoint_auth_method, grant_types: op.client.grant_types, response_types: op.client.response_types };
       db.clients.push(client); return { kind: 'client', client };
     }
@@ -44,7 +44,7 @@ export async function oauthStep(state: OAuthAccounts, op: OAuthOperation, now: n
     case 'request': {
       if (op.request) {
         if (db.requests.length >= 512 || db.requests.some(r => r.id === op.id)) throw new Refused('Authorization capacity reached');
-        db.requests.push({ id: op.id, request: op.request });
+        db.requests.push({ id: op.id, request: {clientId:op.request.clientId,clientName:sealedMode?'MCP client':op.request.clientName,redirectUri:op.request.redirectUri,challenge:op.request.challenge,state:op.request.state,expiresAt:op.request.expiresAt} });
       }
       return { kind: 'request', request: db.requests.find(r => r.id === op.id)?.request };
     }
@@ -64,7 +64,7 @@ export async function oauthStep(state: OAuthAccounts, op: OAuthOperation, now: n
         agent = { id: `agent_${crypto.randomUUID()}`, name: op.consent.name, live: true, card: cardRule.init(), createdAt: now };
         account.agents.push(agent);
       }
-      agent.name = op.consent.name; agent.clientId = request.clientId; agent.clientName = request.clientName;
+      agent.name = sealedMode?agent.id:op.consent.name; agent.clientId = request.clientId;if(!sealedMode)agent.clientName=request.clientName;
       agent.authorizationPending = true; agent.pendingConsentId = op.id;
       agent.card = stepCard(agent.card, scalar(agent.card, 'signed') ? 'widen' : 'sign', caps, 'read', false, true, true, true);
       if (!client) { account.clients.push(request.clientId); client = account.clients.length; }

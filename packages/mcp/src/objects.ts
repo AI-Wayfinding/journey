@@ -2,6 +2,7 @@ import * as z from 'zod';
 import { writeRequestSchema, writePermitSchema, writeReceiptSchema, type WritePermit, type WriteReceipt } from './write-permits.ts';
 import { allowanceRequestSchema, permitRequestSchema, type OfferAgent, type StandingDecision } from './offers.ts';
 const standingSchema = z.object({ id: z.string().min(1).max(200), owner: z.string().min(1).max(200), agentId: z.string().min(1).max(200), offerId: z.string().min(1).max(200), who: z.union([z.object({ person: z.string().min(1).max(200) }).strict(), z.object({ agent: z.string().min(1).max(200) }).strict()]), decision: z.enum(['allow', 'deny']) }).strict();
+import { sealedDescriptor } from './sealed-descriptors.ts';
 import { AccountsHost, WorkOSProfiles, type Account } from './accounts.ts';
 import { Backend, type AccountsPort, type JourneyPort } from './backend.ts';
 import { Refused, parseCommand, type Command, type ToolData } from './commands.ts';
@@ -85,11 +86,13 @@ export class Journey {
 }
 export class Accounts {
   private readonly host: AccountsHost;
-  constructor(state: ObjectState, env: Pick<ObjectBindings, 'WORKOS_API_KEY'> & Partial<Pick<ObjectBindings, 'BLOBS'>>, verifier?: import('./agents.ts').PasskeyVerifier) { this.host = new AccountsHost(state.storage, new WorkOSProfiles(env.WORKOS_API_KEY), env.BLOBS, verifier); }
+  constructor(state: ObjectState, env: Pick<ObjectBindings, 'WORKOS_API_KEY'> & Partial<Pick<ObjectBindings, 'BLOBS'>>, verifier?: import('./agents.ts').PasskeyVerifier,sealedMode=false) { this.host = new AccountsHost(state.storage, new WorkOSProfiles(env.WORKOS_API_KEY), env.BLOBS, verifier,Date.now,sealedMode); }
   async fetch(request: Request): Promise<Response> {
     return respond(async () => {
       if (request.method !== 'POST') throw new Refused('Internal requests must be POST');
       const body = record(await request.json());
+      if(body.action==='publishedDescriptors')return this.host.publishedDescriptors(field(body,'journeyId'),z.array(z.string()).max(1024).parse(body.ids));
+      if(body.action==='setDescriptor')return this.host.setDescriptor(field(body,'personId'),field(body,'clientId'),typeof body.agentId==='string'?field(body,'agentId'):undefined,sealedDescriptor.parse(body.descriptor));
       if(body.action==='deviceBinding')return this.host.deviceBinding(field(body,'deviceId'));
       if(body.action==='reserveDevice')return this.host.reserveDevice(field(body,'deviceId'),field(body,'groupId'));
       if(body.action==='sealedDevice')return this.host.sealedDevice(field(body,'personId'),field(body,'clientId'),field(body,'tool'),body.input);
@@ -129,6 +132,8 @@ export class Accounts {
   }
 }
 
+export class AccountsSealedV1 extends Accounts {constructor(state:ObjectState,env:Pick<ObjectBindings,'WORKOS_API_KEY'>&Partial<Pick<ObjectBindings,'BLOBS'>>){super(state,env,undefined,true);}}
+
 async function call<T>(namespace: ObjectNamespace, name: string, body: Record<string, unknown>): Promise<T> {
   const stub = namespace.getByName(name);
   const response = await stub.fetch(new Request('https://coordination.internal/', { method: 'POST', body: JSON.stringify(body) }));
@@ -143,6 +148,8 @@ async function watch(namespace: ObjectNamespace, id: string, personId: string, a
 }
 export function durableBackend(env: ObjectBindings,sealedMode=false): Backend {
   const accounts: AccountsPort = {
+    publishedDescriptors:(journeyId,ids)=>call(env.ACCOUNTS,'accounts',{action:'publishedDescriptors',journeyId,ids}),
+    setDescriptor:(personId,clientId,agentId,descriptor)=>call(env.ACCOUNTS,'accounts',{action:'setDescriptor',personId,clientId,agentId,descriptor}),
     sealedDevice:(personId,clientId,tool,input)=>call(env.ACCOUNTS,'accounts',{action:'sealedDevice',personId,clientId,tool,input}),
     deviceBinding:deviceId=>call(env.ACCOUNTS,'accounts',{action:'deviceBinding',deviceId}),
     reserveDevice:(deviceId,groupId)=>call(env.ACCOUNTS,'accounts',{action:'reserveDevice',deviceId,groupId}),
