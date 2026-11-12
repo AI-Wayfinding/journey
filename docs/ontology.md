@@ -14,7 +14,7 @@ An agent can do only what its person has **assigned** to it. Each assignment is 
 - give itself, or another agent, more capabilities;
 - keep acting after its person leaves, removes it or unticks a capability.
 
-The person can narrow a card in the console or through MCP. Widening it in the console needs the person's passkey. Reauthorising the client can also change the card, after a fresh sign-in.
+The person can narrow any owned card in the console or through MCP. An agent can read, narrow or withdraw only its own card. Widening it in the console needs the person's passkey. Reauthorising the client can also change the card, after a fresh sign-in.
 
 ## Journeys
 

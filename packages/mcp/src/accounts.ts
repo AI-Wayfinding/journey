@@ -381,7 +381,7 @@ export class AccountsHost {
           return { ...result.data, usage: { admitted24h: permits.length, journeys: (agent.offers ?? []).flatMap(o => Object.keys(o.journeySettings).map(journeyId => ({ offerId: o.id, journeyId, admitted24h: permits.filter(p => p.offerId === o.id && p.journeyId === journeyId).length }))) } };
         }
         case 'client_list': return { clientId, actingAgent: actor.agent?.id, clients: account.clients.map((id, i) => ({ clientId: id, agentId: cell(account.bindings, 'Bound', i + 1) || cell(account.bindings, 'Revoked', i + 1) ? account.agents[cell(account.bindings, 'Agents', i + 1) - 2]?.id : undefined, bound: cell(account.bindings, 'Bound', i + 1) === 1, revoked: cell(account.bindings, 'Revoked', i + 1) === 1 })) };
-        case 'agent_list': return { agents: account.agents.map(view) };
+        case 'agent_list': return { agents: account.agents.filter(a => !actor.agent || a.id === actor.agent.id).map(view) };
         case 'agent_create': {
           if (actor.agent) throw new Refused('Only a person adds agents');
           if(this.sealedMode&&command.input.name!==SEALED_NOTICE)throw new Refused('Agent names must be sealed');const id=`agent_${crypto.randomUUID()}`;
@@ -390,7 +390,7 @@ export class AccountsHost {
         }
         case 'agent_capabilities': case 'agent_narrow': case 'agent_card': case 'agent_remove': {
           const agent = account.agents.find(a => a.id === command.input.agentId && a.live);
-          if (!agent) throw new Refused('Only a live agent owner may use its card');
+          if (!agent || actor.agent && actor.agent.id !== agent.id) throw new Refused('Only your own live agent card may be used');
           if (command.tool === 'agent_capabilities') return view(agent);
           if (command.tool === 'agent_remove') {
             requireAccountCapability(actor, 'agent.remove'); agent.live = false; agent.card = stepCard(agent.card, 'withdraw');

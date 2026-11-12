@@ -271,6 +271,11 @@ Dan's brief for v2 was to write the spec, build what seems best, and refine late
 
 ## Open
 
+### 36. Agents manage only their own cards
+
+- **Decided by:** hardening task, security finding F14.
+- **What:** a bound agent can list and read only its own card, and can narrow or withdraw only that card. The person can still manage every owned agent.
+
 - **Remaining sealing work:** device trust hardening, independent security review, ts-mls audit and browser distribution assurance remain launch blockers. Forum, library, sensemaking, offers, tasks and identity descriptors use sealed-v1. The console now has an opt-in browser encryption device, with ids/placeholders while locked. Nothing in this change deploys, resets, migrates or erases old plaintext data.
 - **Stage 7, review:** not done. Dan's formal review of the rules and an independent security review must pass before real users or confidential data arrive.
 - **Dates:** the rewrite plan dates some of Dan's decisions 2026-11-01, but the commits that record them are dated 2026-10-29. The commit dates are what Git records.
