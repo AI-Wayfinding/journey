@@ -11,7 +11,7 @@ export async function oauthStep(state: OAuthAccounts, op: OAuthOperation, now: n
   const db = state.oauth ??= { clients: [], requests: [], codes: [], access: [], refresh: [] };
   db.clients = db.clients.filter(c => c.expiresAt === undefined || c.expiresAt > now || state.accounts.some(a => a.live && a.agents.some(g => g.live && g.clientId === c.client_id)));
   db.requests = db.requests.filter(r => r.request.expiresAt > now);
-  db.codes = db.codes.filter(r => r.expiresAt > now);
+  db.codes = db.codes.filter(r => r.expiresAt > now || r.used && (r.retainUntil ?? 0) > now);
   db.access = db.access.filter(r => r.expiresAt > now);
   // Used refresh hashes remain until their original expiry so reuse still revokes the family.
   db.refresh = db.refresh.filter(r => r.expiresAt > now);
@@ -93,8 +93,9 @@ export async function oauthStep(state: OAuthAccounts, op: OAuthOperation, now: n
     case 'exchange': {
       const hash = await tokenHash(op.code), code = db.codes.find(c => c.hash === hash);
       if (!code || code.clientId !== op.clientId || code.redirectUri !== op.redirectUri || code.challenge !== await tokenHash(op.verifier) || !live(code)) return invalid();
-      db.codes = db.codes.filter(c => c !== code);
-      return issue(code);
+      if (code.used) { if (code.family) revokeFamily(code.family); return invalid(); }
+      code.used = true; code.family = randomToken(); code.retainUntil = now + 30 * 86400_000;
+      return issue(code, code.family, code.retainUntil);
     }
     case 'refresh': {
       const hash = await tokenHash(op.token), t = db.refresh.find(t => t.hash === hash);

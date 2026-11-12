@@ -41,7 +41,7 @@ export interface OAuthPort { oauth(operation: OAuthOperation): Promise<OAuthResu
 export interface StoredToken extends TokenIdentity { hash: string; expiresAt: number; family: string; used?: boolean }
 export interface OAuthState {
   clients: OAuthClient[]; requests: { id: string; request: AuthorizationRequest }[];
-  codes: (TokenIdentity & { hash: string; redirectUri: string; challenge: string; expiresAt: number })[];
+  codes: (TokenIdentity & { hash: string; redirectUri: string; challenge: string; expiresAt: number; family?: string; used?: boolean; retainUntil?: number })[];
   access: StoredToken[]; refresh: StoredToken[];
 }
 export interface OAuthAccounts { accounts: Account[]; oauth?: OAuthState }

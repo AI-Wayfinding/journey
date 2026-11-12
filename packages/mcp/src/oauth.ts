@@ -44,7 +44,7 @@ function params(text: string): URLSearchParams {
   return p;
 }
 function redirectURL(value: string): URL {
-  const u = new URL(value);
+  let u: URL; try { u = new URL(value); } catch { throw new Refused('Redirect URI refused'); }
   const loopback = u.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname);
   if ((!loopback && u.protocol !== 'https:') || u.username || u.password || u.hash) throw new Refused('Redirect URI refused');
   return u;
@@ -58,7 +58,8 @@ function matchesRedirect(requested: string, registered: string): boolean {
   return withoutPort(requested) === withoutPort(registered);
 }
 function publicMetadataURL(value: string): URL {
-  const u = new URL(value), h = u.hostname.toLowerCase();
+  let u: URL; try { u = new URL(value); } catch { throw new Refused('Public HTTPS client metadata required'); }
+  const h = u.hostname.toLowerCase();
   if (u.protocol !== 'https:' || u.username || u.password || u.hash || (u.port && u.port !== '443') || !h.includes('.') || /^[\d.]+$/.test(h) || h.includes(':') || ['localhost', 'local', 'internal', 'test'].some(s => h === s || h.endsWith('.' + s))) throw new Refused('Public HTTPS client metadata required');
   return u;
 }
@@ -75,10 +76,14 @@ export function createOAuth(config: { backend?: CoordinationBackend; console?: C
   const origin = config.resource.origin, now = config.console?.now ?? Date.now, send = config.console?.send ?? fetch.bind(globalThis);
   const backend = config.backend;
   const sessions = config.console ? new ConsoleSessions(config.console.backend, config.console.secret, origin, now) : undefined;
+  const metadataCache = new Map<string, { client: OAuthClient; expiresAt: number }>();
   async function client(id: string): Promise<OAuthClient> {
     oauthId.parse(id);
     if (!backend?.oauth) throw new Refused('OAuth storage unavailable');
     if (id.startsWith('https://')) {
+      const cached = metadataCache.get(id);
+      if (cached && cached.expiresAt > now()) return cached.client;
+      metadataCache.delete(id);
       const url = publicMetadataURL(id), controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 5000);
       try {
         const response = await send(url, { redirect: 'manual', signal: controller.signal, headers: { Accept: 'application/json' } });
@@ -86,6 +91,8 @@ export function createOAuth(config: { backend?: CoordinationBackend; console?: C
         const raw: unknown = JSON.parse(await boundedBody(response));
         const doc = clientMetadata.extend({ client_id: z.literal(id) }).parse(raw);
         doc.redirect_uris.forEach(redirectURL);
+        if (metadataCache.size >= 128) metadataCache.delete(metadataCache.keys().next().value!);
+        metadataCache.set(id, { client: doc, expiresAt: now() + 300_000 });
         return doc;
       } finally { clearTimeout(timeout); }
     }
@@ -94,7 +101,8 @@ export function createOAuth(config: { backend?: CoordinationBackend; console?: C
     return r.client;
   }
   return { async fetch(request: Request): Promise<Response> {
-    const url = new URL(request.url), path = url.pathname;
+    let url: URL; try { url = new URL(request.url); } catch { return oauthError('invalid_request'); }
+    const path = url.pathname;
     if (!backend?.oauth) return oauthError('temporarily_unavailable', 503);
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: { ...headers, Allow: 'GET, POST, OPTIONS' } });
     const consentRoute = path === '/oauth/consent' || path === '/oauth/consent/options';
@@ -131,6 +139,7 @@ export function createOAuth(config: { backend?: CoordinationBackend; console?: C
         if (!browser || pending.request.browserHash !== await tokenHash(browser)) throw new Refused('Authorization belongs to another browser');
         const r = pending.request, destination = new URL(r.redirectUri);
         if (r.state !== undefined) destination.searchParams.set('state', r.state);
+        destination.searchParams.set('iss', origin);
         // Prevent the code appearing in referrers at the native client's redirect.
         const finish = () => { const response = redirect(destination.href); response.headers.set('Referrer-Policy', 'no-referrer'); return response; };
         if (body) {
