@@ -303,3 +303,40 @@ test('sealed ciphertext and fetch receipts respect the 128 KiB DO value limit',a
  for(const s of backend.journeyStores.values())for(const [key,raw] of s.data)if(key.startsWith('write:receipt:')){const receipt=JSON.parse(String(raw));assert.equal(receipt.result,undefined,'Sealed receipts retain no response bodies');}
  assert.ok(largest<=128*1024);
 });
+
+
+test('sealed device removals are same-person only, never guide power',async t=>{
+ const {a,backend,connect}=await fixture(t);
+ const journeyId=String((await a.client.call('journey_create',{name:'Removal',policy:'open',defaultRole:'read'})).journeyId);
+ const b=await connect('bob');await b.client.call('journey_join',{journeyId});
+ const device=await b.client.prepareGroup(journeyId);await a.client.addMember(journeyId,b.client.personId,device.deviceId);
+ const view=await backend.sealedExecute('alice','sealed_group',{journeyId,groupId:journeyId});
+ const devices=z.array(z.object({deviceId:z.string(),personId:z.string()})).parse(view.devices);
+ for(const [subject,sender,target] of [['alice',devices.find(d=>d.personId===a.client.personId)!,device],['bob',device,devices.find(d=>d.personId===a.client.personId)!]] as const){
+  await assert.rejects(backend.sealedExecute(subject,'sealed_group_commit',{journeyId,groupId:journeyId,deviceId:sender.deviceId,targetDeviceId:target.deviceId,action:'remove',expectedEpoch:view.epoch,expectedSequence:view.sequence,data:'e30='}),/own devices|ineligible/);
+ }
+});
+
+test('sealed eligible device admission is automatic between clients',async t=>{
+ const {a,connect}=await fixture(t);
+ const journeyId=String((await a.client.call('journey_create',{name:'Automatic',policy:'open',defaultRole:'read'})).journeyId);
+ const b=await connect('bob');await b.client.call('journey_join',{journeyId});
+ assert.equal((await b.client.enrollGroup(journeyId)).admitted,false);
+ await a.client.sync(journeyId);
+ assert.equal((await b.client.enrollGroup(journeyId)).admitted,true);
+});
+
+
+test('sealed member may remove an own second device without guide authority',async t=>{
+ const {a,backend,connect}=await fixture(t),journeyId=String((await a.client.call('journey_create',{name:'Own devices',policy:'open',defaultRole:'read'})).journeyId);
+ const b=await connect('bob');await b.client.call('journey_join',{journeyId});const first=await b.client.prepareGroup(journeyId);await a.client.sync(journeyId);
+ const second=await connect('bob');const next=await second.client.prepareGroup(journeyId);await a.client.sync(journeyId);
+ const view=await backend.sealedExecute('bob','sealed_group',{journeyId,groupId:journeyId});
+ await backend.sealedExecute('bob','sealed_group_commit',{journeyId,groupId:journeyId,deviceId:first.deviceId,targetDeviceId:next.deviceId,action:'remove',expectedEpoch:view.epoch,expectedSequence:view.sequence,data:'e30='});
+ const after=await backend.sealedExecute('bob','sealed_group',{journeyId,groupId:journeyId});assert.ok(!z.array(z.object({deviceId:z.string()})).parse(after.devices).some(d=>d.deviceId===next.deviceId));
+});
+
+test('sealed eligible reader bootstraps a new empty audience without a guide',async t=>{
+ const {backend,connect}=await fixture(t),journeyId=String((await backend.sealedExecute('alice','journey_create',{policy:'open',defaultRole:'read'})).journeyId);
+ const b=await connect('bob');await b.client.call('journey_join',{journeyId});assert.equal((await b.client.enrollGroup(journeyId)).admitted,true);
+});

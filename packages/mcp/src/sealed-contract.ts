@@ -77,7 +77,7 @@ export const sealedInputs: Record<string,z.ZodObject> = {
   content_abandon:z.object({...ctx,ticketId:sid}).strict(),
   sealed_blob_put:z.object({...ctx,ticketId:sid,slot:sid,data:z.string().min(4).max(4*Math.ceil(SEALED_LIMITS.blob/3))}).strict(),
   sealed_blob_get:z.object({...ctx,recordId:sid,revision:snat.min(1),blob:sid}).strict(),
-  sealed_group:z.object({...ctx,groupId:sid}).strict(),
+  sealed_group:z.object({...ctx,groupId:sid,deviceId:sid.optional()}).strict(),
   sealed_group_commit:z.object({...ctx,groupId:sid,deviceId:sid,expectedSequence:snat,expectedEpoch:snat,action:z.enum(['bootstrap','add','remove','update']),targetDeviceId:sid.optional(),data:z.string().min(4).max(4*Math.ceil(SEALED_LIMITS.envelope/3))}).strict(),
   sealed_group_fetch:z.object({...ctx,groupId:sid,deviceId:sid,since:snat.default(0),limit:snat.min(1).max(100).default(100)}).strict(),
   sealed_device_register:z.object({deviceId:sid,verificationKey:z.string().min(4).max(200),data:z.string().min(4).max(4*Math.ceil(SEALED_LIMITS.package/3))}).strict(),

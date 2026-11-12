@@ -13,7 +13,7 @@ import { decodeBytes, encodeBytes, type BlobStore } from './relay.ts';
 import { tokenHash } from './oauth-store.ts';
 
 export interface SealedAuthority { binding(deviceId:string):Promise<DeviceBinding>; reserve(expected:DeviceBinding,groupId:string):Promise<DeviceBinding> }
-interface Group { id:string; task?:TaskAudience; owner?:string; roundId?:string; epoch:number; sequence:number; bytes:number; messages:number; devices:DeviceBinding[]; usedDevices?:string[]; checkpoints:Record<string,number>; createdAt:number }
+interface Group { id:string; task?:TaskAudience; owner?:string; roundId?:string; epoch:number; sequence:number; bytes:number; messages:number; devices:DeviceBinding[]; pendingDevices?:string[]; usedDevices?:string[]; checkpoints:Record<string,number>; createdAt:number }
 interface Reference { context:ContentContext; blob:string; hash:string; size:number; sequence:number; attachment?:string }
 interface RecordState { id:string; taskId?:string; type:string; parentId:string; owner:string; revision:number; createdAt:number; updatedAt:number; refs:Reference[]; rule?:Snapshot; visibility?:'members'|'private'; projectId?:string; target?:Record<string,string>; replyTo?:string; deleted?:boolean; hidden?:boolean; locked?:boolean; source?:{itemId:string;version:number}; previousRoundId?:string; relatedItemIds?:string[]; guidanceItemId?:string; documentItemId?:string }
 interface Index { revision:number; ids:string[]; groups:string[]; pending:string[];uploadBytes?:number }
@@ -166,14 +166,28 @@ export async function sealedContent(e:SealedEnvironment,tool:string,supplied:unk
   if(tool==='sealed_history_post'){requireDevice(e);const g=await group(e,index,String(input.groupId));await current(e,g);const b=await e.authority.binding(String(input.deviceId));check(b.personId===personId(e)&&b.agentId===e.actor.agent?.id&&g.devices.some(d=>d.deviceId===b.deviceId),'History sender device refused');const contexts=input.contexts as ContentContext[];const all=(await records(e,index)).filter((r):r is RecordState=>!!r&&!r.deleted&&(readable(e,r)||r.type==='interview'&&r.refs.some(ref=>ref.context.groupId===e.state.id)));for(const ctx of contexts)check(ctx.groupId===g.id&&all.some(r=>!r.hidden&&r.refs.some(ref=>JSON.stringify(ref.context)===JSON.stringify(ctx))),'History must reference entitled retained content');const bytes=envelopeBytes(input.envelope,g.id,g.epoch);const sequence=await appendCiphertext(e,g,{epoch:g.epoch,kind:'history',deviceId:b.deviceId},bytes);return {sequence};}
   if(tool.startsWith('sealed_group')){
     requireDevice(e);const g=await group(e,index,String(input.groupId));
-    if(tool==='sealed_group'){const live=await liveDevices(e,g);return {groupId:g.id,definition:g.task?.definition,epoch:g.epoch,sequence:g.sequence,devices:g.devices,remove:g.devices.filter(d=>!live.some(l=>l.deviceId===d.deviceId)).map(d=>d.deviceId),checkpointLifetimeMs:SEALED_LIMITS.checkpoint};}
+    if(tool==='sealed_group'){
+      if(input.deviceId){
+        const b=await authorizedTarget(e,g,String(input.deviceId));
+        check(b.personId===personId(e)&&b.agentId===e.actor.agent?.id,'Only own device may request automatic admission');
+        if(!g.devices.some(d=>d.deviceId===b.deviceId)&&!g.pendingDevices?.includes(b.deviceId)){
+          check((g.pendingDevices?.length??0)<128,'Pending device capacity reached');
+          g.pendingDevices=[...(g.pendingDevices??[]),b.deviceId];await save(e.storage,key('group',g.id),g);
+        }
+      }
+      const live=await liveDevices(e,g),pending:DeviceBinding[]=[];
+      for(const id of g.pendingDevices??[])if(!g.devices.some(d=>d.deviceId===id)){
+        try{pending.push(await authorizedTarget(e,g,id));}catch{/* Ineligible packages are never admitted. */}
+      }
+      return {groupId:g.id,definition:g.task?.definition,epoch:g.epoch,sequence:g.sequence,devices:g.devices,pending,remove:g.devices.filter(d=>!live.some(l=>l.deviceId===d.deviceId)).map(d=>d.deviceId),checkpointLifetimeMs:SEALED_LIMITS.checkpoint};
+    }
     if(tool==='sealed_group_commit'){
       const binding=await e.authority.binding(String(input.deviceId));check(binding.personId===personId(e)&&binding.agentId===e.actor.agent?.id&&e.eligible(binding),'Authenticated device binding required');check(input.expectedEpoch===g.epoch&&input.expectedSequence===g.sequence,'Sealed group CAS mismatch');
       const action=String(input.action);let target:DeviceBinding|undefined;
-      if(action==='bootstrap'){check(!g.devices.length&&!g.sequence,'Group already bootstrapped');target=binding;g.devices.push(binding);}
-      else {check(g.devices.some(d=>d.deviceId===binding.deviceId),'Current group device required');if(action==='add'){check(g.devices.length<128,'Audience device capacity reached');target=await authorizedTarget(e,g,String(input.targetDeviceId));check(!g.devices.some(d=>d.deviceId===target!.deviceId),'Device already admitted');g.devices.push(target);}else if(action==='remove'){const id=String(input.targetDeviceId);target=g.devices.find(d=>d.deviceId===id);check(target,'Unknown removed device');g.devices=g.devices.filter(d=>d.deviceId!==id);}g.epoch++;}
+      if(action==='bootstrap'){check(!g.devices.length&&!g.sequence,'Group already bootstrapped');target=await authorizedTarget(e,g,binding.deviceId);g.devices.push(binding);}
+      else {check(g.devices.some(d=>d.deviceId===binding.deviceId),'Current group device required');if(action==='add'){check(g.devices.length<128,'Audience device capacity reached');target=await authorizedTarget(e,g,String(input.targetDeviceId));check(!g.devices.some(d=>d.deviceId===target!.deviceId),'Device already admitted');g.devices.push(target);}else if(action==='remove'){const id=String(input.targetDeviceId);target=g.devices.find(d=>d.deviceId===id);check(target,'Unknown removed device');check(target!.personId===binding.personId||!(await liveDevices(e,g)).some(d=>d.deviceId===id),'Only own devices or server-ineligible devices may be removed');g.devices=g.devices.filter(d=>d.deviceId!==id);}g.epoch++;}
       if(target&&(action==='bootstrap'||action==='add')){check(!g.usedDevices?.includes(target.deviceId),'Key package was already consumed; register a new device package');await e.authority.reserve(target,g.id);g.usedDevices=[...(g.usedDevices??[]),target.deviceId];}
-      if(target&&action==='add'||action==='bootstrap')g.checkpoints[target!.deviceId]=e.now;const bytes=decodeBytes(String(input.data),SEALED_LIMITS.envelope);await current(e,g);const sequence=await appendCiphertext(e,g,{epoch:g.epoch,kind:action as Message['kind'],deviceId:binding.deviceId,target},bytes);await save(e.storage,key('index'),index);return {sequence,epoch:g.epoch};
+      if(target&&action==='add'||action==='bootstrap')g.checkpoints[target!.deviceId]=e.now;const bytes=decodeBytes(String(input.data),SEALED_LIMITS.envelope);if(action!=='remove')await current(e,g);if(action==='add')g.pendingDevices=g.pendingDevices?.filter(id=>id!==target!.deviceId);const sequence=await appendCiphertext(e,g,{epoch:g.epoch,kind:action as Message['kind'],deviceId:binding.deviceId,target},bytes);await save(e.storage,key('index'),index);return {sequence,epoch:g.epoch};
     }
     const binding=await e.authority.binding(String(input.deviceId));check(binding.personId===personId(e)&&binding.agentId===e.actor.agent?.id&&g.devices.some(d=>d.deviceId===binding.deviceId),'Current device required for retained history');const since=Number(input.since),limit=Number(input.limit);check(e.now-(g.checkpoints[binding.deviceId]??0)<=SEALED_LIMITS.checkpoint,'Offline checkpoint expired; rejoin through a live member');const messages:Message[]=[];let size=0;for(let n=since+1;n<=g.sequence&&messages.length<limit;n++){const m=await load<Message>(e.storage,key('message',g.id,n));check(m,'Missing retained MLS message');if(m!.blob){const b=await e.blobs.get(m!.blob);check(b,'Missing retained ciphertext');m!.data=encodeBytes(new Uint8Array(await b!.arrayBuffer()));}const wireSize=new TextEncoder().encode(JSON.stringify(m)).length;if(size+wireSize>SEALED_LIMITS.pageBytes)break;messages.push(m!);size+=wireSize;}g.checkpoints[binding.deviceId]=e.now;await save(e.storage,key('group',g.id),g);return {messages,cursor:messages.at(-1)?.sequence??since};
   }

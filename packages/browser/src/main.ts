@@ -51,10 +51,7 @@ async function unlocked(info:Record<string,unknown>){
  status.textContent='Unlocked in this tab. Cleartext stays here; writes are sealed before sending.';
  const group=field(controls,'Audience id',String(info.personalGroupId));
  const admission=el('pre');controls.append(admission);
- button(controls,'Prepare or synchronize audience',async()=>{const r=await client!.enrollGroup(group.value);admission.textContent=JSON.stringify(r,null,2)+(r.admitted?'':'\nAsk an existing member to add this deviceId with mls_group_add, then synchronize again.');});
- const target=field(controls,'Device id to admit (from its authenticated package)');
- const targetPerson=field(controls,'Person id to admit',z.string().parse(info.personId));
- button(controls,'Admit device to audience',async()=>{await client!.addMember(group.value,targetPerson.value,target.value);status.textContent='Device admitted. Synchronize it to receive keys.';});
+ button(controls,'Synchronize audience',async()=>{const r=await client!.enrollGroup(group.value);admission.textContent=r.admitted?'Audience synchronized.':'Waiting for an online member’s client. Admission is automatic.';});
  // Every browser joins the personal audience. Journey and narrow audiences use the same path.
  output(admission,await client.enrollGroup(String(info.personalGroupId)));
  await renderWorkspace();

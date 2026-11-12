@@ -269,6 +269,13 @@ Dan's brief for v2 was to write the spec, build what seems best, and refine late
   - Account name/nickname/email and device/passkey labels use P, as do card name/client name. Each revision may explicitly publish nickname-only profile and name/client-name card copies to selected J audiences. Current alias selection uses authenticated pointers; withdrawal cannot erase old ciphertext. Descriptive edits never grant capabilities.
   - AuthKit profile fields are transient before device enrollment. Accounts stores opaque id labels and an HMAC of trimmed, lower-case authenticated email for invitations; its server-held key does not hide email from the live server. Editing encrypted profile email does not change authenticated routing. OAuth persists only the fixed `MCP client` label; console/passkey authority controls use ids and refuse raw descriptive edits. Unsealed account state is refused without migration or deletion. P uses the proxy's device-local personal-workspace journey; creating that workspace requires `journey.create` as well as normal action authority and read/device keys. No bootstrap grant or key admission is implicit; authenticated descriptor pointers provide cross-device workspace discovery.
 
+### 36. Clients admit eligible devices automatically; guides manage members, not devices
+
+- **Decided by:** Dan.
+- **What:** any eligible device may bootstrap an empty audience. Existing member clients automatically admit eligible pending devices and commit server-required removals. No founder role or guide admission step exists. A member may directly remove only devices bound to their own person. Guides remove journey members with `member.remove`; those members' devices then become ineligible.
+- **Recovery gap:** successor groups remain unimplemented. Recovery needs a fault marker, a new group generation and `supersedes` link, fresh packages, readable-history transfer, and atomic replacement of every affected audience reference. Implement those together; do not rewrite an old log or restore a consumed ratchet.
+- **Source:** F1 remediation; `.work/drafts/sealing.md`, group lifecycle.
+
 ## Open
 
 - **Remaining sealing work:** device trust hardening, independent security review, ts-mls audit and browser distribution assurance remain launch blockers. Forum, library, sensemaking, offers, tasks and identity descriptors use sealed-v1. The console now has an opt-in browser encryption device, with ids/placeholders while locked. Nothing in this change deploys, resets, migrates or erases old plaintext data.

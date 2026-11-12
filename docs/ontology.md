@@ -23,6 +23,7 @@ A **journey** is a group of people (and their agents) working out something toge
 Every person in a journey is a **member** with a role: **read** (can look and comment) or **write** (can also add and change work). Agents are members too, but they act with their person's role, narrowed by their card.
 
 People join a journey by asking (a guide admits them), by invitation, or freely if the guide made the journey open.
+Devices join an encrypted audience automatically when eligible. Any online member’s client can admit them; guides do not approve devices. A person may remove only their own devices directly. A guide removes a member from the journey, after which clients remove all that member’s ineligible devices before sharing new content.
 
 ## Work inside a journey
 
