@@ -17,6 +17,7 @@ import { createOAuth, createOpaqueVerifier } from './oauth.ts';
 /** Inputs for {@link createApp}. Everything the Worker reads from its environment is passed in here. */
 export interface AppOptions {
   authRateLimit?: { limit(input: { key: string }): Promise<{ success: boolean }> };
+  registerRateLimit?: { limit(input: { key: string }): Promise<{ success: boolean }> };
   /** Verifies upstream AuthKit tokens for console login only. */
   verifier: OAuthTokenVerifier;
   /** Test seam for transport-only suites. Production always uses the opaque verifier. */
@@ -61,10 +62,11 @@ export function createApp(options: AppOptions): { fetch(request: Request): Promi
   const routes = {
     async fetch(request: Request): Promise<Response> {
       const path = new URL(request.url).pathname;
-      if (options.authRateLimit && ['/console/login', '/oauth/register', '/oauth/authorize', '/oauth/token'].includes(path)) {
+      const limiter = path === '/oauth/register' ? (options.registerRateLimit ?? options.authRateLimit) : options.authRateLimit;
+      if (limiter && ['/console/login', '/oauth/register', '/oauth/authorize', '/oauth/token'].includes(path)) {
         const ip = request.headers.get('cf-connecting-ip');
         if (!ip) return new Response('Client IP unavailable', { status: 503 });
-        try { if (!(await options.authRateLimit.limit({ key: `${path}:${ip}` })).success) return new Response('Too many requests', { status: 429, headers: { 'Retry-After': '60' } }); }
+        try { if (!(await limiter.limit({ key: `${path}:${ip}` })).success) return new Response('Too many requests', { status: 429, headers: { 'Retry-After': '60' } }); }
         catch { return new Response('Rate limiter unavailable', { status: 503 }); }
       }
       // The bare origin is the public landing page, served by the console so it can see the session.

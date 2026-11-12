@@ -99,17 +99,13 @@ test('oauth AS: HTTPS responses carry HSTS and authorization responses identify 
   assert.equal(new URL(response.headers.get('location')!).searchParams.get('iss'),origin);
 });
 
-test('oauth AS: unused DCR clients expire and anonymous registrations do not share a hard cap', async () => {
+test('oauth AS: unused DCR clients expire within ten minutes', async () => {
   let now = 1_800_000_000_000;
   const host = new AccountsHost(new MemoryStorage(), { get: async () => ({name:'test',email:'test@example.test'}) }, undefined, undefined, () => now);
-  let first = '';
-  for (let n = 0; n < 1030; n++) {
-    const result = await host.oauth({ op: 'register', client: { client_name: 'Synthetic', redirect_uris: [callback], token_endpoint_auth_method: 'none', grant_types: ['authorization_code'], response_types: ['code'] } });
-    assert.equal(result.kind, 'client');
-    if (result.kind === 'client' && !first) first = result.client!.client_id;
-  }
-  now += 86_400_001;
-  assert.deepEqual(await host.oauth({ op:'client', clientId:first }), {kind:'client',client:undefined});
+  const result = await host.oauth({ op: 'register', client: { client_name: 'Synthetic', redirect_uris: [callback], token_endpoint_auth_method: 'none', grant_types: ['authorization_code'], response_types: ['code'] } });
+  if (result.kind !== 'client' || !result.client) throw Error('client');
+  now += 600_001;
+  assert.deepEqual(await host.oauth({ op:'client', clientId:result.client.client_id }), {kind:'client',client:undefined});
 });
 
 test('oauth AS: pre-auth login does not write Accounts or lock out other browsers', async () => {
@@ -125,13 +121,15 @@ test('oauth AS: consent identifies redirect and client and requires the initiati
   const html = await (await f.send(path, { headers: { cookie } })).text();
   assert.ok(html.includes('127.0.0.1:32123'));
   assert.ok(html.includes(f.client.client_id));
-  const other = await fixture(), otherCookie = await other.login();
   // Reusing a real session from this server without the browser's authorization cookie must fail.
   const app = createApp({ resource: RESOURCE, issuer: ISSUER, allowedHosts: [RESOURCE.hostname], backend: f.backend,
     verifier: createVerifier({ issuer: ISSUER, resource: RESOURCE, getKey: createLocalJWKSet(signer.jwks) }),
     console: { backend: f.backend, secret: 'synthetic-secret-with-at-least-32-bytes' } });
   assert.equal((await app.fetch(new Request(new URL(path, origin), { headers: { cookie, host: RESOURCE.host } }))).status, 403);
-  void otherCookie;
+  const wrongCookie = `${cookie}; __Host-wayfinding-consent=${'w'.repeat(43)}`;
+  assert.equal((await app.fetch(new Request(new URL(path, origin), { headers: { cookie: wrongCookie, host: RESOURCE.host } }))).status, 403);
+  const id = new URL(path, origin).searchParams.get('request')!;
+  assert.equal((await app.fetch(new Request(new URL('/oauth/consent', origin), { method: 'POST', headers: { cookie: wrongCookie, host: RESOURCE.host, origin, 'content-type': 'application/json' }, body: JSON.stringify({ csrf: csrfOf(html), request: id, decision: 'allow', name: 'Scout', capabilities: ['read'], journeys: [] }) }))).status, 403);
 });
 
 test('oauth AS: metadata, DCR and CIMD validate before redirect, S256 and resource are mandatory', async () => {
@@ -280,7 +278,7 @@ test('oauth AS: expired consent and stale POST re-login safely; sign-in returns 
   assert.equal((await f.send(stale.headers.get('location')!)).status, 302);
   const fresh = await f.login();
   assert.equal((await f.send(path, { headers: { cookie: fresh } })).status, 403);
-  const next = (await f.authorize()).headers.get('location')!;
+  const next = (await f.authorize('https://pi.dev/oauth/client.json')).headers.get('location')!;
   const needsLogin = await f.send(next);
   const login = await f.send(needsLogin.headers.get('location')!);
   const destination = new URL(login.headers.get('location')!);
@@ -502,7 +500,7 @@ test('oauth AS: device.keys agent token bootstraps real proxy and round-trips se
     await assert.rejects(f.backend.sealedExecute('alice',tool,input,f.client.client_id),/device.keys/);
     assert.equal(f.backend.snapshot(),before,tool);
   }
-  await assert.rejects(WayfindingProxy.open(remote, store), /^Error: Remote operation refused$/);
+  await assert.rejects(WayfindingProxy.open(remote, store), {code:'permission'});
 });
 
 

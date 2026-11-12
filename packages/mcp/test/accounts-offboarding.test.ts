@@ -4,7 +4,7 @@ import { AccountsHost, UpstreamUserDeleted, WorkOSProfiles } from '../src/accoun
 import { MemoryStorage } from '../src/storage.ts';
 import { tokenHash } from '../src/oauth-store.ts';
 
-test('accounts: refresh rechecks upstream liveness; outage does not rotate and deletion revokes every family',async()=>{
+test('accounts: refresh suspends reversibly on upstream 404 without consuming credentials',async()=>{
  let failure:Error|undefined,reads=0;
  const host=new AccountsHost(new MemoryStorage(),{get:async()=>{reads++;if(failure)throw failure;return {name:'Alice',email:'alice@example.test'};}});
  await host.provision('alice');const client=await host.oauth({op:'register',client:{client_name:'Test',redirect_uris:['http://127.0.0.1/callback'],token_endpoint_auth_method:'none',grant_types:['authorization_code','refresh_token'],response_types:['code']}});
@@ -18,8 +18,13 @@ test('accounts: refresh rechecks upstream liveness; outage does not rotate and d
  failure=undefined;const rotated=await host.oauth(refresh);assert.equal(rotated.kind,'tokens');assert.equal(reads,3);
  if(rotated.kind!=='tokens')throw Error('refresh');failure=new UpstreamUserDeleted();
  assert.deepEqual(await host.oauth({...refresh,token:rotated.tokens.refresh_token}),{kind:'error',error:'invalid_grant'});
- assert.equal((await host.lookup('alice'))!.live,false);
+ assert.equal((await host.lookup('alice'))!.live,true);
+ assert.equal((await host.lookup('alice'))!.suspended,true);
  assert.deepEqual(await host.oauth({op:'verify',token:rotated.tokens.access_token}),{kind:'error',error:'invalid_token'});
+ failure=undefined;
+ assert.equal((await host.oauth({...refresh,token:rotated.tokens.refresh_token})).kind,'tokens');
+ assert.equal((await host.lookup('alice'))!.suspended,undefined);
+ assert.equal((await host.oauth({op:'verify',token:rotated.tokens.access_token})).kind,'access');
  await host.removePerson('never-provisioned');await assert.rejects(host.provision('never-provisioned'),/removed/);
 });
 

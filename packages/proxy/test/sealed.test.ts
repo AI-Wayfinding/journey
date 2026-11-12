@@ -103,14 +103,14 @@ test('sealed proxy new readers get live retained journey history but never priva
  await a.client.call('interview_write',{roundId,text:'PRIVATE-I-CANARY'});
  const b=await connect('bob');await b.client.call('journey_join',{journeyId});const device=await b.client.prepareGroup(journeyId);await a.client.addMember(journeyId,b.client.personId,device.deviceId);await b.client.sync(journeyId);
  assert.equal((await b.client.call('library_get',{itemId})).text,'Retained body');
- await assert.rejects(b.client.call('interview_read',{roundId,personId:a.client.personId}),/^Error: Remote operation refused$/);
+ await assert.rejects(b.client.call('interview_read',{roundId,personId:a.client.personId}),{code:'permission'});
  await a.client.call('interview_share',{roundId});assert.equal((await b.client.call('interview_read',{roundId,personId:a.client.personId})).text,'PRIVATE-I-CANARY');
  await a.client.call('round_participants',{roundId,add:[b.client.personId],remove:[]});
  await b.client.call('interview_write',{roundId,text:'BOB-PUBLISHED-PERSISTS'});await b.client.call('interview_share',{roundId});
  const c=await connect('carol');await c.client.call('journey_join',{journeyId});const third=await c.client.prepareGroup(journeyId);await a.client.addMember(journeyId,c.client.personId,third.deviceId);await c.client.sync(journeyId);assert.equal((await c.client.call('interview_read',{roundId,personId:a.client.personId})).text,'PRIVATE-I-CANARY');
  await a.client.call('journey_remove',{journeyId,memberId:b.client.personId});
  await a.client.call('library_version',{itemId,baseVersion:1,text:'After removal'});
- await assert.rejects(b.client.sync(journeyId),/refused|required|member|not found/i);
+ await assert.rejects(b.client.sync(journeyId),{code:'permission'});
  assert.equal((await c.client.call('library_get',{itemId})).text,'After removal');
  assert.equal((await c.client.call('interview_read',{roundId,personId:b.client.personId})).text,'BOB-PUBLISHED-PERSISTS');
 });
@@ -226,8 +226,8 @@ test('sealed board archive refuses posting and can reopen',async t=>{
  await a.client.call('board_update',{boardId,archived:true});
  const boards=records(await backend.sealedExecute('alice','forum_boards',{journeyId}));
  assert.equal(z.object({scalars:z.object({archived:z.number()})}).parse(boards.find(b=>b.recordId===boardId)!.rule).scalars.archived,1);
- await assert.rejects(a.client.call('post_create',{topicId,body:'Refused'}),/^Error: Remote operation refused$/);
- await assert.rejects(a.client.call('topic_create',{boardId,title:'Refused',body:'Refused'}),/^Error: Remote operation refused$/);
+ await assert.rejects(a.client.call('post_create',{topicId,body:'Refused'}),{code:'lifecycle'});
+ await assert.rejects(a.client.call('topic_create',{boardId,title:'Refused',body:'Refused'}),{code:'lifecycle'});
  await a.client.call('board_update',{boardId,archived:false});
  await a.client.call('post_create',{topicId,body:'Reopened'});
  assert.equal(z.array(z.object({body:z.string()})).parse((await a.client.call('topic_read',{topicId})).posts).at(-1)!.body,'Reopened');
@@ -362,7 +362,7 @@ test('sealed direct clients do not advertise incompatible App tools but retain f
 });
 
 
-test('sealed handshakes have a separate budget and a per-device quota',async t=>{
+test('sealed handshakes have a separate budget and a per-person quota',async t=>{
  const {a,backend}=await fixture(t),journeyId=String((await a.client.call('journey_create',{name:'Budget',policy:'open',defaultRole:'write'})).journeyId);
  const store=backend.journeyStores.get(journeyId)!,key=JSON.stringify(['sealed-v1','group',journeyId]);
  const original=JSON.parse(String(await store.get(key))),deviceId=original.devices[0].deviceId;
@@ -370,10 +370,10 @@ test('sealed handshakes have a separate budget and a per-device quota',async t=>
  for(let i=0;i<8;i++){
   const view=await backend.sealedExecute('alice','sealed_group',{journeyId,groupId:journeyId});
   try{await backend.sealedExecute('alice','sealed_group_commit',{journeyId,groupId:journeyId,deviceId,expectedSequence:view.sequence,expectedEpoch:view.epoch,action:'update',data});}
-  catch(error){assert.match(String(error),/device.*quota/i);refused=true;break;}
+  catch(error){assert.match(String(error),/person.*quota/i);refused=true;break;}
  }
  const after=JSON.parse(String(await store.get(key)));
- assert.equal(after.bytes,original.bytes,'Handshake bytes never consume application content budget');assert.ok(refused,'One device cannot fill the whole retained handshake log');
+ assert.equal(after.bytes,original.bytes,'Handshake bytes never consume application content budget');assert.ok(refused,'One person cannot fill the whole retained handshake log');
 });
 
 test('sealed abandoned uploads refund their journey reservation and delete unreferenced bytes',async t=>{
@@ -395,20 +395,20 @@ test('sealed expired uploads refund on the next request and retries do not doubl
  const prepared=await backend.sealedExecute('alice','content_prepare',{journeyId,action:'library_add',routing:{visibility:'members'}});
  const args={journeyId,ticketId:prepared.ticketId,slot:'content',deviceId,data:'eA=='};
  const upload=await backend.sealedExecute('alice','sealed_blob_put',args);assert.deepEqual(await backend.sealedExecute('alice','sealed_blob_put',args),upload);
- const storage=backend.journeyStores.get(journeyId)!,quota=JSON.stringify(['sealed-v1','upload-quota',deviceId]);assert.equal(JSON.parse(String(await storage.get(quota))),1);
+ const storage=backend.journeyStores.get(journeyId)!,quota=JSON.stringify(['sealed-v1','upload-quota',a.client.personId]);assert.equal(JSON.parse(String(await storage.get(quota))),1);
  now+=600001;await backend.sealedExecute('alice','sealed_catalog',{journeyId});
  assert.equal(JSON.parse(String(await storage.get(quota))),0);assert.equal(backend.blobs.data.has(String(upload.blob)),false);
  await assert.rejects(backend.sealedExecute('alice','sealed_blob_put',args),/ticket required/);
 });
 
-test('sealed per-device upload quotas cannot be charged to another member',async t=>{
+test('sealed per-person upload quotas cannot be charged to another member',async t=>{
  const {a,backend,connect}=await fixture(t),journeyId=String((await a.client.call('journey_create',{name:'Quota',policy:'open',defaultRole:'write'})).journeyId);
  const b=await connect('bob');await b.client.call('journey_join',{journeyId});const device=await b.client.prepareGroup(journeyId);await a.client.sync(journeyId);
  const prepared=await backend.sealedExecute('alice','content_prepare',{journeyId,action:'library_add',routing:{visibility:'members'}});
  await assert.rejects(backend.sealedExecute('alice','sealed_blob_put',{journeyId,ticketId:prepared.ticketId,slot:'content',deviceId:device.deviceId,data:'eA=='}),/Authenticated upload device/);
  const own=JSON.parse(a.files.get('sealed-state')!).groups[journeyId].deviceId,storage=backend.journeyStores.get(journeyId)!;
- await storage.put(JSON.stringify(['sealed-v1','upload-quota',own]),JSON.stringify(16*1024*1024));
- await assert.rejects(backend.sealedExecute('alice','sealed_blob_put',{journeyId,ticketId:prepared.ticketId,slot:'content',deviceId:own,data:'eA=='}),/device upload quota/);
+ await storage.put(JSON.stringify(['sealed-v1','upload-quota',a.client.personId]),JSON.stringify(16*1024*1024));
+ await assert.rejects(backend.sealedExecute('alice','sealed_blob_put',{journeyId,ticketId:prepared.ticketId,slot:'content',deviceId:own,data:'eA=='}),/person upload quota/);
 });
 
 

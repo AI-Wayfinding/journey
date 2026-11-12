@@ -2,6 +2,7 @@
 export interface StorageTurn {
   get(key: string): Promise<unknown>;
   put(key: string, value: string): Promise<void>;
+  delete(key: string): Promise<unknown>;
   setAlarm(time: number): Promise<void>;
   deleteAlarm(): Promise<void>;
 }
@@ -33,6 +34,7 @@ export class MemoryStorage implements KeyValueStorage {
   }
   async setAlarm(time: number): Promise<void> { this.alarmAt = time; }
   async deleteAlarm(): Promise<void> { this.alarmAt = undefined; }
+  async delete(key: string): Promise<void> { this.writes++; this.data.delete(key); }
   async get(key: string): Promise<unknown> { return this.data.get(key); }
   async put(key: string, value: string): Promise<void> {
     this.writes += 1;

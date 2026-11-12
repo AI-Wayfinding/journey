@@ -7,9 +7,8 @@ export const randomToken = () => base64url(crypto.getRandomValues(new Uint8Array
 export const tokenHash = async (value: string) => base64url(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))));
 
 /** Runs inside AccountsHost's serial turn; its caller atomically replaces accounts, including these records. */
-export async function oauthStep(state: OAuthAccounts, op: OAuthOperation, now: number, deviceAsserted = false, sealedMode=false): Promise<OAuthResult> {
+export async function oauthStep(state: OAuthAccounts, op: Exclude<OAuthOperation, { op: 'register' | 'client' | 'request' | 'deny' }>, now: number, deviceAsserted = false, sealedMode=false): Promise<OAuthResult> {
   const db = state.oauth ??= { clients: [], requests: [], codes: [], access: [], refresh: [] };
-  db.clients = db.clients.filter(c => c.expiresAt === undefined || c.expiresAt > now || state.accounts.some(a => a.live && a.agents.some(g => g.live && g.clientId === c.client_id)));
   db.requests = db.requests.filter(r => r.request.expiresAt > now);
   db.codes = db.codes.filter(r => r.expiresAt > now || r.used && (r.retainUntil ?? 0) > now);
   db.access = db.access.filter(r => r.expiresAt > now);
@@ -17,7 +16,7 @@ export async function oauthStep(state: OAuthAccounts, op: OAuthOperation, now: n
   db.refresh = db.refresh.filter(r => r.expiresAt > now);
   const invalid = (): OAuthResult => ({ kind: 'error', error: 'invalid_grant' });
   const live = (t: Pick<StoredToken, 'subject' | 'personId' | 'clientId' | 'agentId'>) => {
-    const a = state.accounts.find(a => a.subject === t.subject && a.personId === t.personId && a.live);
+    const a = state.accounts.find(a => a.subject === t.subject && a.personId === t.personId && a.live && !a.suspended);
     const agent = a?.agents.find(g => g.id === t.agentId && g.live && !g.authorizationPending);
     const index = a ? a.clients.indexOf(t.clientId) + 1 : 0;
     return !!(a && agent && cell(a.bindings, 'Bound', index) === 1 && a.agents[cell(a.bindings, 'Agents', index) - 2]?.id === t.agentId);
@@ -35,20 +34,6 @@ export async function oauthStep(state: OAuthAccounts, op: OAuthOperation, now: n
     return { kind: 'tokens', tokens: { access_token: access, refresh_token: refresh, token_type: 'Bearer', expires_in: 3600 } };
   };
   switch (op.op) {
-    case 'register': {
-      const client = { client_id: `client_${randomToken()}`, client_name: sealedMode?'MCP client':op.client.client_name, redirect_uris: op.client.redirect_uris,
-        expiresAt: now + 86_400_000, token_endpoint_auth_method: op.client.token_endpoint_auth_method, grant_types: op.client.grant_types, response_types: op.client.response_types };
-      db.clients.push(client); return { kind: 'client', client };
-    }
-    case 'client': return { kind: 'client', client: db.clients.find(c => c.client_id === op.clientId) };
-    case 'request': {
-      if (op.request) {
-        if (db.requests.some(r => r.id === op.id)) throw new Refused('Authorization already exists');
-        db.requests.push({ id: op.id, request: {clientId:op.request.clientId,clientName:sealedMode?'MCP client':op.request.clientName,redirectUri:op.request.redirectUri,challenge:op.request.challenge,browserHash:op.request.browserHash,state:op.request.state,expiresAt:op.request.expiresAt} });
-      }
-      return { kind: 'request', request: db.requests.find(r => r.id === op.id)?.request };
-    }
-    case 'deny': db.requests = db.requests.filter(r => r.id !== op.id); return { kind: 'ok' };
     case 'consent-options': throw new Refused('Passkey options require the Accounts host');
     case 'consent': {
       const request = db.requests.find(r => r.id === op.id)?.request;
