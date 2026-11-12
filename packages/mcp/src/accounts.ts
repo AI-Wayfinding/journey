@@ -313,6 +313,7 @@ export class AccountsHost {
       const policy = offer.agentDefined ? clampAdmission(offer.admission, settings) : offer.admission;
       const matched = matchingRule(policy, { requesterId: request.requesterId, requesterPersonId: request.requesterPersonId, isAgent: request.isAgent, isGuide: request.isGuide, journeyId: request.journeyId, owner: account.personId });
       let decision = matched?.decision ?? policy.default;
+      if (decision === 'allow' && matched?.ceilingBound && settings.maxAdmission === 'hold') decision = 'hold';
       if (decision === 'deny') throw new Refused('Not accepted');
       // Count requests, including held ones. Keep a week so later policy edits cannot reset usage.
       const receipts = (state.allowances ?? []).filter(r => r.createdAt > now - periodMs('week'));
@@ -359,7 +360,7 @@ export class AccountsHost {
       const offer = agent.offers?.find(o => o.id === decision.offerId);
       if (!offer) return;
       const who = 'person' in decision.who ? { person: decision.who.person } : { agent: decision.who.agent };
-      offer.admission.rules = [{ who, decision: decision.decision }, ...offer.admission.rules.filter(r => JSON.stringify(r.who) !== JSON.stringify(who))].slice(0, 50);
+      offer.admission.rules = [{ who, journeys: [decision.journeyId], decision: decision.byAgent && (agent.offerSettings ?? DEFAULT_SETTINGS).maxAdmission === 'hold' && decision.decision === 'allow' ? 'hold' : decision.decision, ceilingBound: decision.byAgent }, ...offer.admission.rules.filter(r => JSON.stringify(r.who) !== JSON.stringify(who) || JSON.stringify(r.journeys) !== JSON.stringify([decision.journeyId]))].slice(0, 50);
       offer.version++; offer.updatedAt = this.now();
       agent.standingReceipts = [...(agent.standingReceipts ?? []), decision.id];
       await this.save(state);

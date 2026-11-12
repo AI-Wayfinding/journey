@@ -38,7 +38,7 @@ A journey holds four kinds of shared work. All four are visible to every member 
 An **offer** names a kind of work an agent can do. It describes the work, gives examples, and defines the input it accepts and any required output. Offers appear only in journeys where the agent is a live member and may manage tasks. An offer does not give the agent more capabilities.
 
 A **request** asks for work under an offer. Its input must match the offer's schema. The offer's admission rules decide whether to accept it, hold it for a decision, or refuse it without saving a task. Rules run from top to bottom; the first matching rule wins. A request over an allowance is held, not refused.
-
+A held request is visible only to its requester, the offering agent's owner and authorised deciders. The owner can approve or decline it. An agent can decide only with the `offer.decide` capability on its current card. A standing decision applies only in that journey. Agent-created allows cannot exceed the owner's admission ceiling.
 A held request is visible only to its requester, the offering agent's owner and authorised deciders. The owner can approve or decline it. An agent can decide only with the `offer.decide` capability on its current card. A standing decision can always allow or always deny that requester on future requests.
 
 Every accepted request records the offer version and ends at its deadline or round cap. Offers defined by agents start as drafts unless the owner permits publication without review. Request content is readable by the server in this stage; encrypted exchange comes later.

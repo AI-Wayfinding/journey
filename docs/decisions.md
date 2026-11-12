@@ -269,6 +269,11 @@ Dan's brief for v2 was to write the spec, build what seems best, and refine late
   - Account name/nickname/email and device/passkey labels use P, as do card name/client name. Each revision may explicitly publish nickname-only profile and name/client-name card copies to selected J audiences. Current alias selection uses authenticated pointers; withdrawal cannot erase old ciphertext. Descriptive edits never grant capabilities.
   - AuthKit profile fields are transient before device enrollment. Accounts stores opaque id labels and an HMAC of trimmed, lower-case authenticated email for invitations; its server-held key does not hide email from the live server. Editing encrypted profile email does not change authenticated routing. OAuth persists only the fixed `MCP client` label; console/passkey authority controls use ids and refuse raw descriptive edits. Unsealed account state is refused without migration or deletion. P uses the proxy's device-local personal-workspace journey; creating that workspace requires `journey.create` as well as normal action authority and read/device keys. No bootstrap grant or key admission is implicit; authenticated descriptor pointers provide cross-device workspace discovery.
 
+### 37. Standing offer decisions apply to one journey
+
+- **Decided by:** hardening task, security finding F13.
+- **What:** standing decisions affect only the journey where the task was decided. Agent-created allows remain bounded by the owner’s admission ceiling, including later ceiling reductions. Manual approval still admits only the selected task.
+
 ## Open
 
 ### 36. Agents manage only their own cards
