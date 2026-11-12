@@ -47,6 +47,7 @@ export async function manageIdentity(account:Account,storage:KeyValueStorage,ope
   const record=accountKeyRecordSchema.parse(operation.record),generation=account.recovery?.generation??0;
   check(account.passkeys.length&&record.identity.generation===generation&&!account.onboarding?.complete,'A first passkey/browser setup is required for the account key');
   check(!account.accountKey||account.accountKey.identity.generation<generation,'Account key already set; recover it instead');
+  check(!account.accountKey||account.accountKey.identity.publicKey!==record.identity.publicKey,'No-code recovery requires a different account key');
   const event=operation.event;
   check(event.personId===account.personId&&event.generation===generation&&event.accountPublicKey===record.identity.publicKey&&event.action==='account-key-set'&&event.connectionId===undefined&&event.previousPublicKey===account.accountKey?.identity.publicKey&&await verifyIdentityEvent(event),'Account key initialization signature mismatch');
   account.accountKey=record;appendIdentityEvent(account,event);return {accountKey:record};

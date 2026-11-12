@@ -4,6 +4,7 @@ import * as z from 'zod';
 import { MemoryBackend } from '../src/backend.ts';
 import { parseCommand } from '../src/commands.ts';
 import { testPasskeys, setAgentCard } from './helpers.ts';
+import { installTestAccountIdentity, resignDeviceRegistration } from './account-fixture.ts';
 import { Refused } from '../src/errors.ts';
 const refused = (message: string) => (error: unknown) => { assert.ok(error instanceof Refused); assert.equal(error.message, message); return true; };
 
@@ -11,9 +12,19 @@ const storageKey = (...parts: (string | number)[]) => JSON.stringify(['sealed-v1
 async function fixture() {
   const backend = new MemoryBackend({ async get(s) { return { name: s, email: `${s}@example.test` }; } }, Date.now, testPasskeys, true);
   const personId = String((await backend.execute('alice', parseCommand('account_read', {}))).personId);
+  const account = await installTestAccountIdentity(backend, 'alice');
+  const agents = new Map<string,string>();
+  const connections=new Map<string,Pick<Awaited<ReturnType<typeof account.device>>,'root'|'credential'>>();
   const journeyId = String((await backend.sealedExecute('alice', 'journey_create', { policy: 'open', defaultRole: 'write' })).journeyId);
   const call = (tool: string, input: Record<string, unknown>, clientId?: string, subject = 'alice') => backend.sealedExecute(subject, tool, { journeyId, ...input }, clientId);
-  const register = async (deviceId: string, clientId?: string, subject = 'alice') => { await backend.sealedExecute(subject, 'sealed_device_register', { deviceId, verificationKey: Buffer.alloc(32, 7).toString('base64'), data: 'e30=' }, clientId); };
+  const register = async (deviceId: string, clientId?: string) => {
+    const agentId=clientId?agents.get(clientId):undefined;
+    if(clientId&&!agentId)throw new Error('Fixture agent must be bound before registration');
+    const key=clientId??'person';let connection=connections.get(key),registration;
+    if(connection)registration=await resignDeviceRegistration(connection.root,{deviceId,verificationKey:connection.root.publicKey,data:'e30=',credential:connection.credential});
+    else {const signed=await account.device({deviceId,data:'e30=',...(clientId&&agentId?{clientId,agentId}:{})});connection=signed;connections.set(key,signed);registration=signed.registration;}
+    await backend.sealedExecute('alice', 'sealed_device_register', registration, clientId);
+  };
   const commit = async (deviceId: string, action: string, targetDeviceId?: string, clientId?: string, subject = 'alice') => {
     const view = await call('sealed_group', { groupId: journeyId }, clientId, subject);
     return call('sealed_group_commit', { groupId: journeyId, deviceId, action, targetDeviceId, expectedEpoch: view.epoch, expectedSequence: view.sequence, data: 'e30=' }, clientId, subject);
@@ -25,6 +36,7 @@ async function fixture() {
     const identity = { subject: 'alice', clientId: 'test-console' }, change = { kind: 'bind' as const, clientId, agentId };
     const { challenge } = await backend.beginAuthorization(identity, change);
     await backend.completeAuthorization(identity, change, { id: 'synthetic', rawId: 'synthetic', type: 'public-key', clientExtensionResults: {}, response: { clientDataJSON: challenge, authenticatorData: '', signature: 'test-valid' } });
+    agents.set(clientId,agentId);
     return agentId;
   };
   const publish = async (deviceId: string, clientId?: string) => {

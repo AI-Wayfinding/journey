@@ -13,6 +13,7 @@ import { authenticator } from './console-authenticator.ts';
 import { runInNewContext } from 'node:vm';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { WayfindingProxy } from '../../proxy/src/proxy.ts';
+import {installTestAccountIdentity,trustedAccountRemote} from './account-fixture.ts';
 import {capabilities} from '../../rules/src/capabilities.ts';
 import {cardCaps} from '../src/agents.ts';
 
@@ -392,6 +393,7 @@ async function deviceConsentFixture(sealed=false) {
   const identity = { subject: 'alice', clientId: consoleClient };
   const options = await f.backend.passkey(identity, { op: 'begin' });
   await f.backend.passkey(identity, { op: 'finish', credential: key.register(String(options.challenge)) });
+  const signing=sealed?await installTestAccountIdentity(f.backend,'alice',consoleClient):undefined;
   if(sealed){
     // This fixture isolates OAuth policy; full browser onboarding is covered in console-browser.test.ts.
     const state=JSON.parse(String(await f.backend.accountStorage.get('accounts')));state.accounts[0].onboarding.complete=true;await f.backend.accountStorage.put('accounts',JSON.stringify(state));
@@ -402,7 +404,7 @@ async function deviceConsentFixture(sealed=false) {
     assert.match(html, /value="device.keys"(?! checked)/);
     return { request: new URL(path, origin).searchParams.get('request')!, csrf: csrfOf(html), decision: 'allow', name: 'Encryption proxy', capabilities: ['device.keys'], journeys: [] as string[] };
   }
-  return { ...f, cookie, key, pending };
+  return { ...f, cookie, key, pending, signing };
 }
 
 test('oauth AS: selecting all assignable capabilities succeeds with passkey-confirmed consent',async()=>{
@@ -476,12 +478,15 @@ test('oauth AS: device.keys agent token bootstraps real proxy and round-trips se
   t.after(() => remote.close());
   const records = new Map<string, string>();
   const store = { async read(name: string) { return records.get(name); }, async write(name: string, value: string) { records.set(name, value); } };
-  const proxy = await WayfindingProxy.open(remote, store);
+  assert.ok(f.signing);
+  const trusted=trustedAccountRemote(remote,f.signing);
+  const endorse=async (claim:Parameters<typeof f.signing.artifacts>[0])=>(await f.signing!.artifacts(claim)).certificate;
+  const proxy = await WayfindingProxy.open(trusted, store,{endorse});
   await proxy.createGroup(proxy.personalGroupId);
   const artifact = await proxy.createArtifact({ groupId: proxy.personalGroupId, name: 'Synthetic private document', type: 'text/plain', content: 'SEALED-DEVICE-KEYS-ROUNDTRIP' });
   assert.equal((await proxy.readArtifact(proxy.personalGroupId, artifact.artifactId)).content, 'SEALED-DEVICE-KEYS-ROUNDTRIP');
   assert.equal(f.backend.snapshot().includes('SEALED-DEVICE-KEYS-ROUNDTRIP'), false);
-  const second = await WayfindingProxy.open(remote, { async read() { return undefined; }, async write() {} });
+  const second = await WayfindingProxy.open(trusted, { async read() { return undefined; }, async write() {} },{endorse});
   const prepared = await second.prepareGroup(proxy.personalGroupId);
   await proxy.addMember(proxy.personalGroupId, second.personId, prepared.deviceId);
   assert.equal((await second.readArtifact(proxy.personalGroupId, artifact.artifactId)).content, 'SEALED-DEVICE-KEYS-ROUNDTRIP');

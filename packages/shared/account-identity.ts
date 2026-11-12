@@ -21,7 +21,9 @@ export interface SigningKey {publicKey:string;privateKey:string}
 export async function generateSigningKey():Promise<SigningKey>{
  const pair=await crypto.subtle.generateKey('Ed25519',true,['sign','verify']);
  if(!('privateKey'in pair))throw new Error('Ed25519 key pair required');
- return {publicKey:encode(new Uint8Array(await crypto.subtle.exportKey('raw',pair.publicKey))),privateKey:encode(new Uint8Array(await crypto.subtle.exportKey('pkcs8',pair.privateKey)))};
+ const publicKey=await crypto.subtle.exportKey('raw',pair.publicKey),privateKey=await crypto.subtle.exportKey('pkcs8',pair.privateKey);
+ if(!(publicKey instanceof ArrayBuffer)||!(privateKey instanceof ArrayBuffer))throw new Error('Binary Ed25519 key export required');
+ return {publicKey:encode(new Uint8Array(publicKey)),privateKey:encode(new Uint8Array(privateKey))};
 }
 export async function signValue(secret:string,domain:string,value:unknown):Promise<string>{
  const key=await crypto.subtle.importKey('pkcs8',decode(secret),'Ed25519',false,['sign']);

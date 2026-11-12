@@ -3,12 +3,12 @@ import assert from 'node:assert/strict';
 import {Client,StreamableHTTPClientTransport} from '@modelcontextprotocol/client';
 import {MemoryBackend} from '../../mcp/src/backend.ts';
 import {app,bridge,keyPair,RESOURCE,token,testPasskeys} from '../../mcp/test/helpers.ts';
-import {SealedClient} from '../src/sealed-client.ts';
+import {openTestSealed} from './account-fixture.ts';
 
 test('sealed identity storage canary and explicit journey aliases',async t=>{
  const markers=['PRIVATE-PROFILE-NAME','PRIVATE-PROFILE-EMAIL@example.test','PRIVATE-NICKNAME','PRIVATE-DEVICE-LABEL','PRIVATE-PASSKEY-LABEL','PRIVATE-AGENT-NAME','PRIVATE-CLIENT-NAME','PUBLIC-JOURNEY-NICKNAME','PUBLIC-JOURNEY-AGENT'];
  const backend=new MemoryBackend({async get(subject){return {name:markers[0]!,email:subject==='alice'?markers[1]!:'bob@example.test'};}},Date.now,testPasskeys,true),signer=await keyPair('identities');
- const connect=async(subject:string)=>{const remote=new Client({name:'identity-test',version:'1'});await remote.connect(new StreamableHTTPClientTransport(RESOURCE,{fetch:bridge(app(signer,backend)),requestInit:{headers:{authorization:`Bearer ${await token(signer,{sub:subject})}`}}}));t.after(()=>remote.close());const files=new Map<string,string>(),personId=String((await backend.execute(subject,{tool:'account_read',input:{}})).personId);return {remote,client:await SealedClient.open(remote,{async read(k){return files.get(k)},async write(k,v){files.set(k,v)}},personId)};};
+ const connect=async(subject:string)=>{const remote=new Client({name:'identity-test',version:'1'});await remote.connect(new StreamableHTTPClientTransport(RESOURCE,{fetch:bridge(app(signer,backend)),requestInit:{headers:{authorization:`Bearer ${await token(signer,{sub:subject})}`}}}));t.after(()=>remote.close());const files=new Map<string,string>(),opened=await openTestSealed(backend,remote,{async read(k){return files.get(k)},async write(k,v){files.set(k,v)}},subject);return opened;};
  const a=await connect('alice'),b=await connect('bob');
  assert.ok(!backend.snapshot().includes(markers[0]!),'provisioning must not persist fetched name');assert.ok(!backend.snapshot().includes(markers[1]!),'provisioning must not persist fetched email');
  const journeyId=String((await a.client.call('journey_create',{name:'Identity journey',policy:'open',defaultRole:'write'})).journeyId);await b.client.call('journey_join',{journeyId});const bd=await b.client.prepareGroup(journeyId);await a.client.addMember(journeyId,b.client.personId,bd.deviceId);

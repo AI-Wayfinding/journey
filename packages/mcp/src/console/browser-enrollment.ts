@@ -23,7 +23,7 @@ export async function browserEnrollment(account:Account,storage:KeyValueStorage,
   const old=browsers.find(b=>b.id===browserId);
   if(old&&(old.credentialId!==credentialId||!old.devices.every(live)))throw new Refused('Browser device revoked or wrapping credential changed');
   if(!old&&browsers.length>=16)throw new Refused('Browser capacity reached');
-  const digest=await tokenHash(JSON.stringify(['browser-enroll-1',account.personId,identity.clientId,browserId,credentialId,device.deviceId,device.verificationKey,device.data])),key=`browser-enroll:${account.personId}:${browserId}`;
+  const digest=await tokenHash(JSON.stringify(['browser-enroll-1',account.personId,identity.clientId,browserId,credentialId,device.deviceId,device.verificationKey,device.data,device.credential,device.packageSignature])),key=`browser-enroll:${account.personId}:${browserId}`;
   if(operation.op==='browser_begin'){
     const challenge=randomToken();await storage.put(key,JSON.stringify({digest,challenge,expiresAt:now+300000}));
     return {challenge,rpId:'poc.wayfinding.support',allowCredentials:[{id:credentialId,type:'public-key'}],userVerification:'required',timeout:60000};

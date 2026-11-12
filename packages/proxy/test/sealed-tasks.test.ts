@@ -3,13 +3,13 @@ import assert from 'node:assert/strict';
 import {Client,StreamableHTTPClientTransport} from '@modelcontextprotocol/client';
 import {MemoryBackend} from '../../mcp/src/backend.ts';
 import {app,bridge,keyPair,RESOURCE,token,testPasskeys,setAgentCard} from '../../mcp/test/helpers.ts';
-import {SealedClient} from '../src/sealed-client.ts';
+import {openTestSealed} from './account-fixture.ts';
 import * as z from 'zod';
 import {offerDefinitionSchema} from '../../mcp/src/offers.ts';
 
 test('sealed task canary, narrow audience, input exchange and finality',async t=>{
  const backend=new MemoryBackend({async get(s){return {name:s,email:`${s}@example.test`};}},Date.now,testPasskeys,true),signer=await keyPair('tasks');
- const connect=async(subject:string)=>{const remote=new Client({name:'task-test',version:'1'});await remote.connect(new StreamableHTTPClientTransport(RESOURCE,{fetch:bridge(app(signer,backend)),requestInit:{headers:{authorization:`Bearer ${await token(signer,{sub:subject})}`}}}));t.after(()=>remote.close());const files=new Map<string,string>();return {remote,client:await SealedClient.open(remote,{async read(k){return files.get(k)},async write(k,v){files.set(k,v)}},String((await backend.execute(subject,{tool:'account_read',input:{}})).personId))};};
+ const connect=async(subject:string)=>{const remote=new Client({name:'task-test',version:'1'});await remote.connect(new StreamableHTTPClientTransport(RESOURCE,{fetch:bridge(app(signer,backend)),requestInit:{headers:{authorization:`Bearer ${await token(signer,{sub:subject})}`}}}));t.after(()=>remote.close());const files=new Map<string,string>();return openTestSealed(backend,remote,{async read(k){return files.get(k)},async write(k,v){files.set(k,v)}},subject);};
  const a=await connect('alice'),b=await connect('bob'),c=await connect('carol');
  const journeyId=String((await a.client.call('journey_create',{name:'Tasks',policy:'open',defaultRole:'write'})).journeyId);await b.client.call('journey_join',{journeyId});await c.client.call('journey_join',{journeyId});
  const markers=['TASK-NAME-CANARY','TASK-REQUEST-CANARY','TASK-ANSWER-CANARY','TASK-OUTPUT-CANARY','TASK-CONVERSATION-CANARY','TASK-FAILURE-CANARY'] as const;
@@ -34,7 +34,7 @@ test('sealed task canary, narrow audience, input exchange and finality',async t=
 
 test('sealed task endpoints validate pinned schemas and refuse hostile substitution',async t=>{
  const backend=new MemoryBackend({async get(s){return {name:s,email:`${s}@example.test`};}},Date.now,testPasskeys,true),signer=await keyPair('offer-task');
- const connect=async(subject:string,clientId='test-client')=>{const remote=new Client({name:'task-test',version:'1'});await remote.connect(new StreamableHTTPClientTransport(RESOURCE,{fetch:bridge(app(signer,backend)),requestInit:{headers:{authorization:`Bearer ${await token(signer,{sub:subject,client_id:clientId})}`}}}));t.after(()=>remote.close());const files=new Map<string,string>();return {client:await SealedClient.open(remote,{async read(k){return files.get(k)},async write(k,v){files.set(k,v)}},String((await backend.execute(subject,{tool:'account_read',input:{}})).personId))};};
+ const connect=async(subject:string,clientId='test-client')=>{const remote=new Client({name:'task-test',version:'1'});await remote.connect(new StreamableHTTPClientTransport(RESOURCE,{fetch:bridge(app(signer,backend)),requestInit:{headers:{authorization:`Bearer ${await token(signer,{sub:subject,client_id:clientId})}`}}}));t.after(()=>remote.close());const files=new Map<string,string>();return openTestSealed(backend,remote,{async read(k){return files.get(k)},async write(k,v){files.set(k,v)}},subject);};
  const owner=await connect('alice'),requester=await connect('bob'),journeyId=String((await owner.client.call('journey_create',{name:'Task contract',policy:'open',defaultRole:'write'})).journeyId);await requester.client.call('journey_join',{journeyId});const jd=await requester.client.prepareGroup(journeyId);await owner.client.addMember(journeyId,requester.client.personId,jd.deviceId);
  const agentId=String((await owner.client.call('agent_create',{name:'Offering endpoint'})).agentId);await setAgentCard(backend,'alice',agentId,['read','task.manage','device.keys']);await owner.client.call('agent_add',{journeyId,agentId});
  const identity={subject:'alice',clientId:'test-console'},change={kind:'bind' as const,clientId:'offering-agent',agentId};const {challenge}=await backend.beginAuthorization(identity,change);await backend.completeAuthorization(identity,change,{id:'synthetic',rawId:'synthetic',type:'public-key',clientExtensionResults:{},response:{clientDataJSON:challenge,authenticatorData:'',signature:'test-valid'}});

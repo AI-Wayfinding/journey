@@ -5,12 +5,13 @@ import {MemoryBackend} from '../../mcp/src/backend.ts';
 import {app,bridge,keyPair,RESOURCE,token,testPasskeys,setAgentCard} from '../../mcp/test/helpers.ts';
 import {SealedClient,type SealedRemote} from '../src/sealed-client.ts';
 import {WayfindingProxy} from '../src/proxy.ts';
+import {openTestSealed,testAccount} from './account-fixture.ts';
 import {parseCommand} from '../../mcp/src/commands.ts';
 import * as z from 'zod';
 
 async function fixture(t:TestContext,now:()=>number=Date.now){
  const backend=new MemoryBackend({async get(s){return {name:s,email:`${s}@example.test`};}},now,testPasskeys,true),signer=await keyPair('sealed');
- const connect=async(subject:string)=>{const remote=new Client({name:'sealed-test',version:'1'});await remote.connect(new StreamableHTTPClientTransport(RESOURCE,{fetch:bridge(app(signer,backend)),requestInit:{headers:{authorization:`Bearer ${await token(signer,{sub:subject})}`}}}));t.after(()=>remote.close());const files=new Map<string,string>(),store={async read(k:string){return files.get(k)},async write(k:string,v:string){files.set(k,v)}};return {client:await SealedClient.open(remote,store,z.object({personId:z.string()}).parse((await remote.callTool({name:'account_read',arguments:{}})).structuredContent).personId),remote,files,store};};
+ const connect=async(subject:string)=>{const remote=new Client({name:'sealed-test',version:'1'});await remote.connect(new StreamableHTTPClientTransport(RESOURCE,{fetch:bridge(app(signer,backend)),requestInit:{headers:{authorization:`Bearer ${await token(signer,{sub:subject})}`}}}));t.after(()=>remote.close());const files=new Map<string,string>(),store={async read(k:string){return files.get(k)},async write(k:string,v:string){files.set(k,v)}};const opened=await openTestSealed(backend,remote,store,subject);return {...opened,files,store};};
  return {backend,connect,a:await connect('alice')};
 }
 const records=(value:Record<string,unknown>)=>z.array(z.record(z.string(),z.unknown())).parse(value.records);
@@ -191,10 +192,11 @@ test('sealed capability-only authors receive an actionable refusal without a sil
  await backend.execute('alice',parseCommand('agent_add',{journeyId,agentId}));
  const identity={subject:'alice',clientId:'test-console'},change={kind:'bind' as const,clientId:'writer',agentId};const {challenge}=await backend.beginAuthorization(identity,change);
  await backend.completeAuthorization(identity,change,{id:'synthetic',rawId:'synthetic',type:'public-key',clientExtensionResults:{},response:{clientDataJSON:challenge,authenticatorData:'',signature:'test-valid'}});
+ const account=await testAccount(backend,'alice'),signed=await account.detachedDevice({deviceId:'device_ungranted',data:'AQ==',agentId});
  for(const capability of ['device.keys','read'] as const){
   await setAgentCard(backend,'alice',agentId,['post','artifact.write','round.contribute',capability]);const before=backend.snapshot();
   await assert.rejects(backend.sealedExecute('alice','content_prepare',{journeyId,action:'library_add',routing:{}},'writer'),/needs read \+ device.keys; ask the owner/);
-  await assert.rejects(backend.sealedExecute('alice','sealed_device_register',{deviceId:'device_ungranted',verificationKey:'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',data:'AQ=='},'writer'),/needs read \+ device.keys; ask the owner/);
+  await assert.rejects(backend.sealedExecute('alice','sealed_device_register',signed.registration,'writer'),/needs read \+ device.keys; ask the owner/);
   assert.equal(backend.snapshot(),before,'refusal must neither grant authority nor register a device or content ticket');
  }
 });
@@ -353,11 +355,11 @@ test('sealed rounds decrypted default guidance contains the first-position inter
 
 
 test('sealed direct clients do not advertise incompatible App tools but retain frozen resources',async t=>{
- const {a}=await fixture(t),tools=(await a.remote.listTools()).tools;
- const resources=(await a.remote.listResources()).resources;assert.ok(resources.some(r=>r.uri==='ui://wayfinding/v1/journey.html'));
+ const {a}=await fixture(t),tools=(await a.rawRemote.listTools()).tools;
+ const resources=(await a.rawRemote.listResources()).resources;assert.ok(resources.some(r=>r.uri==='ui://wayfinding/v1/journey.html'));
  for(const name of ['library_view','round_view','forum_view','apps_v2_reply','apps_v2_interview_write']){
   assert.ok(!tools.some(tool=>tool.name===name),name);
-  await assert.rejects(a.remote.callTool({name,arguments:{}}),/Unknown tool|not found/i);
+  await assert.rejects(a.rawRemote.callTool({name,arguments:{}}),/Unknown tool|not found/i);
  }
 });
 

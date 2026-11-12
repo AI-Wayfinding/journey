@@ -18,7 +18,7 @@ This stage is not live verification of the public endpoint. Run its tests locall
 - Revocation cannot erase text or keys a former reader already saved. New content requires removal of departed leaves and fresh encryption. Each large revision has a new AES-256-GCM key, even without a group epoch change.
 - Device bindings record the authenticated person/agent, verification key and key package. The client verifies MLS rosters, signatures and content contexts before rendering. An agent without both live `read` and `device.keys` receives an explicit refusal, never an automatic grant.
 - Search terms, labels and kind filters are evaluated locally. A missing audience or retained packet produces `partialIndex`/`contentUnavailable`, not a claim of complete results. Adding a device requires an existing member to re-share entitled live retained history; incomplete local history refuses the transfer.
-- Browser MLS, PRF/recovery and device-trust hardening remain later work. The console shows **sealed — open in your client** for these content views. Personal workspace aliases are device-local. Independent review and an audit of ts-mls remain launch gates; real-data mode is refused.
+- The browser and proxy enforce account-signed connection packages and keep local account-key pins. The unlocked console opens private content; locked views show **sealed — open in your client**. Personal workspace aliases are device-local. Hosted JavaScript, first-contact comparison and unaudited ts-mls remain launch gates; real-data mode is refused.
 
 ### Bounds and recovery
 
@@ -48,6 +48,17 @@ Run these checks with synthetic fixtures and enrolled local devices, not the bro
 The console can still change authority and admission metadata while locked. Private content uses the browser device below or the local proxy; neither changes the server's ids/status-only view.
 Released MCP App resources remain available unchanged. Their older tool wrappers are not advertised in sealed-v1; use the browser device or local proxy for content.
 
+### Account signatures and safety numbers (F4)
+
+Use fresh synthetic accounts; older unsigned connections must be enrolled again.
+
+1. Complete first-browser onboarding. Unlock Profile and check **Your safety number**. Reload and unlock with PRF: the number must stay the same. Server records must contain the public key and encrypted recovery envelope, never the private account key.
+2. Add a browser with the saved account recovery code. Its number must match the first browser's. A wrong code, another account's envelope or a substituted public key must fail. Losing local MLS state does not reconstruct history; keep a surviving eligible connection online.
+3. Add a browser without the code, or start a fresh local proxy. It must stop at a pending connection request, showing a request code. In a trusted browser, refresh requests and compare the code on both devices. A wrong code must refuse signing. Sign the matching request and retry the new connection. A mere email sign-in or fresh passkey cannot replace this approval.
+4. In a journey, compare member safety numbers outside Wayfinding. Replace a member's server-provided MLS package or packet key in an in-process fixture: browser/proxy admission and history sharing must refuse it. Unsigned old records must also fail.
+5. Check the journey identity log for signed connection additions and removals. Alter a signed entry: verification must fail. An unsigned removal must say **Server report — unsigned**, never verified. These checks do not prove journal completeness.
+6. Remove a signed connection from the unlocked browser. Its later enrollment, reads and new audience packages must fail. Recovery without the code must revoke all old connections and agents immediately. Advance the synthetic clock past the 72-hour deadline and sign in again; first-browser setup must create a different number, with a change entry visible in the member's journeys. Compare and accept the new number before encrypting to that member. Agents need fresh authorization and connection signatures.
+
 ### Browser connections, onboarding and recovery
 
 Use synthetic data only. These are source checks, not a deployment claim. The hosting Worker can replace both the page and its CSP. MLS and the browser vault have not had an independent security audit. Web Locks, IndexedDB, Web Crypto and a secure browser context are required. Missing storage or locks must refuse, never fall back to plaintext.
@@ -61,7 +72,7 @@ Use synthetic data only. These are source checks, not a deployment claim. The ho
 7. From **Profile and account**, expand the lost-code option. The wrong removal confirmation must refuse. Type **REMOVE ALL CONNECTIONS** and start recovery. Every browser, agent, binding, card and passkey is removed immediately; access and refresh tokens stop working. Repeated start requests preserve the original deadline. Agents cannot start or cancel recovery. There is no cancellation operation.
 8. With the test clock, check one millisecond before 72 hours: first/additional passkey registration, saved-code recovery and browser enrollment must all refuse. At exactly 72 hours an old console login still cannot continue; sign in again. The console supplies the next step because no mail sender exists. Create a new first passkey/browser, name and code. The person id stays stable, the account is marked recovered, the recovery generation advances and old agents remain dead. Add agents again explicitly.
 
-**Code recovery does not restore lost storage.** The code authorizes an additional passkey and can unlock an existing local vault. It cannot recreate a deleted vault or roll back an MLS state. No-code recovery clears the lost private-workspace descriptor and creates a fresh workspace; lost content keys remain lost. `recoveryAccountWrappingKey` is a domain-separated seam for a future account-key envelope, not an implemented backup. Safety numbers and journey recovery notices remain future work.
+**Code recovery does not restore lost storage.** The code authorizes an additional passkey and can unlock an existing local vault. It cannot recreate a deleted vault or roll back an MLS state. No-code recovery clears the lost private-workspace descriptor and creates a fresh workspace; lost content keys remain lost. `recoveryAccountWrappingKey` unwraps the same account signing key with the saved code. Without that code, the new first browser creates a replacement key and safety number; journey logs record the change (F4 above).
 
 ### Scripted browser proof
 

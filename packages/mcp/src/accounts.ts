@@ -21,7 +21,7 @@ import { recordOperation, consoleRecord, passkeyOperation, type RecordOperation,
 import { managePasskey } from './console/passkeys.ts';
 import { browserEnrollment, type BrowserRegistration } from './console/browser-enrollment.ts';
 import { accountSecurity, onboardingComplete } from './console/account-security.ts';
-import {manageIdentity,connectionRequest,requireConnection,appendIdentityEvent} from './account-identity.ts';
+import {manageIdentity,connectionRequest,requireConnection,appendIdentityEvent,removeConnection} from './account-identity.ts';
 import {deviceRegistrationSchema,connectionClaimSchema,connectionCertificateSchema,identityEventSchema,verifyDeviceBinding,safetyNumber,type AccountKeyRecord,type ConnectionClaim,type ConnectionCertificate,type IdentityEvent} from '../../shared/account-identity.ts';
 export interface Profile { name: string; email: string }
 export interface Profiles { get(subject: string): Promise<Profile> }
@@ -311,15 +311,19 @@ export class AccountsHost {
   }
   publishedDescriptors(journeyId:string,ids:string[]):Promise<ToolData>{return this.serial.run(async()=>{
     const state=await this.load(),descriptors:Record<string,import('./sealed-descriptors.ts').DefinitionRef>={},identities:Record<string,{publicKey:string;generation:number;safetyNumber:string}>={};
-    const key=`identity-log:${journeyId}`,stored=await this.storage.get(key),log=z.array(identityEventSchema).parse(typeof stored==='string'?JSON.parse(stored):[]),seen=new Set(log.map(e=>JSON.stringify(e)));
-    for(const a of state.accounts.filter(a=>a.live)){
-      const members=[a.personId,...a.agents.map(g=>g.id)];if(!members.some(id=>ids.includes(id)))continue;
-      if(a.accountKey)identities[a.personId]={...a.accountKey.identity,safetyNumber:await safetyNumber(a.accountKey.identity.publicKey)};
+    const key=`identity-log:${journeyId}`,stored=await this.storage.get(key),decoded=typeof stored==='string'?JSON.parse(stored):undefined;
+    const snapshot=Array.isArray(decoded)?{members:[] as string[],log:z.array(identityEventSchema).parse(decoded)}:z.object({members:z.array(z.string()),log:z.array(identityEventSchema)}).parse(decoded??{members:[],log:[]});
+    const log=snapshot.log,seen=new Set(log.map(e=>JSON.stringify(e))),members:string[]=[];
+    for(const a of state.accounts){
+      const current=a.live&&[a.personId,...a.agents.map(g=>g.id)].some(id=>ids.includes(id));if(!current&&!snapshot.members.includes(a.personId))continue;
+      // Capture a departing member's unread events once, then stop projecting their later private changes.
       for(const event of a.identityEvents??[]){const serialized=JSON.stringify(event);if(!seen.has(serialized)){log.push(event);seen.add(serialized);}}
+      if(!current)continue;members.push(a.personId);
+      if(a.accountKey)identities[a.personId]={...a.accountKey.identity,safetyNumber:await safetyNumber(a.accountKey.identity.publicKey)};
       if(ids.includes(a.personId)&&a.descriptor?.publications[journeyId])descriptors[a.personId]=a.descriptor.publications[journeyId]!;
       for(const agent of a.agents.filter(g=>g.live))if(ids.includes(agent.id)&&agent.descriptor?.publications[journeyId])descriptors[agent.id]=agent.descriptor.publications[journeyId]!;
     }
-    if(log.length>16384)throw new Refused('Journey identity log capacity reached');await this.storage.put(key,JSON.stringify(log));return {descriptors,identities,identityLog:log};
+    if(log.length>16384)throw new Refused('Journey identity log capacity reached');await this.storage.put(key,JSON.stringify({members,log}));return {descriptors,identities,identityLog:log};
   });}
   setDescriptor(personId:string,clientId:string,agentId:string|undefined,supplied:SealedDescriptor):Promise<ToolData>{return this.serial.run(async()=>{
     if(!this.sealedMode)throw new Refused('Sealed generation required');const state=await this.load(),account=state.accounts.find(a=>a.personId===personId&&a.live);if(!account)throw new Refused('Live account required');const actor=this.resolve(account,clientId);if(!allows(actor,'read',true)||!allows(actor,'device.keys',true))throw new Refused('Sealed descriptors need read + device.keys; ask the owner to grant both explicitly');
@@ -516,7 +520,8 @@ export class AccountsHost {
           if (!agent || actor.agent && actor.agent.id !== agent.id) throw new Refused('Only your own live agent card may be used');
           if (command.tool === 'agent_capabilities') return view(agent);
           if (command.tool === 'agent_remove') {
-            requireAccountCapability(actor, 'agent.remove'); agent.live = false; agent.card = stepCard(agent.card, 'withdraw');
+            requireAccountCapability(actor, 'agent.remove');
+            for(const c of account.connections??[])if(c.claim.agentId===agent.id&&!c.revokedAt){await removeConnection(account,this.storage,c.claim.connectionId,this.now());appendIdentityEvent(account,{personId:account.personId,generation:c.claim.generation,accountPublicKey:c.claim.accountPublicKey,action:'connection-removed',connectionId:c.claim.connectionId,at:this.now()});} agent.live = false; agent.card = stepCard(agent.card, 'withdraw');
             if (state.oauth) {
               state.oauth.access = state.oauth.access.filter(t => t.agentId !== agent.id);
               state.oauth.refresh = state.oauth.refresh.filter(t => t.agentId !== agent.id);
@@ -669,6 +674,7 @@ export class AccountsHost {
         const next = machine.step(account.group, { op: 1, subject: slot, kind: 0, belongsTo: 1 });
         if (sameState(account.group, next)) throw new Refused('Personal group removal refused');
         account.group = next;
+        const raw=await this.storage.get(`sealed:device:${command.input.memberId}`);if(typeof raw==='string'){let value:unknown;try{value=JSON.parse(raw);}catch{throw new Refused('Invalid sealed stored device');}const cert=connectionCertificateSchema.safeParse(z.object({credential:z.unknown()}).safeParse(value).data?.credential);if(cert.success){const connection=account.connections?.find(c=>c.claim.connectionId===cert.data.connectionId);if(connection&&!connection.revokedAt){await removeConnection(account,this.storage,cert.data.connectionId,this.now());appendIdentityEvent(account,{personId:account.personId,generation:cert.data.generation,accountPublicKey:cert.data.accountPublicKey,action:'connection-removed',connectionId:cert.data.connectionId,at:this.now()});}}}
       } else if (command.tool !== 'personal_group_read') throw new Refused('Not a personal group command');
       // Reading never writes. Refusals above never put partially changed data.
       if (command.tool !== 'personal_group_read') await this.save(state);

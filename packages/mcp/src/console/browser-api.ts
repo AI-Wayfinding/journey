@@ -42,8 +42,12 @@ export async function browserPost(backend:ConsoleBackend,identity:ClientIdentity
     const input=z.object({csrf:z.string(),browserId}).strict().parse(body),listed=await backend.passkey(identity,{op:'browser_list'});
     const own=z.array(z.object({id:browserId,devices:z.array(z.string())})).parse(listed.browsers).find(b=>b.id===input.browserId);
     if(!own)throw new Refused('Owned browser required');
-    const live=z.array(z.object({id:z.string()})).parse((await backend.execute(identity.subject,parseCommand('personal_group_read',{}),identity.clientId)).members);
-    let pending=false;for(const memberId of own.devices.filter(d=>live.some(m=>m.id===d))){const result=await backend.execute(identity.subject,parseCommand('personal_group_remove',{memberId}),identity.clientId);if(result.revocation)pending=true;}
+    let pending=false;for(const memberId of own.devices){
+      // One connection removal can revoke several audience leaves. Refresh instead of replaying a stale snapshot.
+      const live=z.array(z.object({id:z.string()})).parse((await backend.execute(identity.subject,parseCommand('personal_group_read',{}),identity.clientId)).members);
+      if(!live.some(m=>m.id===memberId))continue;
+      const result=await backend.execute(identity.subject,parseCommand('personal_group_remove',{memberId}),identity.clientId);if(result.revocation)pending=true;
+    }
     return {revoked:!pending,revocation:pending?'pending':'complete'};
   }
   if(path!=='/console/device/call')throw new Refused('Unknown browser route');
