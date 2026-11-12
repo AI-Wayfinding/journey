@@ -24,3 +24,35 @@ test('browser vault recovery wrap rejects wrong code, tampering and changed cont
   await assert.rejects(unwrap(sealed, key, { ...context, personId: 'person-bob' }));
   assert.equal(JSON.stringify(sealed).includes('PRIVATE-KEY'), false);
 });
+
+test('account recovery is stable across browsers, origin/account bound and not an account-key oracle',async()=>{
+ const {recoveryAuthorization,recoveryAccountWrappingKey}=await import('../src/vault.ts');
+ const code=recoveryCode(),proof=await recoveryAuthorization(code,context.origin,context.personId);
+ assert.match(proof,/^[A-Za-z0-9_-]{43}$/);
+ assert.equal(proof,await recoveryAuthorization(code.toLowerCase().replaceAll('-',' '),context.origin,context.personId));
+ assert.notEqual(proof,await recoveryAuthorization(code,'https://other.test',context.personId));
+ assert.notEqual(proof,await recoveryAuthorization(code,context.origin,'other-person'));
+ const key=await recoveryAccountWrappingKey(code,context.origin,context.personId);assert.equal(key.extractable,false);
+ const sealed=await wrap('FUTURE-ACCOUNT-KEY',key,context);
+ assert.equal(await unwrap(sealed,await recoveryAccountWrappingKey(code,context.origin,context.personId),context),'FUTURE-ACCOUNT-KEY');
+ const verifierKey=await crypto.subtle.importKey('raw',Buffer.from(proof,'base64url'),'AES-GCM',false,['decrypt']);
+ await assert.rejects(unwrap(sealed,verifierKey,context));
+ await assert.rejects(crypto.subtle.exportKey('raw',key));
+});
+test('onboarding confirmation rejects missing/wrong saved code before any server call',async()=>{
+ const {finishOnboarding}=await import('../src/onboarding.ts');let calls=0;const code=recoveryCode();
+ const post=async(path:string,body:Record<string,unknown>)=>{calls++;assert.equal(path,'/console/setup/complete');assert.equal(body.browserId,'browser-one');assert.equal(JSON.stringify(body).includes(code),false);return {};};
+ const input={code,confirmation:'',browserId:'browser-one',origin:context.origin,personId:context.personId};
+ await assert.rejects(finishOnboarding(post,input),/Retype/);await assert.rejects(finishOnboarding(post,{...input,confirmation:recoveryCode()}),/Retype/);assert.equal(calls,0);
+ await finishOnboarding(post,{...input,confirmation:code.toLowerCase()});assert.equal(calls,1);
+});
+
+test('resumed onboarding must confirm the code that actually unlocks its existing vault',async()=>{
+ const {finishOnboarding}=await import('../src/onboarding.ts');const {encode}=await import('../../proxy/src/codec.ts');
+ const code=recoveryCode(),wrong=recoveryCode(),salt=new Uint8Array(32).fill(25);
+ const record={context,salt:encode(salt),recoveryWrap:await wrap(encode(new Uint8Array(32).fill(7)),await deriveRecoveryKey(code,salt,context),context)};
+ let calls=0;const post=async()=>{calls++;return {};};
+ const input={code:wrong,confirmation:wrong,browserId:context.deviceId,origin:context.origin,personId:context.personId};
+ await assert.rejects(finishOnboarding(post,input,record));assert.equal(calls,0);
+ await finishOnboarding(post,{...input,code,confirmation:code},record);assert.equal(calls,1);
+});

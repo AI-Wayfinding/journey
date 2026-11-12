@@ -27,9 +27,14 @@ test('sealing browser enrollment needs exact fresh passkey binding; origin accou
   assert.equal(binding.deviceId,fields.device.deviceId);
   await assert.rejects(backend.passkey(identity,{op:'browser_finish',...fields,assertion}),/Fresh exact/);
   const list=await backend.passkey(identity,{op:'browser_list'});
-  assert.deepEqual(list.browsers,[{id:fields.browserId,credentialId:key.id,devices:[fields.device.deviceId],live:true}]);
+  const browsers=list.browsers as {id:string;credentialId:string;devices:string[];live:boolean;createdAt:number;lastUsedAt:number}[];
+  assert.equal(browsers.length,1);const browser=browsers[0]!;
+  assert.equal(browser.id,fields.browserId);assert.equal(browser.credentialId,key.id);assert.deepEqual(browser.devices,[fields.device.deviceId]);assert.equal(browser.live,true);assert.ok(browser.createdAt>0);assert.ok(browser.lastUsedAt>=browser.createdAt);
+  const survivor=await authenticator(),addition=await backend.passkey(identity,{op:'addition_options'});
+  const registration=await backend.passkey(identity,{op:'begin',assertion:await key.assert(String(addition.challenge),2)});
+  await backend.passkey(identity,{op:'finish',credential:survivor.register(String(registration.challenge))});
   await assert.rejects(backend.passkey(identity,{op:'delete',id:key.id}),/Revoke browser/);
   const second={...fields,device:{...fields.device,deviceId:`device_${crypto.randomUUID()}`}};
   const pending=await backend.passkey(identity,{op:'browser_begin',...second});advance();
-  await assert.rejects(backend.passkey(identity,{op:'browser_finish',...second,assertion:await key.assert(String(pending.challenge),2)}),/Fresh exact/);
+  await assert.rejects(backend.passkey(identity,{op:'browser_finish',...second,assertion:await key.assert(String(pending.challenge),3)}),/Fresh exact/);
 });

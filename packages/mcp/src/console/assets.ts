@@ -19,7 +19,14 @@ for (const form of document.querySelectorAll('form[data-ceremony]')) form.addEve
       if (!response.ok) { const reason = response.status === 409 ? (await response.json().catch(() => ({}))).error : undefined; throw new Error(reason || 'The request was refused. Check the form or sign in again.'); }
       return response;
     }
-    const options = await (await post(form.dataset.options, consent ? { request: fields.get('request'), decision: 'allow', name: fields.get('name'), capabilities: fields.getAll('capabilities'), journeys: fields.getAll('journeys') } : change ? { change } : {})).json();
+    const addition = {};
+    if(form.dataset.ceremony === 'register' && form.dataset.needsAssertion === 'true'){
+      const proofOptions=await (await post('/console/passkeys/addition-options',{})).json();
+      proofOptions.challenge=decode(proofOptions.challenge);proofOptions.allowCredentials=proofOptions.allowCredentials.map(c=>({...c,id:decode(c.id)}));
+      const proof=await navigator.credentials.get({publicKey:proofOptions});if(!proof)throw new Error('Existing passkey confirmation cancelled');
+      addition.assertion={id:proof.id,rawId:encode(proof.rawId),type:'public-key',clientExtensionResults:{},response:{clientDataJSON:encode(proof.response.clientDataJSON),authenticatorData:encode(proof.response.authenticatorData),signature:encode(proof.response.signature),...(proof.response.userHandle?{userHandle:encode(proof.response.userHandle)}:{})}};
+    }
+    const options = await (await post(form.dataset.options, consent ? { request: fields.get('request'), decision: 'allow', name: fields.get('name'), capabilities: fields.getAll('capabilities'), journeys: fields.getAll('journeys') } : change ? { change } : addition)).json();
     options.challenge = decode(options.challenge);
     const registering = form.dataset.ceremony === 'register';
     if (registering) { options.extensions = { prf: {} }; options.user.id = decode(options.user.id); options.excludeCredentials = (options.excludeCredentials || []).map(c => ({ ...c, id: decode(c.id) })); }
