@@ -355,9 +355,29 @@ Dan's brief for v2 was to write the spec, build what seems best, and refine late
 - Refresh checks that the WorkOS user still exists before rotating credentials. A confirmed upstream 404 reversibly suspends the account and refuses access without deleting agents, cards or credentials. An outage returns `temporarily_unavailable` without consuming the refresh token. WorkOS network I/O runs outside the Accounts serial turn; credentials are checked again afterwards, so a concurrent revocation cannot be undone.
 - Retrying the same refresh token after upstream recovery clears suspension and rotates credentials normally. Prompt webhook offboarding is not implemented; signed, replay-safe user-deleted webhooks remain a known gap. A single profile 404 is not authority for irreversible account deletion.
 
+### 51. Required onboarding and one connections list
+
+- **Decided by:** Dan, onboarding brief.
+- **What:** first sign-in requires a chosen private name and a passkey before ordinary console access. That passkey also enrolls the browser's MLS connection and protects its local vault with PRF when available. The person saves and retypes a random recovery code before continuing. The server checks a live enrolled browser and an updated sealed profile, not the encrypted name itself. An interrupted flow resumes while the console remains gated.
+- **Console:** one **Your connections** box replaces the separate agents and browser controls. Each Browser or Agent row shows its name, added time, last use and removal. This browser's lock state is local to the tab. Private agent names appear after unlock; locked pages retain opaque placeholders. Manual audience, admission and raw JSON controls are removed.
+
+### 52. Adding a passkey needs an existing passkey or recovery code
+
+- **Decided by:** Dan, F6.
+- **What:** email sign-in and console CSRF do not authorize an additional passkey. An existing passkey must produce a fresh, user-verified assertion, or the person supplies the saved recovery code. Assertion challenges expire after five minutes and are consumed. Registration binds the current credential set; recovery or credential changes invalidate pending registrations. Removing the last passkey is refused so email sign-in cannot regain first-enrollment authority.
+- **Code format and future account key:** the browser generates 256 random bits. `recoveryAuthorization` derives an origin/person-bound HKDF proof for `authorize-passkey`; the server stores only its SHA-256 verifier. `recoveryAccountWrappingKey` derives a separate nonextractable AES-GCM key for `wrap-account-key`. A future encrypted account-key record can use that key without changing the code format or exposing its wrapping key through the authorization proof. No account-key record or safety number exists yet.
+- **Preservation:** code-based recovery adds a new passkey and browser connection without changing the person id, recovery generation or existing profile descriptor. It does not reconstruct lost IndexedDB state or MLS history. A surviving eligible connection must share existing history. A separate local unlock code for an additional browser never replaces the account recovery code.
+
+### 53. Recovery without a code is irreversible and waits 72 hours
+
+- **Decided by:** Dan, recovery direction m07165 and onboarding brief.
+- **What:** a signed-in person starts recovery from Profile and account after confirming removal. Starting immediately removes all browser connections and personal leaves, withdraws every agent card and binding, revokes access/refresh tokens and authorization codes, removes passkeys, and invalidates pending registration. No agent may start recovery. No operation cancels it; repeating start preserves the original deadline, including after it expires.
+- **Completion:** the clock is persisted as `readyAt = startedAt + 259200000`. Before that instant no connection can be added, even with the old code. After it, the console requires a sign-in at or after the deadline and repeats first-passkey/browser/name/code setup. Agents must be connected again. There is no mail sender in this repository; the console displays the next step on sign-in after the deadline instead of sending email.
+- **Content and later identity work:** the person id remains stable, but the lost private workspace descriptor is cleared. Completion creates a fresh private workspace rather than restoring an old MLS state. `recovery.generation` records the reset; `recoveredAt` marks completed recovery. These fields are the seam for a later account-key/safety-number change and journey notice. Lost content keys are not recovered. This does not add successor-group recovery (entry 36).
+
 ## Open
 
-- **Remaining sealing work:** device trust hardening, independent security review, ts-mls audit and browser distribution assurance remain launch blockers. Forum, library, sensemaking, offers, tasks and identity descriptors use sealed-v1. The console now has an opt-in browser encryption device, with ids/placeholders while locked. Nothing in this change deploys, resets, migrates or erases old plaintext data.
+- **Remaining sealing work:** connection trust hardening, independent security review, ts-mls audit and browser distribution assurance remain launch blockers. First sign-in requires a private name, passkey and trusted browser connection. Locked pages show ids and status only. Nothing in this change deploys, resets, migrates or erases old plaintext data.
 - **Stage 7, review:** not done. Dan's formal review of the rules and an independent security review must pass before real users or confidential data arrive.
 - **Known gap 3 — group recovery:** the server cannot verify encrypted MLS commits; garbage commits can strand clients. An all-ineligible roster also needs successor-group recovery (entry 36).
 - **Known gap 8 — account hot paths:** `knownJourney` still assembles Accounts on journey calls, and the proxy's `sealedRemoteCall` reads the account on each remote call. Keyed hot-path reads remain unfinished.
