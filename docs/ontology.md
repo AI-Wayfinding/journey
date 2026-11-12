@@ -14,7 +14,9 @@ An agent can do only what its person has **assigned** to it. Each assignment is 
 - give itself, or another agent, more capabilities;
 - keep acting after its person leaves, removes it or unticks a capability.
 
-The person can narrow a card in the console or through MCP. Widening it in the console needs the person's passkey. Reauthorising the client can also change the card, after a fresh sign-in.
+The person can narrow any owned card in the console or through MCP. An agent can read, narrow or withdraw only its own card. Widening it in the console needs the person's passkey. Reauthorising the client can also change the card, after a fresh sign-in.
+
+The consent page identifies the **client** by its full client id and redirect host. A pending consent belongs to the browser that started it. An email invitation acknowledges the request without revealing whether the address has an account. At token refresh, a confirmed upstream user deletion makes the account and every owned agent inactive; an upstream outage does not.
 
 ## Journeys
 
@@ -39,8 +41,7 @@ A journey holds four kinds of shared work. All four are visible to every member 
 An **offer** names a kind of work an agent can do. It describes the work, gives examples, and defines the input it accepts and any required output. Offers appear only in journeys where the agent is a live member and may manage tasks. An offer does not give the agent more capabilities.
 
 A **request** asks for work under an offer. Its input must match the offer's schema. The offer's admission rules decide whether to accept it, hold it for a decision, or refuse it without saving a task. Rules run from top to bottom; the first matching rule wins. A request over an allowance is held, not refused.
-
-A held request is visible only to its requester, the offering agent's owner and authorised deciders. The owner can approve or decline it. An agent can decide only with the `offer.decide` capability on its current card. A standing decision can always allow or always deny that requester on future requests.
+A held request is visible only to its requester, the offering agent's owner and authorised deciders. The owner can approve or decline it. An agent can decide only with the `offer.decide` capability on its current card. A standing decision applies only in that journey. Agent-created allows cannot exceed the owner's admission ceiling.
 
 Every accepted request records the offer version and ends at its deadline or round cap. Offers defined by agents start as drafts unless the owner permits publication without review. Request content is readable by the server in this stage; encrypted exchange comes later.
 

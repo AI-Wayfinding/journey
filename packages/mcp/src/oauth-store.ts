@@ -9,8 +9,9 @@ export const tokenHash = async (value: string) => base64url(new Uint8Array(await
 /** Runs inside AccountsHost's serial turn; its caller atomically replaces accounts, including these records. */
 export async function oauthStep(state: OAuthAccounts, op: OAuthOperation, now: number, deviceAsserted = false, sealedMode=false): Promise<OAuthResult> {
   const db = state.oauth ??= { clients: [], requests: [], codes: [], access: [], refresh: [] };
+  db.clients = db.clients.filter(c => c.expiresAt === undefined || c.expiresAt > now || state.accounts.some(a => a.live && a.agents.some(g => g.live && g.clientId === c.client_id)));
   db.requests = db.requests.filter(r => r.request.expiresAt > now);
-  db.codes = db.codes.filter(r => r.expiresAt > now);
+  db.codes = db.codes.filter(r => r.expiresAt > now || r.used && (r.retainUntil ?? 0) > now);
   db.access = db.access.filter(r => r.expiresAt > now);
   // Used refresh hashes remain until their original expiry so reuse still revokes the family.
   db.refresh = db.refresh.filter(r => r.expiresAt > now);
@@ -26,7 +27,7 @@ export async function oauthStep(state: OAuthAccounts, op: OAuthOperation, now: n
     db.refresh = db.refresh.filter(t => t.family !== family);
   };
   const issue = async (t: Pick<StoredToken, 'subject' | 'personId' | 'clientId' | 'agentId'>, family = randomToken(), familyExpiry = now + 30 * 86400_000): Promise<OAuthResult> => {
-    if (db.access.length + db.refresh.length >= 10_000) throw new Refused('Token capacity reached');
+    if ([...db.access, ...db.refresh].filter(token => token.personId === t.personId).length >= 10_000) throw new Refused('Account token capacity reached');
     const access = randomToken(), refresh = randomToken();
     const identity = { subject: t.subject, personId: t.personId, clientId: t.clientId, agentId: t.agentId };
     db.access.push({ ...identity, hash: await tokenHash(access), expiresAt: now + 3_600_000, family });
@@ -35,16 +36,15 @@ export async function oauthStep(state: OAuthAccounts, op: OAuthOperation, now: n
   };
   switch (op.op) {
     case 'register': {
-      if (db.clients.length >= 1024) throw new Refused('Client registration capacity reached');
       const client = { client_id: `client_${randomToken()}`, client_name: sealedMode?'MCP client':op.client.client_name, redirect_uris: op.client.redirect_uris,
-        token_endpoint_auth_method: op.client.token_endpoint_auth_method, grant_types: op.client.grant_types, response_types: op.client.response_types };
+        expiresAt: now + 86_400_000, token_endpoint_auth_method: op.client.token_endpoint_auth_method, grant_types: op.client.grant_types, response_types: op.client.response_types };
       db.clients.push(client); return { kind: 'client', client };
     }
     case 'client': return { kind: 'client', client: db.clients.find(c => c.client_id === op.clientId) };
     case 'request': {
       if (op.request) {
-        if (db.requests.length >= 512 || db.requests.some(r => r.id === op.id)) throw new Refused('Authorization capacity reached');
-        db.requests.push({ id: op.id, request: {clientId:op.request.clientId,clientName:sealedMode?'MCP client':op.request.clientName,redirectUri:op.request.redirectUri,challenge:op.request.challenge,state:op.request.state,expiresAt:op.request.expiresAt} });
+        if (db.requests.some(r => r.id === op.id)) throw new Refused('Authorization already exists');
+        db.requests.push({ id: op.id, request: {clientId:op.request.clientId,clientName:sealedMode?'MCP client':op.request.clientName,redirectUri:op.request.redirectUri,challenge:op.request.challenge,browserHash:op.request.browserHash,state:op.request.state,expiresAt:op.request.expiresAt} });
       }
       return { kind: 'request', request: db.requests.find(r => r.id === op.id)?.request };
     }
@@ -93,8 +93,9 @@ export async function oauthStep(state: OAuthAccounts, op: OAuthOperation, now: n
     case 'exchange': {
       const hash = await tokenHash(op.code), code = db.codes.find(c => c.hash === hash);
       if (!code || code.clientId !== op.clientId || code.redirectUri !== op.redirectUri || code.challenge !== await tokenHash(op.verifier) || !live(code)) return invalid();
-      db.codes = db.codes.filter(c => c !== code);
-      return issue(code);
+      if (code.used) { if (code.family) revokeFamily(code.family); return invalid(); }
+      code.used = true; code.family = randomToken(); code.retainUntil = now + 30 * 86400_000;
+      return issue(code, code.family, code.retainUntil);
     }
     case 'refresh': {
       const hash = await tokenHash(op.token), t = db.refresh.find(t => t.hash === hash);
@@ -107,8 +108,6 @@ export async function oauthStep(state: OAuthAccounts, op: OAuthOperation, now: n
     case 'verify': {
       const hash = await tokenHash(op.token), t = db.access.find(t => t.hash === hash);
       if (!t || !live(t)) return { kind: 'error', error: 'invalid_token' };
-      const account = state.accounts.find(a => a.personId === t.personId)!;
-      account.agents.find(a => a.id === t.agentId)!.lastUsedAt = now;
       return { kind: 'access', identity: { subject: t.subject, personId: t.personId, clientId: t.clientId, agentId: t.agentId }, expiresAt: t.expiresAt };
     }
     case 'revoke': {

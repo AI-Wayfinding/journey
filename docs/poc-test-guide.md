@@ -248,13 +248,23 @@ In pi, Claude Code or another remote MCP client, add `https://poc.wayfinding.sup
 
 The remote connection offers coordination, metadata and encrypted relay tools. It does **not** decrypt content. Remote `artifact_create` is a metadata tool, unlike the local proxy's content tool with the same name. Use the local proxy for plaintext artifact creation, reading, copying and moving. This guide does not establish that any particular hosted client's connector or Apps UI works.
 
+### Check accounts and OAuth hardening
+
+Use synthetic identities and a server built from this revision. These checks do not imply that the live Worker has been updated.
+
+- Start authorization in one browser. Check that consent shows the full client id and redirect host. Copy its consent URL into another signed-in browser; it must be refused. Complete it in the first browser and check the redirect's `iss` parameter.
+- Inspect an HTTPS response for `Strict-Transport-Security`. Repeated registration from one IP must reach 429 without blocking a different IP. Production without its limiter must fail closed.
+- Create two agents for one person. An agent may list, read and narrow only itself, not its sibling. A journey-specific always-allow must not allow the same requester in another journey or exceed the owner's ceiling.
+- With a fake upstream in the automated suite, return 503 at refresh: retrying the same refresh token after recovery must succeed. Return 404 instead: access and refresh must stop working. A real WorkOS webhook is not wired yet, so upstream deletion is currently detected at refresh, not immediately.
+- Confirm the new `AccountsPartitionedV1` binding only in a reviewed dry-run. It starts a fresh account directory; old classes and data remain. Do not deploy or delete data as part of this test.
+
 ### Check nicknames and email invitations
 
 These checks cover newer source changes, not the live run recorded above. Use a server built from this revision.
 
-After B has called `account_read` once, A can invite B with `journey_invite` using `journeyId` and B's synthetic WorkOS `email` instead of `personId`. Supply exactly one of the two; email matching ignores case. B then calls `journey_join`. Only guides may invite. An unknown email must return `No Wayfinding account uses that email yet; ask them to sign in once, then invite again`. Admission, refusal, role and guide changes still require `personId`.
+After B has called `account_read` once, A can invite B with `journey_invite` using `journeyId` and B's synthetic WorkOS `email` instead of `personId`. Supply exactly one of the two; email matching ignores case. B then calls `journey_join`. Only guides may invite. Repeat with an unknown email and an already-invited email: each must return the same `{ journeyId, accepted: true }` acknowledgement. Admission, refusal, role and guide changes still require `personId`.
 
-Change B's nickname again and check that A's next `journey_read` shows it without rejoining. Other people's emails must not appear in journey results; a profile with only an email uses `Wayfinding member` until a nickname is set. Account existence lookup is a PoC privacy tradeoff restricted to guides, not a general email search.
+Change B's nickname again and check that A's next `journey_read` shows it without rejoining. Other people's emails must not appear in journey results; a profile with only an email uses `Wayfinding member` until a nickname is set. The invitation response must not disclose whether an email has an account.
 
 ## Walk through with A and B
 

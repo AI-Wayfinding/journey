@@ -77,7 +77,7 @@ export async function changeTask(state: TaskState, command: Extract<Command, { t
   }
   if (step.standing && task.offer) {
     const creatorId = task.offer.requesterIsAgent ? a.creatorId(task) : task.offer.requesterPersonId;
-    (state.offerOutbox ??= []).push({ id: task.id, owner: task.offer.owner, agentId: task.offer.agentId, offerId: task.offer.id, who: task.offer.requesterIsAgent ? { agent: creatorId } : { person: creatorId }, decision: step.standing === 'always_allow' ? 'allow' : 'deny' });
+    (state.offerOutbox ??= []).push({ id: task.id, owner: task.offer.owner, agentId: task.offer.agentId, offerId: task.offer.id, journeyId: state.id, byAgent: a.isAgent, who: task.offer.requesterIsAgent ? { agent: creatorId } : { person: creatorId }, decision: step.standing === 'always_allow' ? 'allow' : 'deny' });
   }
   if (step.action === 'approve' && task.offer) task.offer.admitted = true;
   task.rule = taskRule.step(next, taskInput(6, 0, false, deadlinePassed));

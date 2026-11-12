@@ -29,7 +29,15 @@ async function fixture(sealed=false) {
   const app = createApp({ resource: RESOURCE, issuer: ISSUER, allowedHosts: [RESOURCE.hostname], backend,
     verifier: createVerifier({ issuer: ISSUER, resource: RESOURCE, getKey: createLocalJWKSet(signer.jwks) }),
     console: { backend, secret: 'synthetic-secret-with-at-least-32-bytes', now: () => now, send: async (url) => String(url).endsWith('/oauth2/token') ? Response.json({ access_token: upstream, token_type: 'Bearer' }) : Response.json(document) } });
-  const send = (p: string, init?: RequestInit) => bridge(app)(new URL(p, origin), init);
+  let browserCookie = '';
+  const send = async (p: string, init?: RequestInit) => {
+    const headers = new Headers(init?.headers);
+    if (browserCookie) headers.set('cookie', [headers.get('cookie'), browserCookie].filter(Boolean).join('; '));
+    const response = await bridge(app)(new URL(p, origin), { ...init, headers });
+    const value = response.headers.getSetCookie().find(c => c.startsWith('__Host-wayfinding-consent='));
+    if (value) browserCookie = value.split(';')[0]!;
+    return response;
+  };
   async function login(path = '/console/login') {
     const start = await send(path), dest = new URL(start.headers.get('location')!);
     const finish = await send(`/console/callback?code=synthetic&state=${dest.searchParams.get('state')}`, { headers: { cookie: start.headers.get('set-cookie')!.split(';')[0]! } });
@@ -60,6 +68,72 @@ async function fixture(sealed=false) {
   return { backend, send, login, post, authorize, exchange, consent, client, upstream, advance: (ms: number) => { now += ms; }, document: (v: unknown) => { document = v; } };
 }
 
+test('oauth AS: a replayed authorization code revokes its issued token family', async () => {
+  const f = await fixture(), cookie = await f.login(), code = await f.consent(cookie);
+  const tokens = await (await f.exchange(code)).json() as {access_token:string;refresh_token:string};
+  assert.equal((await f.send('/mcp', listToolsRequest(tokens.access_token))).status, 200);
+  assert.equal((await f.exchange(code)).status, 400);
+  assert.equal((await f.send('/mcp', listToolsRequest(tokens.access_token))).status, 401);
+  assert.equal((await f.send('/oauth/token', { method:'POST', headers:{'content-type':'application/x-www-form-urlencoded'}, body:new URLSearchParams({grant_type:'refresh_token',client_id:f.client.client_id,refresh_token:tokens.refresh_token}) })).status,400);
+});
+
+test('oauth AS: anonymous throttling uses the trusted client IP, not a shared global key', async () => {
+  const f = await fixture(), keys = new Set<string>();
+  const app = createApp({resource:RESOURCE,issuer:ISSUER,allowedHosts:[RESOURCE.hostname],backend:f.backend,
+    verifier:createVerifier({issuer:ISSUER,resource:RESOURCE,getKey:createLocalJWKSet(signer.jwks)}),
+    authRateLimit:{async limit({key}: {key:string}) { const success=!keys.has(key);keys.add(key);return {success}; }} });
+  const register = (ip:string) => app.fetch(new Request(new URL('/oauth/register',origin),{method:'POST',headers:{host:RESOURCE.host,'cf-connecting-ip':ip,'content-type':'application/json'},body:JSON.stringify({redirect_uris:[callback]})}));
+  assert.equal((await register('192.0.2.1')).status,201);
+  assert.equal((await register('192.0.2.1')).status,429);
+  assert.equal((await register('192.0.2.2')).status,201);
+});
+
+test('oauth AS: HTTPS responses carry HSTS and authorization responses identify the issuer', async () => {
+  const f = await fixture(), cookie = await f.login();
+  for (const path of ['/', '/missing', '/mcp', '/oauth/register', '/.well-known/oauth-authorization-server']) {
+    assert.equal((await f.send(path)).headers.get('strict-transport-security'), 'max-age=31536000; includeSubDomains');
+  }
+  const start=await f.authorize(),path=start.headers.get('location')!,id=new URL(path,origin).searchParams.get('request');
+  const html=await (await f.send(path,{headers:{cookie}})).text();
+  const response=await f.post('/oauth/consent',{csrf:csrfOf(html),request:id,decision:'deny'},cookie);
+  assert.equal(new URL(response.headers.get('location')!).searchParams.get('iss'),origin);
+});
+
+test('oauth AS: unused DCR clients expire and anonymous registrations do not share a hard cap', async () => {
+  let now = 1_800_000_000_000;
+  const host = new AccountsHost(new MemoryStorage(), { get: async () => ({name:'test',email:'test@example.test'}) }, undefined, undefined, () => now);
+  let first = '';
+  for (let n = 0; n < 1030; n++) {
+    const result = await host.oauth({ op: 'register', client: { client_name: 'Synthetic', redirect_uris: [callback], token_endpoint_auth_method: 'none', grant_types: ['authorization_code'], response_types: ['code'] } });
+    assert.equal(result.kind, 'client');
+    if (result.kind === 'client' && !first) first = result.client!.client_id;
+  }
+  now += 86_400_001;
+  assert.deepEqual(await host.oauth({ op:'client', clientId:first }), {kind:'client',client:undefined});
+});
+
+test('oauth AS: pre-auth login does not write Accounts or lock out other browsers', async () => {
+  const f = await fixture(), before = f.backend.accountStorage.writes;
+  for (let n = 0; n < 140; n++) assert.equal((await f.send('/console/login')).status, 302);
+  assert.equal(f.backend.accountStorage.writes, before);
+  await f.login();
+});
+
+test('oauth AS: consent identifies redirect and client and requires the initiating browser', async () => {
+  const f = await fixture(), cookie = await f.login(), start = await f.authorize();
+  const path = start.headers.get('location')!;
+  const html = await (await f.send(path, { headers: { cookie } })).text();
+  assert.ok(html.includes('127.0.0.1:32123'));
+  assert.ok(html.includes(f.client.client_id));
+  const other = await fixture(), otherCookie = await other.login();
+  // Reusing a real session from this server without the browser's authorization cookie must fail.
+  const app = createApp({ resource: RESOURCE, issuer: ISSUER, allowedHosts: [RESOURCE.hostname], backend: f.backend,
+    verifier: createVerifier({ issuer: ISSUER, resource: RESOURCE, getKey: createLocalJWKSet(signer.jwks) }),
+    console: { backend: f.backend, secret: 'synthetic-secret-with-at-least-32-bytes' } });
+  assert.equal((await app.fetch(new Request(new URL(path, origin), { headers: { cookie, host: RESOURCE.host } }))).status, 403);
+  void otherCookie;
+});
+
 test('oauth AS: metadata, DCR and CIMD validate before redirect, S256 and resource are mandatory', async () => {
   const f = await fixture();
   const metadata = await (await f.send('/.well-known/oauth-authorization-server')).json() as Record<string, unknown>;
@@ -71,6 +145,8 @@ test('oauth AS: metadata, DCR and CIMD validate before redirect, S256 and resour
   assert.equal((await f.authorize(undefined, { redirect_uri: 'https://evil.test/callback' })).status, 400);
   assert.equal((await f.authorize('https://pi.dev/oauth/client.json')).status, 303);
   f.document({ client_id: 'https://evil.test/client.json', redirect_uris: [callback] });
+  assert.equal((await f.authorize('https://pi.dev/oauth/client.json')).status, 303, 'validated metadata is reused within five minutes');
+  f.advance(300_001);
   assert.equal((await f.authorize('https://pi.dev/oauth/client.json')).status, 400);
 });
 
@@ -100,9 +176,9 @@ test('oauth AS: code exchange binds PKCE, redirect and client, is single use and
   const response = await f.exchange(code); assert.equal(response.status, 200);
   const tokens = await response.json() as { access_token: string; refresh_token: string; expires_in: number };
   assert.equal(tokens.expires_in, 3600);
-  assert.equal((await f.exchange(code)).status, 400);
   assert.equal((await f.send('/mcp', listToolsRequest(f.upstream))).status, 401);
   assert.equal((await f.send('/mcp', listToolsRequest(tokens.access_token))).status, 200);
+  assert.equal((await f.exchange(code)).status, 400);
   assert.ok(!f.backend.snapshot().includes(tokens.access_token));
   assert.ok(!f.backend.snapshot().includes(tokens.refresh_token));
 });
@@ -272,7 +348,6 @@ test('oauth AS: Accounts eviction preserves old accounts, single-use codes and r
   const exchange = { op: 'exchange' as const, code: code.code, clientId, redirectUri: callback, verifier };
   const tokens = await host().oauth(exchange);
   if (tokens.kind !== 'tokens') throw new Error('Exchange failed');
-  assert.deepEqual(await host().oauth(exchange), { kind: 'error', error: 'invalid_grant' });
   assert.equal((await host().lookup('alice'))!.personId, original.personId);
   const raw = String(await storage.get('accounts'));
   assert.equal(raw.includes(code.code), false);
@@ -288,6 +363,7 @@ test('oauth AS: Accounts eviction preserves old accounts, single-use codes and r
   if (rotated.kind !== 'tokens') throw new Error('Refresh failed');
   assert.deepEqual(await host().oauth(refresh), { kind: 'error', error: 'invalid_grant' });
   assert.deepEqual(await host().oauth({ op: 'verify', token: rotated.tokens.access_token }), { kind: 'error', error: 'invalid_token' });
+  assert.deepEqual(await host().oauth(exchange), { kind: 'error', error: 'invalid_grant' });
   now += 30 * 86400_000 + 1;
   assert.deepEqual(await host().oauth({ op: 'refresh', clientId, token: rotated.tokens.refresh_token }), { kind: 'error', error: 'invalid_grant' });
 });

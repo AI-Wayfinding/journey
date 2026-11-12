@@ -1,4 +1,5 @@
 import * as z from 'zod';
+import { PartitionedAccountsStorage } from './accounts-storage.ts';
 import { WriteAuthority, WriteStorage, WriteBlobs, WriteReceiver, writeRequestSchema, type WriteRequest, type WritePermit, type WriteReceipt, type WriteDrain } from './write-permits.ts';
 import { accountOfferCommand } from './agent-offers.ts';
 import { DEFAULT_SETTINGS, offerView, allowanceRequestSchema, permitRequestSchema, journeyEnabled, matchingRule, clampAdmission, clampJourneyLimits, periodMs, type AllowanceRequest, type AllowanceReceipt, type OfferAgent, type StandingDecision, type PermitRequest, type AdmissionPermit, type Offer, type OwnerOfferSettings } from './offers.ts';
@@ -20,8 +21,17 @@ import { managePasskey } from './console/passkeys.ts';
 import { browserEnrollment, type BrowserRegistration } from './console/browser-enrollment.ts';
 export interface Profile { name: string; email: string }
 export interface Profiles { get(subject: string): Promise<Profile> }
+export class UpstreamUserDeleted extends Refused { constructor() { super('Upstream account removed'); } }
+function tombstone(account: Account): void {
+  account.live = false;
+  for (const [i, agent] of account.agents.entries()) {
+    agent.live = false; agent.card = stepCard(agent.card, 'withdraw');
+    account.bindings = bindingRule.step(account.bindings, { op: 2, client: 0, agent: i + 2, personAsserted: 0, agentIsOwnLive: 0, personLive: 0, boundAgentLive: 0 });
+  }
+  account.assertions = [];
+}
 export interface Account extends Profile, AgentAccount { browsers?: { id: string; credentialId: string; devices: string[] }[]; descriptor?:SealedDescriptor; emailIndex?:string; subject: string; personId: string; nickname?: string; group: Snapshot; identities: { id: string; name: string; kind: 'device' | 'agent' }[] }
-interface AccountsState { emailKey?:string; rulesHash: RulesStamp; accounts: Account[]; journeys: string[]; oauth?: OAuthState; allowances?: AllowanceReceipt[]; permits?: AdmissionPermit[] }
+interface AccountsState { removedSubjects?: string[]; emailKey?:string; rulesHash: RulesStamp; accounts: Account[]; journeys: string[]; oauth?: OAuthState; allowances?: AllowanceReceipt[]; permits?: AdmissionPermit[] }
 
 function parseDevice(raw:string):DeviceBinding{try{return bindingSchema.parse(JSON.parse(raw));}catch{throw new Refused('Invalid stored authenticated device binding');}}
 // The Accounts serial is the admission linearisation point for every journey.
@@ -97,7 +107,7 @@ export class AccountsHost {
       const active = Object.fromEntries(Object.entries(records).filter(([, record]) => record.expiresAt > this.now()));
       const previous = active[operation.id];
       if (operation.op === 'put') {
-        if (previous || Object.keys(active).length >= 128) throw new Refused('Console session capacity reached');
+        if (previous) throw new Refused('Console record already exists');
         active[operation.id] = operation.record;
       } else if (operation.op !== 'read') delete active[operation.id];
       if (operation.op !== 'read' || Object.keys(active).length !== Object.keys(records).length) await this.storage.put('console:records', JSON.stringify(active));
@@ -106,7 +116,22 @@ export class AccountsHost {
   }
   oauth(supplied: OAuthOperation): Promise<OAuthResult> {
     return this.serial.run(async () => {
-      const operation = oauthOperation.parse(supplied), state = await this.load();
+      const operation = oauthOperation.parse(supplied);
+      if (operation.op === 'verify' && this.storage.base instanceof PartitionedAccountsStorage) {
+        const stored = await this.storage.base.access(await tokenHash(operation.token));
+        if (!stored.token || !stored.account) return { kind: 'error', error: 'invalid_token' };
+        if (!stored.rulesHash || !sameRules(stored.rulesHash) || stored.rulesHash.card !== RULES.card) throw new Refused('Stored accounts use different rules');
+        return oauthStep({ accounts: [stored.account], oauth: { clients: [], requests: [], codes: [], access: [stored.token], refresh: [] } }, operation, this.now());
+      }
+      const state = await this.load();
+      if (operation.op === 'refresh') {
+        const hash = await tokenHash(operation.token), token = state.oauth?.refresh.find(t => t.hash === hash && t.clientId === operation.clientId && !t.used && t.expiresAt > this.now());
+        const account = token && state.accounts.find(a => a.subject === token.subject && a.live);
+        if (account) {
+          try { await this.profiles.get(account.subject); }
+          catch (error) { if (error instanceof UpstreamUserDeleted) tombstone(account); else return { kind: 'error', error: 'temporarily_unavailable' }; }
+        }
+      }
       if(this.sealedMode&&(operation.op==='consent-options'||operation.op==='consent')){const request=state.oauth?.requests.find(r=>r.id===operation.id)?.request;if(!request||operation.consent.name!=='MCP client')throw new Refused('Names must be sealed by an enrolled proxy; consent uses client id only');}
       if(this.sealedMode&&operation.op==='manage'&&operation.name!==undefined&&operation.name!==operation.agentId)throw new Refused('Agent names must be sealed by an enrolled proxy');
       let deviceAsserted = false;
@@ -136,7 +161,7 @@ export class AccountsHost {
       }
       const result = await oauthStep(state, operation, this.now(), deviceAsserted, this.sealedMode);
       // Persist errors too: refresh reuse must revoke before the error is returned.
-      if (operation.op !== 'client' && !(operation.op === 'request' && !operation.request)) await this.save(state);
+      if (operation.op !== 'verify' && operation.op !== 'client' && !(operation.op === 'request' && !operation.request)) await this.save(state);
       return result;
     });
   }
@@ -146,6 +171,7 @@ export class AccountsHost {
   provision(subject: string): Promise<Account> {
     return this.serial.run(async () => {
       const state = await this.load();
+      if (state.removedSubjects?.includes(subject)) throw new Refused('Account removed');
       const existing = state.accounts.find((a) => a.subject === subject);
       if (existing) return existing;
       const profile = await this.profiles.get(subject);
@@ -226,13 +252,8 @@ export class AccountsHost {
   removePerson(subject: string): Promise<void> {
     return this.serial.run(async () => {
       const state = await this.load(), account = state.accounts.find(a => a.subject === subject);
-      if (!account) throw new Refused('Account not found');
-      account.live = false;
-      for (const [i, agent] of account.agents.entries()) {
-        agent.live = false; agent.card = stepCard(agent.card, 'withdraw');
-        account.bindings = bindingRule.step(account.bindings, { op: 2, client: 0, agent: i + 2, personAsserted: 0, agentIsOwnLive: 0, personLive: 0, boundAgentLive: 0 });
-      }
-      account.assertions = [];
+      if (!(state.removedSubjects ??= []).includes(subject)) state.removedSubjects.push(subject);
+      if (account) tombstone(account);
       await this.save(state);
     });
   }
@@ -313,6 +334,7 @@ export class AccountsHost {
       const policy = offer.agentDefined ? clampAdmission(offer.admission, settings) : offer.admission;
       const matched = matchingRule(policy, { requesterId: request.requesterId, requesterPersonId: request.requesterPersonId, isAgent: request.isAgent, isGuide: request.isGuide, journeyId: request.journeyId, owner: account.personId });
       let decision = matched?.decision ?? policy.default;
+      if (decision === 'allow' && matched?.ceilingBound && settings.maxAdmission === 'hold') decision = 'hold';
       if (decision === 'deny') throw new Refused('Not accepted');
       // Count requests, including held ones. Keep a week so later policy edits cannot reset usage.
       const receipts = (state.allowances ?? []).filter(r => r.createdAt > now - periodMs('week'));
@@ -359,7 +381,7 @@ export class AccountsHost {
       const offer = agent.offers?.find(o => o.id === decision.offerId);
       if (!offer) return;
       const who = 'person' in decision.who ? { person: decision.who.person } : { agent: decision.who.agent };
-      offer.admission.rules = [{ who, decision: decision.decision }, ...offer.admission.rules.filter(r => JSON.stringify(r.who) !== JSON.stringify(who))].slice(0, 50);
+      offer.admission.rules = [{ who, journeys: [decision.journeyId], decision: decision.byAgent && (agent.offerSettings ?? DEFAULT_SETTINGS).maxAdmission === 'hold' && decision.decision === 'allow' ? 'hold' as const : decision.decision, ceilingBound: decision.byAgent }, ...offer.admission.rules.filter(r => JSON.stringify(r.who) !== JSON.stringify(who) || JSON.stringify(r.journeys) !== JSON.stringify([decision.journeyId]))].slice(0, 50);
       offer.version++; offer.updatedAt = this.now();
       agent.standingReceipts = [...(agent.standingReceipts ?? []), decision.id];
       await this.save(state);
@@ -381,7 +403,7 @@ export class AccountsHost {
           return { ...result.data, usage: { admitted24h: permits.length, journeys: (agent.offers ?? []).flatMap(o => Object.keys(o.journeySettings).map(journeyId => ({ offerId: o.id, journeyId, admitted24h: permits.filter(p => p.offerId === o.id && p.journeyId === journeyId).length }))) } };
         }
         case 'client_list': return { clientId, actingAgent: actor.agent?.id, clients: account.clients.map((id, i) => ({ clientId: id, agentId: cell(account.bindings, 'Bound', i + 1) || cell(account.bindings, 'Revoked', i + 1) ? account.agents[cell(account.bindings, 'Agents', i + 1) - 2]?.id : undefined, bound: cell(account.bindings, 'Bound', i + 1) === 1, revoked: cell(account.bindings, 'Revoked', i + 1) === 1 })) };
-        case 'agent_list': return { agents: account.agents.map(view) };
+        case 'agent_list': return { agents: account.agents.filter(a => !actor.agent || a.id === actor.agent.id).map(view) };
         case 'agent_create': {
           if (actor.agent) throw new Refused('Only a person adds agents');
           if(this.sealedMode&&command.input.name!==SEALED_NOTICE)throw new Refused('Agent names must be sealed');const id=`agent_${crypto.randomUUID()}`;
@@ -390,7 +412,7 @@ export class AccountsHost {
         }
         case 'agent_capabilities': case 'agent_narrow': case 'agent_card': case 'agent_remove': {
           const agent = account.agents.find(a => a.id === command.input.agentId && a.live);
-          if (!agent) throw new Refused('Only a live agent owner may use its card');
+          if (!agent || actor.agent && actor.agent.id !== agent.id) throw new Refused('Only your own live agent card may be used');
           if (command.tool === 'agent_capabilities') return view(agent);
           if (command.tool === 'agent_remove') {
             requireAccountCapability(actor, 'agent.remove'); agent.live = false; agent.card = stepCard(agent.card, 'withdraw');
@@ -555,6 +577,7 @@ export class WorkOSProfiles implements Profiles {
       redirect: 'manual',
       headers: { authorization: `Bearer ${this.apiKey}` }, signal: AbortSignal.timeout(10_000),
     });
+    if (response.status === 404) throw new UpstreamUserDeleted();
     if (!response.ok) throw new Refused('Account profile lookup failed');
     const user: unknown = await response.json();
     if (typeof user !== 'object' || user === null || !('id' in user) || user.id !== subject || !('email' in user) || typeof user.email !== 'string') {

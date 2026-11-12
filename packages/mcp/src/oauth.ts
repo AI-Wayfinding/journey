@@ -3,12 +3,18 @@ import { OAuthError, OAuthErrorCode, type OAuthTokenVerifier } from '@modelconte
 import type { CoordinationBackend } from './commands.ts';
 import { Refused, parseCommand } from './commands.ts';
 import type { ConsoleOptions } from './console/contract.ts';
-import { ConsoleSessions, SESSION_COOKIE } from './console/session.ts';
+import { ConsoleSessions, SESSION_COOKIE, cookie } from './console/session.ts';
 import { formBody } from './console/forms.ts';
 import { page, escape, form, capabilityFields } from './console/pages.ts';
 import { agentConsent, authorizationRequest, clientMetadata, oauthId, type OAuthClient } from './oauth-contract.ts';
 import { assertionSchema } from './agents.ts';
-import { randomToken } from './oauth-store.ts';
+import { randomToken, tokenHash } from './oauth-store.ts';
+const CONSENT_COOKIE = '__Host-wayfinding-consent';
+function browserToken(request: Request): string | undefined {
+  const values = (request.headers.get('cookie') ?? '').split(';').map(v => v.trim()).filter(v => v.startsWith(CONSENT_COOKIE + '='));
+  const token = values.length === 1 ? values[0]!.slice(CONSENT_COOKIE.length + 1) : '';
+  return /^[A-Za-z0-9_-]{43}$/.test(token) ? token : undefined;
+}
 
 const headers = { 'Cache-Control': 'no-store', 'Pragma': 'no-cache', 'Referrer-Policy': 'same-origin', 'X-Content-Type-Options': 'nosniff' };
 const json = (value: unknown, status = 200) => Response.json(value, { status, headers });
@@ -38,7 +44,7 @@ function params(text: string): URLSearchParams {
   return p;
 }
 function redirectURL(value: string): URL {
-  const u = new URL(value);
+  let u: URL; try { u = new URL(value); } catch { throw new Refused('Redirect URI refused'); }
   const loopback = u.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname);
   if ((!loopback && u.protocol !== 'https:') || u.username || u.password || u.hash) throw new Refused('Redirect URI refused');
   return u;
@@ -52,7 +58,8 @@ function matchesRedirect(requested: string, registered: string): boolean {
   return withoutPort(requested) === withoutPort(registered);
 }
 function publicMetadataURL(value: string): URL {
-  const u = new URL(value), h = u.hostname.toLowerCase();
+  let u: URL; try { u = new URL(value); } catch { throw new Refused('Public HTTPS client metadata required'); }
+  const h = u.hostname.toLowerCase();
   if (u.protocol !== 'https:' || u.username || u.password || u.hash || (u.port && u.port !== '443') || !h.includes('.') || /^[\d.]+$/.test(h) || h.includes(':') || ['localhost', 'local', 'internal', 'test'].some(s => h === s || h.endsWith('.' + s))) throw new Refused('Public HTTPS client metadata required');
   return u;
 }
@@ -69,10 +76,14 @@ export function createOAuth(config: { backend?: CoordinationBackend; console?: C
   const origin = config.resource.origin, now = config.console?.now ?? Date.now, send = config.console?.send ?? fetch.bind(globalThis);
   const backend = config.backend;
   const sessions = config.console ? new ConsoleSessions(config.console.backend, config.console.secret, origin, now) : undefined;
+  const metadataCache = new Map<string, { client: OAuthClient; expiresAt: number }>();
   async function client(id: string): Promise<OAuthClient> {
     oauthId.parse(id);
     if (!backend?.oauth) throw new Refused('OAuth storage unavailable');
     if (id.startsWith('https://')) {
+      const cached = metadataCache.get(id);
+      if (cached && cached.expiresAt > now()) return cached.client;
+      metadataCache.delete(id);
       const url = publicMetadataURL(id), controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 5000);
       try {
         const response = await send(url, { redirect: 'manual', signal: controller.signal, headers: { Accept: 'application/json' } });
@@ -80,6 +91,8 @@ export function createOAuth(config: { backend?: CoordinationBackend; console?: C
         const raw: unknown = JSON.parse(await boundedBody(response));
         const doc = clientMetadata.extend({ client_id: z.literal(id) }).parse(raw);
         doc.redirect_uris.forEach(redirectURL);
+        if (metadataCache.size >= 128) metadataCache.delete(metadataCache.keys().next().value!);
+        metadataCache.set(id, { client: doc, expiresAt: now() + 300_000 });
         return doc;
       } finally { clearTimeout(timeout); }
     }
@@ -88,7 +101,8 @@ export function createOAuth(config: { backend?: CoordinationBackend; console?: C
     return r.client;
   }
   return { async fetch(request: Request): Promise<Response> {
-    const url = new URL(request.url), path = url.pathname;
+    let url: URL; try { url = new URL(request.url); } catch { return oauthError('invalid_request'); }
+    const path = url.pathname;
     if (!backend?.oauth) return oauthError('temporarily_unavailable', 503);
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: { ...headers, Allow: 'GET, POST, OPTIONS' } });
     const consentRoute = path === '/oauth/consent' || path === '/oauth/consent/options';
@@ -100,10 +114,13 @@ export function createOAuth(config: { backend?: CoordinationBackend; console?: C
         if (!metadata.redirect_uris.some(r => matchesRedirect(uri, r))) throw new Refused('Redirect URI mismatch');
         if (p.get('response_type') !== 'code' || p.get('code_challenge_method') !== 'S256') throw new Refused('Code with S256 required');
         if (p.has('resource') && p.get('resource') !== config.resource.href) throw new Refused('Resource mismatch');
-        const pending = authorizationRequest.parse({ clientId: id, clientName: metadata.client_name, redirectUri: uri,
+        const browser = browserToken(request) ?? randomToken();
+        const pending = authorizationRequest.parse({ clientId: id, clientName: metadata.client_name, redirectUri: uri, browserHash: await tokenHash(browser),
           challenge: p.get('code_challenge'), ...(p.has('state') ? { state: p.get('state') } : {}), expiresAt: now() + 600_000 });
         const transaction = randomToken(); await backend.oauth({ op: 'request', id: transaction, request: pending });
-        return redirect(`/oauth/consent?request=${transaction}`);
+        const response = redirect(`/oauth/consent?request=${transaction}`);
+        response.headers.append('Set-Cookie', cookie(CONSENT_COOKIE, browser, 600));
+        return response;
       }
       if (consentRoute && ['GET', 'POST'].includes(request.method)) {
         if (!sessions || !config.console || new TextEncoder().encode(config.console.secret).length < 32) return oauthError('temporarily_unavailable', 503);
@@ -118,8 +135,11 @@ export function createOAuth(config: { backend?: CoordinationBackend; console?: C
         const id = z.string().regex(/^[A-Za-z0-9_-]{43}$/).parse(body ? body.request : url.searchParams.get('request'));
         const pending = await backend.oauth({ op: 'request', id });
         if (pending.kind !== 'request' || !pending.request) throw new Refused('Authorization expired');
+        const browser = browserToken(request);
+        if (!browser || pending.request.browserHash !== await tokenHash(browser)) throw new Refused('Authorization belongs to another browser');
         const r = pending.request, destination = new URL(r.redirectUri);
         if (r.state !== undefined) destination.searchParams.set('state', r.state);
+        destination.searchParams.set('iss', origin);
         // Prevent the code appearing in referrers at the native client's redirect.
         const finish = () => { const response = redirect(destination.href); response.headers.set('Referrer-Policy', 'no-referrer'); return response; };
         if (body) {
@@ -144,7 +164,7 @@ export function createOAuth(config: { backend?: CoordinationBackend; console?: C
         const agent = bound ? rows(agents!.agents).find(a => a.agentId === bound.agentId && a.live) : undefined;
         const caps = (agent ? z.array(z.string()).parse(agent.capabilities) : ['read', 'post']).filter(c => c !== 'device.keys');
         const selected = agent ? z.array(z.string()).parse(agent.journeys ?? []) : [];
-        const fields = hidden('request', id) + `<p>Connect <strong>${escape(r.clientName)}</strong> as your agent. Its access is always limited by your live authority.</p><label>Agent name <input name="name" value="${escape(backend.sealedMode?'MCP client':agent?.name ?? r.clientName)}" maxlength="60"${backend.sealedMode?' readonly':''} required></label>`
+        const fields = hidden('request', id) + `<p>Connect <strong>${escape(r.clientName)}</strong> as your agent. Client ID: <code>${escape(r.clientId)}</code>. Redirect host: <strong>${escape(destination.host)}</strong>. Its access is always limited by your live authority.</p><label>Agent name <input name="name" value="${escape(backend.sealedMode?'MCP client':agent?.name ?? r.clientName)}" maxlength="60"${backend.sealedMode?' readonly':''} required></label>`
           + capabilityFields(caps) + '<p>Device keys let the local encryption proxy read your private profile, manage device key packages and access your personal sealed content. This is off by default and always requires a registered passkey, even after sign-in. <a href="/console/passkeys" target="_blank">Register a passkey</a> before allowing it.</p>' + `<fieldset><legend>Journeys</legend>${rows(journeys!.journeys).filter(j => !j.pending).map(j => `<label><input type="checkbox" name="journeys" value="${escape(j.journeyId)}"${selected.includes(String(j.journeyId)) ? ' checked' : ''}> ${escape(j.name)}</label>`).join('')}</fieldset>`;
         const html = page('Allow agent access', `<form method="post" action="/oauth/consent" data-ceremony="consent" data-options="/oauth/consent/options">${hidden('csrf', session.csrf)}${fields}<button name="decision" value="allow">Allow</button><button name="decision" value="deny">Deny</button></form>`, session.csrf);
         return new Response(html, { headers: { ...headers, 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': `default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; form-action 'self' ${destination.origin}; frame-ancestors 'none'; base-uri 'none'` } });
@@ -166,7 +186,7 @@ export function createOAuth(config: { backend?: CoordinationBackend; console?: C
         const result = grant === 'authorization_code' ? await backend.oauth({ op: 'exchange', clientId, code: oauthId.parse(p.get('code')), redirectUri: oauthId.parse(p.get('redirect_uri')), verifier: z.string().regex(/^[A-Za-z0-9._~-]{43,128}$/).parse(p.get('code_verifier')) })
           : grant === 'refresh_token' ? await backend.oauth({ op: 'refresh', clientId, token: oauthId.parse(p.get('refresh_token')) }) : undefined;
         if (!result) return oauthError('unsupported_grant_type');
-        return result.kind === 'tokens' ? json(result.tokens) : oauthError(result.kind === 'error' ? result.error : 'invalid_grant');
+        return result.kind === 'tokens' ? json(result.tokens) : oauthError(result.kind === 'error' ? result.error : 'invalid_grant', result.kind === 'error' && result.error === 'temporarily_unavailable' ? 503 : 400);
       }
       return oauthError('invalid_request', 405);
     } catch { return oauthError(consentRoute ? 'access_denied' : 'invalid_request', consentRoute ? 403 : 400); }

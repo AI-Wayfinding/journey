@@ -16,6 +16,7 @@ import type { ConsoleOptions } from './console/contract.ts';
 import { createOAuth, createOpaqueVerifier } from './oauth.ts';
 /** Inputs for {@link createApp}. Everything the Worker reads from its environment is passed in here. */
 export interface AppOptions {
+  authRateLimit?: { limit(input: { key: string }): Promise<{ success: boolean }> };
   /** Verifies upstream AuthKit tokens for console login only. */
   verifier: OAuthTokenVerifier;
   /** Test seam for transport-only suites. Production always uses the opaque verifier. */
@@ -37,7 +38,7 @@ export function workerMetadata(issuer: string): OAuthMetadata {
   return { issuer, authorization_endpoint: at('/oauth/authorize'), token_endpoint: at('/oauth/token'),
     registration_endpoint: at('/oauth/register'), revocation_endpoint: at('/oauth/revoke'), response_types_supported: ['code'],
     grant_types_supported: ['authorization_code', 'refresh_token'], code_challenge_methods_supported: ['S256'],
-    token_endpoint_auth_methods_supported: ['none'], client_id_metadata_document_supported: true };
+    token_endpoint_auth_methods_supported: ['none'], client_id_metadata_document_supported: true, authorization_response_iss_parameter_supported: true };
 }
 
 /** Worker discovery, same-origin console/OAuth routes, then opaque bearer authentication before the MCP handler. */
@@ -57,9 +58,15 @@ export function createApp(options: AppOptions): { fetch(request: Request): Promi
   // 10 MiB ciphertext expands to ~14 MiB base64, plus the JSON-RPC envelope.
   const handler = createMcpHandler((ctx) => buildServer(ctx, options.backend), { legacy: 'stateless', maxRequestBodySize: 15 * 1024 * 1024 });
 
-  return {
+  const routes = {
     async fetch(request: Request): Promise<Response> {
       const path = new URL(request.url).pathname;
+      if (options.authRateLimit && ['/console/login', '/oauth/register', '/oauth/authorize', '/oauth/token'].includes(path)) {
+        const ip = request.headers.get('cf-connecting-ip');
+        if (!ip) return new Response('Client IP unavailable', { status: 503 });
+        try { if (!(await options.authRateLimit.limit({ key: `${path}:${ip}` })).success) return new Response('Too many requests', { status: 429, headers: { 'Retry-After': '60' } }); }
+        catch { return new Response('Rate limiter unavailable', { status: 503 }); }
+      }
       // The bare origin is the public landing page, served by the console so it can see the session.
       if (path === '/' || path === '/console' || path.startsWith('/console/')) {
         if (path === '/' && request.method !== 'GET') return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET' } });
@@ -128,4 +135,10 @@ export function createApp(options: AppOptions): { fetch(request: Request): Promi
       return handler.fetch(request, { authInfo: auth });
     },
   };
+  return { async fetch(request: Request): Promise<Response> {
+    const response = await routes.fetch(request);
+    const headers = new Headers(response.headers);
+    if (new URL(request.url).protocol === 'https:') headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+  } };
 }
