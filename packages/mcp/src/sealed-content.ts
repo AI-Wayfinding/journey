@@ -13,11 +13,11 @@ import { decodeBytes, encodeBytes, type BlobStore } from './relay.ts';
 import { tokenHash } from './oauth-store.ts';
 
 export interface SealedAuthority { binding(deviceId:string):Promise<DeviceBinding>; reserve(expected:DeviceBinding,groupId:string):Promise<DeviceBinding> }
-interface Group { id:string; task?:TaskAudience; owner?:string; roundId?:string; epoch:number; sequence:number; bytes:number; messages:number; devices:DeviceBinding[]; pendingDevices?:string[]; usedDevices?:string[]; checkpoints:Record<string,number>; createdAt:number }
+interface Group { id:string; task?:TaskAudience; owner?:string; roundId?:string; epoch:number; sequence:number; bytes:number; messages:number; handshakeBytes?:number; handshakeMessages?:number; devices:DeviceBinding[]; pendingDevices?:string[]; usedDevices?:string[]; checkpoints:Record<string,number>; createdAt:number }
 interface Reference { context:ContentContext; blob:string; hash:string; size:number; sequence:number; attachment?:string }
 interface RecordState { id:string; taskId?:string; type:string; parentId:string; owner:string; revision:number; createdAt:number; updatedAt:number; refs:Reference[]; rule?:Snapshot; visibility?:'members'|'private'; projectId?:string; target?:Record<string,string>; replyTo?:string; deleted?:boolean; hidden?:boolean; locked?:boolean; source?:{itemId:string;version:number}; previousRoundId?:string; relatedItemIds?:string[]; guidanceItemId?:string; documentItemId?:string }
 interface Index { revision:number; ids:string[]; groups:string[]; pending:string[];uploadBytes?:number }
-interface Ticket { prepared:PreparedContent; actor:string; personId:string; action:string; indexRevision:number; records:RecordState[]; uploads?:Record<string,{blob:string;hash:string;size:number}>; hash?:string; cancelled?:boolean; result?:ToolData }
+interface Ticket { prepared:PreparedContent; actor:string; personId:string; action:string; indexRevision:number; records:RecordState[]; uploads?:Record<string,{blob:string;hash:string;size:number;deviceId:string}>; hash?:string; cancelled?:boolean; result?:ToolData }
 interface Message {sequence:number;epoch:number;kind:'bootstrap'|'add'|'remove'|'update'|'application'|'history';deviceId:string;data?:string;blob?:string;size:number;target?:DeviceBinding;context?:ContentContext;hash?:string}
 export interface SealedEnvironment { state:JourneyState; offers?:OfferPort; runnable(agentId:string):Promise<boolean>; changeTask(command:Extract<Command,{tool:'task_create'|'task_step'}>,taskId?:string):Promise<void>; actor:Actor; slot:number; person:number; can(cap:Capability):boolean; livePerson(id:string):number; eligible(binding:DeviceBinding):boolean; now:number; storage:KeyValueStorage; blobs:BlobStore; authority:SealedAuthority; deviceIds:Set<string> }
 const key=(...parts:(string|number)[])=>JSON.stringify(['sealed-v1',...parts]);
@@ -48,7 +48,27 @@ async function authorizedTarget(e:SealedEnvironment,g:Group,deviceId:string):Pro
   check(e.eligible(target)&&(!g.owner||target.personId===g.owner)&&(!g.task||await taskDevice(g.task,target,e.offers)),'Target is not entitled to audience');
   e.deviceIds.add(target.deviceId);return target;
 }
-async function append(e:SealedEnvironment,g:Group,message:Omit<Message,'sequence'>){check(g.messages<SEALED_LIMITS.messages&&g.bytes+message.size<=SEALED_LIMITS.bytes,'Sealed group retention budget exhausted');const sequence=++g.sequence;g.messages++;g.bytes+=message.size;await save(e.storage,key('message',g.id,sequence),{...message,sequence});await save(e.storage,key('group',g.id),g);return sequence;}
+async function append(e:SealedEnvironment,g:Group,message:Omit<Message,'sequence'>){
+  const handshake=!['application','history'].includes(message.kind),kind=handshake?'handshake':'content';
+  const quotaKey=key('quota',g.id,message.deviceId,kind);
+  const used=await load<{bytes:number;messages:number}>(e.storage,quotaKey)??{bytes:0,messages:0};
+  check(used.bytes+message.size<=(handshake?4:16)*1024*1024&&used.messages<(handshake?128:2048),'Sealed device retention quota exhausted');
+  if(handshake){check((g.handshakeMessages??0)<4096&&(g.handshakeBytes??0)+message.size<=32*1024*1024,'Sealed handshake retention budget exhausted');g.handshakeMessages=(g.handshakeMessages??0)+1;g.handshakeBytes=(g.handshakeBytes??0)+message.size;}
+  else {check(g.messages<SEALED_LIMITS.messages&&g.bytes+message.size<=SEALED_LIMITS.bytes,'Sealed group retention budget exhausted');g.messages++;g.bytes+=message.size;}
+  await save(e.storage,quotaKey,{bytes:used.bytes+message.size,messages:used.messages+1});
+  const sequence=++g.sequence;await save(e.storage,key('message',g.id,sequence),{...message,sequence});await save(e.storage,key('group',g.id),g);return sequence;
+}
+async function refundUploads(e:SealedEnvironment,index:Index,t:Ticket){
+  if(t.result)return;
+  for(const upload of Object.values(t.uploads??{})){
+    index.uploadBytes=Math.max(0,(index.uploadBytes??0)-upload.size);
+    const k=key('upload-quota',upload.deviceId),used=await load<number>(e.storage,k)??0;
+    await save(e.storage,k,Math.max(0,used-upload.size));await e.blobs.delete(upload.blob);
+  }
+  t.uploads={};t.cancelled=true;t.prepared.expiresAt=0;
+  index.pending=index.pending.filter(id=>id!==t.prepared.ticketId);
+  await save(e.storage,key('ticket',t.prepared.ticketId),t);
+}
 async function appendCiphertext(e:SealedEnvironment,g:Group,message:Omit<Message,'sequence'|'size'|'data'|'blob'>,bytes:Uint8Array){
   const blob=`sealed_message_${crypto.randomUUID()}`;await e.blobs.put(blob,bytes);
   return append(e,g,{...message,blob,size:bytes.length});
@@ -106,6 +126,7 @@ async function plan(e:SealedEnvironment,index:Index,action:string,input:Record<s
 export async function sealedContent(e:SealedEnvironment,tool:string,supplied:unknown):Promise<ToolData>{
   const schema=sealedInputs[tool];check(schema,'Unknown sealed operation');const input=schema!.parse(supplied) as Record<string,unknown>;
   const index=await load<Index>(e.storage,key('index'))??{revision:0,ids:[],groups:[],pending:[]};
+  for(const id of [...index.pending]){const t=await load<Ticket>(e.storage,key('ticket',id));if(t&&!t.result&&t.prepared.expiresAt<=e.now)await refundUploads(e,index,t);}
   await addGroup(e,index,e.state.id);await save(e.storage,key('index'),index);
   if(tool==='task_prepare'){
     requireDevice(e);cap(e,'task.manage');const taskId=`task_${e.state.id.slice(8)}_${crypto.randomUUID()}`,groupId=`taskgroup_${taskId}`;
@@ -126,15 +147,19 @@ export async function sealedContent(e:SealedEnvironment,tool:string,supplied:unk
     check(t&&t.actor===actorId(e)&&t.personId===personId(e)&&!t.result&&t.prepared.expiresAt>e.now,'Live author upload ticket required');
     const slot=String(input.slot);check(t!.prepared.slots.some(s=>s.key===slot),'Unknown upload slot');
     const bytes=decodeBytes(String(input.data),SEALED_LIMITS.blob),hash=await tokenHash(encodeBytes(bytes));
+    const binding=await e.authority.binding(String(input.deviceId)),audience=await group(e,index,t!.prepared.slots.find(s=>s.key===slot)!.context.groupId);
+    check(binding.personId===personId(e)&&binding.agentId===e.actor.agent?.id&&e.eligible(binding)&&audience.devices.some(d=>d.deviceId===binding.deviceId),'Authenticated upload device required');
     const prior=t!.uploads?.[slot];if(prior){check(prior.hash===hash,'Upload slot already bound to different ciphertext');return prior;}
+    e.deviceIds.add(binding.deviceId);const quotaKey=key('upload-quota',binding.deviceId),used=await load<number>(e.storage,quotaKey)??0;
+    check(used+bytes.length<=16*1024*1024,'Sealed device upload quota exhausted');await save(e.storage,quotaKey,used+bytes.length);
     check(Object.values(t!.uploads??{}).reduce((n,u)=>n+u.size,bytes.length)<=SEALED_LIMITS.blob,'Ticket upload budget exhausted');
     check((index.uploadBytes??0)+bytes.length<=SEALED_LIMITS.bytes,'Retained upload budget exhausted');index.uploadBytes=(index.uploadBytes??0)+bytes.length;await save(e.storage,key('index'),index);
-    const upload={blob:`blob_${crypto.randomUUID()}`,hash,size:bytes.length};await e.blobs.put(upload.blob,bytes);
+    const upload={blob:`blob_${crypto.randomUUID()}`,hash,size:bytes.length,deviceId:binding.deviceId};await e.blobs.put(upload.blob,bytes);
     t!.uploads??={};t!.uploads[slot]=upload;await save(e.storage,key('ticket',t!.prepared.ticketId),t);return upload;
   }
   if(tool==='content_status'||tool==='content_abandon'||sealedAction.safeParse(tool).success){
     const t=await load<Ticket>(e.storage,key('ticket',String(input.ticketId)));check(t&&t.actor===actorId(e)&&t.personId===personId(e),'Unknown content ticket');requireDevice(e);if(tool==='content_status')return t!.result?{state:'committed',hash:t!.hash,result:t!.result}:{state:'uncommitted',expiresAt:t!.prepared.expiresAt};
-    if(tool==='content_abandon'){check(!t!.result,'Committed content cannot be abandoned');t!.cancelled=true;t!.prepared.expiresAt=0;index.pending=index.pending.filter(id=>id!==t!.prepared.ticketId);await save(e.storage,key('ticket',t!.prepared.ticketId),t);await save(e.storage,key('index'),index);return {state:'cancelled'};}
+    if(tool==='content_abandon'){check(!t!.result,'Committed content cannot be abandoned');await refundUploads(e,index,t!);t!.cancelled=true;t!.prepared.expiresAt=0;index.pending=index.pending.filter(id=>id!==t!.prepared.ticketId);await save(e.storage,key('ticket',t!.prepared.ticketId),t);await save(e.storage,key('index'),index);return {state:'cancelled'};}
     check(t!.action===tool,'Ticket action mismatch');const hash=await tokenHash(JSON.stringify(input.envelopes));if(t!.result){check(t!.hash===hash,'Committed operation hash conflict');return t!.result;}
     check(!t!.cancelled&&t!.prepared.expiresAt>e.now,'Content ticket expired');check(t!.indexRevision===index.revision,'Content revision changed; prepare again');
     // Re-run live capability/ownership/lifecycle checks without publishing the freshly allocated plan.

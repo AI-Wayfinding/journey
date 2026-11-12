@@ -8,8 +8,8 @@ import {WayfindingProxy} from '../src/proxy.ts';
 import {parseCommand} from '../../mcp/src/commands.ts';
 import * as z from 'zod';
 
-async function fixture(t:TestContext){
- const backend=new MemoryBackend({async get(s){return {name:s,email:`${s}@example.test`};}},Date.now,testPasskeys,true),signer=await keyPair('sealed');
+async function fixture(t:TestContext,now:()=>number=Date.now){
+ const backend=new MemoryBackend({async get(s){return {name:s,email:`${s}@example.test`};}},now,testPasskeys,true),signer=await keyPair('sealed');
  const connect=async(subject:string)=>{const remote=new Client({name:'sealed-test',version:'1'});await remote.connect(new StreamableHTTPClientTransport(RESOURCE,{fetch:bridge(app(signer,backend)),requestInit:{headers:{authorization:`Bearer ${await token(signer,{sub:subject})}`}}}));t.after(()=>remote.close());const files=new Map<string,string>(),store={async read(k:string){return files.get(k)},async write(k:string,v:string){files.set(k,v)}};return {client:await SealedClient.open(remote,store,z.object({personId:z.string()}).parse((await remote.callTool({name:'account_read',arguments:{}})).structuredContent).personId),remote,files,store};};
  return {backend,connect,a:await connect('alice')};
 }
@@ -359,4 +359,54 @@ test('sealed direct clients do not advertise incompatible App tools but retain f
   assert.ok(!tools.some(tool=>tool.name===name),name);
   await assert.rejects(a.remote.callTool({name,arguments:{}}),/Unknown tool|not found/i);
  }
+});
+
+
+test('sealed handshakes have a separate budget and a per-device quota',async t=>{
+ const {a,backend}=await fixture(t),journeyId=String((await a.client.call('journey_create',{name:'Budget',policy:'open',defaultRole:'write'})).journeyId);
+ const store=backend.journeyStores.get(journeyId)!,key=JSON.stringify(['sealed-v1','group',journeyId]);
+ const original=JSON.parse(String(await store.get(key))),deviceId=original.devices[0].deviceId;
+ const data=Buffer.alloc(1024*1024).toString('base64');let refused=false;
+ for(let i=0;i<8;i++){
+  const view=await backend.sealedExecute('alice','sealed_group',{journeyId,groupId:journeyId});
+  try{await backend.sealedExecute('alice','sealed_group_commit',{journeyId,groupId:journeyId,deviceId,expectedSequence:view.sequence,expectedEpoch:view.epoch,action:'update',data});}
+  catch(error){assert.match(String(error),/device.*quota/i);refused=true;break;}
+ }
+ const after=JSON.parse(String(await store.get(key)));
+ assert.equal(after.bytes,original.bytes,'Handshake bytes never consume application content budget');assert.ok(refused,'One device cannot fill the whole retained handshake log');
+});
+
+test('sealed abandoned uploads refund their journey reservation and delete unreferenced bytes',async t=>{
+ const {a,backend}=await fixture(t),journeyId=String((await a.client.call('journey_create',{name:'Uploads',policy:'open',defaultRole:'write'})).journeyId);
+ const state=JSON.parse(a.files.get('sealed-state')!),deviceId=state.groups[journeyId].deviceId;
+ const prepared=await backend.sealedExecute('alice','content_prepare',{journeyId,action:'library_add',routing:{visibility:'members'}});
+ const upload=await backend.sealedExecute('alice','sealed_blob_put',{journeyId,ticketId:prepared.ticketId,slot:'content',deviceId,data:'eA=='});
+ await backend.sealedExecute('alice','content_abandon',{journeyId,ticketId:prepared.ticketId});
+ const index=JSON.parse(String(await backend.journeyStores.get(journeyId)!.get(JSON.stringify(['sealed-v1','index']))));
+ assert.equal(index.uploadBytes,0);assert.equal(backend.blobs.data.has(String(upload.blob)),false);
+ await backend.sealedExecute('alice','content_abandon',{journeyId,ticketId:prepared.ticketId});
+ assert.equal(JSON.parse(String(await backend.journeyStores.get(journeyId)!.get(JSON.stringify(['sealed-v1','index'])))).uploadBytes,0);
+});
+
+
+test('sealed expired uploads refund on the next request and retries do not double charge',async t=>{
+ let now=Date.now();const {a,backend}=await fixture(t,()=>now),journeyId=String((await a.client.call('journey_create',{name:'Expiry',policy:'open',defaultRole:'write'})).journeyId);
+ const deviceId=JSON.parse(a.files.get('sealed-state')!).groups[journeyId].deviceId;
+ const prepared=await backend.sealedExecute('alice','content_prepare',{journeyId,action:'library_add',routing:{visibility:'members'}});
+ const args={journeyId,ticketId:prepared.ticketId,slot:'content',deviceId,data:'eA=='};
+ const upload=await backend.sealedExecute('alice','sealed_blob_put',args);assert.deepEqual(await backend.sealedExecute('alice','sealed_blob_put',args),upload);
+ const storage=backend.journeyStores.get(journeyId)!,quota=JSON.stringify(['sealed-v1','upload-quota',deviceId]);assert.equal(JSON.parse(String(await storage.get(quota))),1);
+ now+=600001;await backend.sealedExecute('alice','sealed_catalog',{journeyId});
+ assert.equal(JSON.parse(String(await storage.get(quota))),0);assert.equal(backend.blobs.data.has(String(upload.blob)),false);
+ await assert.rejects(backend.sealedExecute('alice','sealed_blob_put',args),/ticket required/);
+});
+
+test('sealed per-device upload quotas cannot be charged to another member',async t=>{
+ const {a,backend,connect}=await fixture(t),journeyId=String((await a.client.call('journey_create',{name:'Quota',policy:'open',defaultRole:'write'})).journeyId);
+ const b=await connect('bob');await b.client.call('journey_join',{journeyId});const device=await b.client.prepareGroup(journeyId);await a.client.sync(journeyId);
+ const prepared=await backend.sealedExecute('alice','content_prepare',{journeyId,action:'library_add',routing:{visibility:'members'}});
+ await assert.rejects(backend.sealedExecute('alice','sealed_blob_put',{journeyId,ticketId:prepared.ticketId,slot:'content',deviceId:device.deviceId,data:'eA=='}),/Authenticated upload device/);
+ const own=JSON.parse(a.files.get('sealed-state')!).groups[journeyId].deviceId,storage=backend.journeyStores.get(journeyId)!;
+ await storage.put(JSON.stringify(['sealed-v1','upload-quota',own]),JSON.stringify(16*1024*1024));
+ await assert.rejects(backend.sealedExecute('alice','sealed_blob_put',{journeyId,ticketId:prepared.ticketId,slot:'content',deviceId:own,data:'eA=='}),/device upload quota/);
 });

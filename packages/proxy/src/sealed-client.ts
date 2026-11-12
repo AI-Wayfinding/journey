@@ -123,7 +123,7 @@ export class SealedClient {
  private async pack(journeyId:string,ticketId:string,slot:string,context:ContentContext,payload:Payload):Promise<Payload>{
   const plaintext=json(payload);if(plaintext.length<=65536)return payload;
   const key=contentKey(),data=await encrypt(plaintext,key,context.groupId,context.recordId,context.revision);
-  const upload=z.object({blob:id,hash:id,size:nat}).parse(await this.callRemote('sealed_blob_put',{journeyId,ticketId,slot,data}));
+  const upload=z.object({blob:id,hash:id,size:nat}).parse(await this.callRemote('sealed_blob_put',{journeyId,ticketId,slot,deviceId:this.group(context.groupId).saved.deviceId,data}));
   if(await this.hash(data)!==upload.hash||decode(data).length!==upload.size)throw new Error('Uploaded ciphertext receipt mismatch');
   return {blob:{...upload,key:encode(key),groupId:context.groupId,recordId:context.recordId,revision:context.revision}};
  }

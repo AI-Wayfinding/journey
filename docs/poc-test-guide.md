@@ -22,7 +22,7 @@ This stage is not live verification of the public endpoint. Run its tests locall
 
 ### Bounds and recovery
 
-A group retains at most 4,096 messages and 32 MiB of ciphertext, without silent eviction. Envelopes are at most 1 MiB, device packages 64 KiB, local payloads 9 MiB and encrypted uploads 10 MiB. Listings are paged at 100 records and 4 MiB. A journey allows 1,024 content records, 128 groups and 128 active preparation tickets; each group allows 128 devices. A separate 32 MiB journey upload budget counts even expired, uncollected ciphertext. Exhausted budgets refuse writes; this stage performs no deletion or cleanup.
+A group retains at most 4,096 application messages and 32 MiB of content ciphertext, without silent eviction. Handshakes have a separate 4,096-message/32 MiB budget. Per device and group, the limits are 128 handshakes/4 MiB and 2,048 application messages/16 MiB. Envelopes are at most 1 MiB, device packages 64 KiB, local payloads 9 MiB and encrypted uploads 10 MiB. Listings are paged at 100 records and 4 MiB. A journey allows 1,024 content records, 128 groups and 128 active preparation tickets; each group allows 128 devices. Retained uploads have a separate 32 MiB journey limit and 16 MiB per-device limit. Abandoning or expiring an uncommitted ticket refunds both upload reservations and deletes its unreferenced bytes on the next request. Exhausted budgets refuse writes.
 
 Preparation tickets and pending uploads expire after ten minutes. Device checkpoints expire after thirty days without a successful fetch. Large-body uploads become readable only through a committed, entitled record/version reference. Item metadata edits also advance the content revision.
 
