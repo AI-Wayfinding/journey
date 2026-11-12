@@ -3,7 +3,7 @@ import { sealedDescriptor, sealedOfferDefinition } from './sealed-descriptors.ts
 import { admissionSchema, journeySettingsSchema } from './offers.ts';
 import { decodeBytes } from './relay.ts';
 import { Refused } from './errors.ts';
-import {connectionClaimSchema,connectionCertificateSchema,deviceRegistrationSchema} from '../../shared/account-identity.ts';
+import {connectionClaimSchema,connectionCertificateSchema,deviceRegistrationSchema,identityEventSchema} from '../../shared/account-identity.ts';
 
 export const SEALED_FORMAT = 'application/vnd.wayfinding.sealed+json;v=1' as const;
 export const SEALED_NOTICE = 'sealed — open in your client';
@@ -81,7 +81,7 @@ export const sealedInputs: Record<string,z.ZodObject> = {
   sealed_group:z.object({...ctx,groupId:sid,deviceId:sid.optional()}).strict(),
   sealed_group_commit:z.object({...ctx,groupId:sid,deviceId:sid,expectedSequence:snat,expectedEpoch:snat,action:z.enum(['bootstrap','add','remove','update']),targetDeviceId:sid.optional(),data:z.string().min(4).max(4*Math.ceil(SEALED_LIMITS.envelope/3))}).strict(),
   sealed_group_fetch:z.object({...ctx,groupId:sid,deviceId:sid,since:snat.default(0),limit:snat.min(1).max(100).default(100)}).strict(),
-  sealed_connection_request:z.object({claim:connectionClaimSchema,proof:z.string().length(88),certificate:connectionCertificateSchema.optional()}).strict(),
+  sealed_connection_request:z.object({claim:connectionClaimSchema,proof:z.string().length(88),certificate:connectionCertificateSchema.optional(),event:identityEventSchema.optional()}).strict(),
   sealed_device_register:deviceRegistrationSchema,
   sealed_device_binding:z.object({deviceId:sid}).strict(),
   sealed_package_reserve:z.object({...ctx,groupId:sid,deviceId:sid}).strict(),

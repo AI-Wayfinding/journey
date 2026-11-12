@@ -27,6 +27,7 @@ export async function accountSecurity(account: Account, _accounts: Account[], st
    account.bindings=bindingRule.step(account.bindings,{op:2,client:0,agent:i+2,personAsserted:0,agentIsOwnLive:0,personLive:1,boundAgentLive:0});
   }
   for(const [i] of account.identities.entries())if(cell(account.group,'Members',i+2)!==0)account.group=personalGroupRule(1).step(account.group,{op:1,subject:i+2,kind:0,belongsTo:1});
+  for(const connection of account.connections??[])if(!connection.revokedAt){connection.revokedAt=now;const key=account.accountKey;if(key)(account.identityEvents??=[]).push({personId:account.personId,generation:key.identity.generation,accountPublicKey:key.identity.publicKey,action:'connection-removed',connectionId:connection.claim.connectionId,at:now});}
   account.browsers=[];account.passkeys=[];account.assertions=[];account.onboarding={complete:false};
   delete account.descriptor; // No surviving keys: a fresh P workspace, never a ratchet rollback.
   account.recovery={generation:(account.recovery?.generation??0)+1,startedAt:now,readyAt:now+259200000};

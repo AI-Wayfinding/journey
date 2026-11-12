@@ -21,6 +21,8 @@ import { recordOperation, consoleRecord, passkeyOperation, type RecordOperation,
 import { managePasskey } from './console/passkeys.ts';
 import { browserEnrollment, type BrowserRegistration } from './console/browser-enrollment.ts';
 import { accountSecurity, onboardingComplete } from './console/account-security.ts';
+import {manageIdentity,connectionRequest,requireConnection,appendIdentityEvent} from './account-identity.ts';
+import {deviceRegistrationSchema,connectionClaimSchema,connectionCertificateSchema,identityEventSchema,verifyDeviceBinding,safetyNumber,type AccountKeyRecord,type ConnectionClaim,type ConnectionCertificate,type IdentityEvent} from '../../shared/account-identity.ts';
 export interface Profile { name: string; email: string }
 export interface Profiles { get(subject: string): Promise<Profile> }
 export class UpstreamUserDeleted extends Refused { constructor() { super('Upstream account removed'); } }
@@ -33,6 +35,9 @@ function tombstone(account: Account): void {
   account.assertions = [];
 }
 export interface Account extends Profile, AgentAccount {
+  accountKey?: AccountKeyRecord;
+  connections?: {claim:ConnectionClaim;certificate?:ConnectionCertificate;createdAt:number;revokedAt?:number}[];
+  identityEvents?: IdentityEvent[];
   suspended?: boolean;
   browsers?: { id: string; credentialId: string; devices: string[]; createdAt?: number; lastUsedAt?: number }[];
   onboarding?: { complete: boolean };
@@ -304,7 +309,18 @@ export class AccountsHost {
   private async emailIndex(state:AccountsState,email:string):Promise<string>{
     state.emailKey??=encodeBytes(crypto.getRandomValues(new Uint8Array(32)));const key=await crypto.subtle.importKey('raw',decodeBytes(state.emailKey,32),{name:'HMAC',hash:'SHA-256'},false,['sign']);return encodeBytes(new Uint8Array(await crypto.subtle.sign('HMAC',key,new TextEncoder().encode(email.trim().toLowerCase()))));
   }
-  publishedDescriptors(journeyId:string,ids:string[]):Promise<ToolData>{return this.serial.run(async()=>{const state=await this.load(),descriptors:Record<string,import('./sealed-descriptors.ts').DefinitionRef>={};for(const a of state.accounts.filter(a=>a.live)){if(ids.includes(a.personId)&&a.descriptor?.publications[journeyId])descriptors[a.personId]=a.descriptor.publications[journeyId]!;for(const agent of a.agents.filter(g=>g.live))if(ids.includes(agent.id)&&agent.descriptor?.publications[journeyId])descriptors[agent.id]=agent.descriptor.publications[journeyId]!;}return {descriptors};});}
+  publishedDescriptors(journeyId:string,ids:string[]):Promise<ToolData>{return this.serial.run(async()=>{
+    const state=await this.load(),descriptors:Record<string,import('./sealed-descriptors.ts').DefinitionRef>={},identities:Record<string,{publicKey:string;generation:number;safetyNumber:string}>={};
+    const key=`identity-log:${journeyId}`,stored=await this.storage.get(key),log=z.array(identityEventSchema).parse(typeof stored==='string'?JSON.parse(stored):[]),seen=new Set(log.map(e=>JSON.stringify(e)));
+    for(const a of state.accounts.filter(a=>a.live)){
+      const members=[a.personId,...a.agents.map(g=>g.id)];if(!members.some(id=>ids.includes(id)))continue;
+      if(a.accountKey)identities[a.personId]={...a.accountKey.identity,safetyNumber:await safetyNumber(a.accountKey.identity.publicKey)};
+      for(const event of a.identityEvents??[]){const serialized=JSON.stringify(event);if(!seen.has(serialized)){log.push(event);seen.add(serialized);}}
+      if(ids.includes(a.personId)&&a.descriptor?.publications[journeyId])descriptors[a.personId]=a.descriptor.publications[journeyId]!;
+      for(const agent of a.agents.filter(g=>g.live))if(ids.includes(agent.id)&&agent.descriptor?.publications[journeyId])descriptors[agent.id]=agent.descriptor.publications[journeyId]!;
+    }
+    if(log.length>16384)throw new Refused('Journey identity log capacity reached');await this.storage.put(key,JSON.stringify(log));return {descriptors,identities,identityLog:log};
+  });}
   setDescriptor(personId:string,clientId:string,agentId:string|undefined,supplied:SealedDescriptor):Promise<ToolData>{return this.serial.run(async()=>{
     if(!this.sealedMode)throw new Refused('Sealed generation required');const state=await this.load(),account=state.accounts.find(a=>a.personId===personId&&a.live);if(!account)throw new Refused('Live account required');const actor=this.resolve(account,clientId);if(!allows(actor,'read',true)||!allows(actor,'device.keys',true))throw new Refused('Sealed descriptors need read + device.keys; ask the owner to grant both explicitly');
     const agent=agentId?account.agents.find(a=>a.id===agentId&&a.live):undefined;if(agentId&&(!agent||actor.agent&&actor.agent.id!==agentId))throw new Refused('Only owned live agent descriptor');if(!agentId)requireAccountCapability(actor,'account.nickname');const target=agent??account,value=sealedDescriptor.parse(supplied);if(value.contentRevision!==(target.descriptor?.contentRevision??0)+1)throw new Refused('Descriptor revision changed');target.descriptor=value;await this.save(state);return {descriptor:value};
@@ -346,7 +362,7 @@ export class AccountsHost {
   private async sealedBinding(state:AccountsState,deviceId:string):Promise<DeviceBinding>{
     const raw=await this.storage.get(`sealed:device:${deviceId}`);if(typeof raw!=='string')throw new Refused('Unknown authenticated device');
     const b=parseDevice(raw),account=state.accounts.find(a=>a.personId===b.personId&&a.live);if(!account)throw new Refused('Device owner is not live');
-    this.requireIdentity(account,b.deviceId);const agent=b.agentId?account.agents.find(a=>a.id===b.agentId&&a.live):undefined;
+    await verifyDeviceBinding(b);if(!b.credential)throw new Refused("Unsigned connection refused");await requireConnection(account,b.credential);this.requireIdentity(account,b.deviceId);const agent=b.agentId?account.agents.find(a=>a.id===b.agentId&&a.live):undefined;
     if(b.agentId&&(!agent||!cardCaps(agent.card).includes('read')||!cardCaps(agent.card).includes('device.keys')))throw new Refused('Device needs explicit read + device.keys');
     return b;
   }
@@ -359,21 +375,23 @@ export class AccountsHost {
     if(old!==undefined&&old!==groupId)throw new Refused('Key package already reserved for another audience');await this.storage.put(key,groupId);return b;
   });}
   private async registerDevice(account:Account,actor:Actor,input:BrowserRegistration):Promise<DeviceBinding>{
-    const {deviceId,verificationKey,data}=input;
+    const {deviceId,verificationKey,data,credential,packageSignature}=deviceRegistrationSchema.parse(input);
+    await verifyDeviceBinding({...input,personId:account.personId,agentId:actor.agent?.id});await requireConnection(account,credential);
     if(await this.storage.get(`sealed:device:${deviceId}`)!==undefined)throw new Refused('Device id already bound');
     decodeBytes(data,64*1024);if(decodeBytes(verificationKey,64).length!==32)throw new Refused('Ed25519 verification key required');
     const slot=account.identities.length+2;if(slot>=SLOTS)throw new Refused('Device capacity reached');
     account.group=personalGroupRule(1).step(account.group,{op:0,subject:slot,kind:actor.agent?3:2,belongsTo:1});
     account.identities.push({id:deviceId,name:deviceId,kind:actor.agent?'agent':'device'});
-    const binding:DeviceBinding={deviceId,personId:account.personId,agentId:actor.agent?.id,verificationKey,data,hash:await tokenHash(data),createdAt:this.now()};
+    const binding:DeviceBinding={deviceId,personId:account.personId,agentId:actor.agent?.id,verificationKey,data,credential,packageSignature,hash:await tokenHash(data),createdAt:this.now()};
     await this.storage.put(`sealed:device:${deviceId}`,JSON.stringify(binding));return binding;
   }
   sealedDevice(personId:string,clientId:string,tool:string,supplied:unknown):Promise<ToolData>{return this.serial.run(async()=>{
     const input=sealedInputs[tool]?.parse(supplied) as Record<string,unknown>|undefined;if(!input)throw new Refused('Unknown device operation');
     const state=await this.load(),account=state.accounts.find(a=>a.personId===personId);if(!account)throw new Refused('Unknown account');const actor=this.resolve(account,clientId);if(!allows(actor,'read',true)||!allows(actor,'device.keys',true))throw new Refused('Sealed content refused: needs read + device.keys; ask the owner to grant both explicitly');
     if(tool==='sealed_device_binding'){const raw=await this.storage.get(`sealed:device:${String(input.deviceId)}`);if(typeof raw!=='string')throw new Refused('Unknown authenticated device');return parseDevice(raw);}
+    if(tool==='sealed_connection_request'){const result=await connectionRequest(account,actor.agent?.id,connectionClaimSchema.parse(input.claim),String(input.proof),input.certificate?connectionCertificateSchema.parse(input.certificate):undefined,input.event?identityEventSchema.parse(input.event):undefined,this.now());await this.save(state);return result;}
     if(tool!=='sealed_device_register')throw new Refused('Unknown device operation');
-    return this.storage.transaction(async()=>{const binding=await this.registerDevice(account,actor,{deviceId:String(input.deviceId),verificationKey:String(input.verificationKey),data:String(input.data)});await this.save(state);return binding;});
+    return this.storage.transaction(async()=>{const binding=await this.registerDevice(account,actor,deviceRegistrationSchema.parse(input));await this.save(state);return binding;});
   });}
   issueWrite(supplied: WriteRequest): Promise<WritePermit> {
     return this.serial.run(async () => {
@@ -587,6 +605,7 @@ export class AccountsHost {
         const result=await browserEnrollment(account,this.storage,this.verifier,identity,operation,this.now(),input=>this.registerDevice(account,{personId:account.personId,clientId:identity.clientId},input));
         await this.save(state);return result;
       });
+      const identityResult=await this.storage.transaction(async()=>{const result=await manageIdentity(account,this.storage,operation,this.now());if(result)await this.save(state);return result;});if(identityResult)return identityResult;
       if(operation.op==='delete'&&(account.browsers??[]).some(b=>b.credentialId===operation.id&&b.devices.some(d=>{const i=account.identities.findIndex(x=>x.id===d);return i>=0&&cell(account.group,'Members',i+2)!==0;})))throw new Refused('Revoke browser devices before removing their wrapping passkey');
       const result = await managePasskey(account, state.accounts, this.storage, operation, this.now(),this.sealedMode);
       if (operation.op !== 'list') await this.save(state);

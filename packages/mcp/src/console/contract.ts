@@ -3,12 +3,17 @@ import type { OAuthTokenVerifier } from '@modelcontextprotocol/server';
 import type { CoordinationBackend, ToolData } from '../commands.ts';
 import type { CardChange, ClientIdentity } from '../agents.ts';
 import type { AuthenticationResponseJSON } from '@simplewebauthn/server';
+import {deviceRegistrationSchema,accountKeyRecordSchema,identityEventSchema,connectionCertificateSchema} from '../../../shared/account-identity.ts';
 
 export const registration = z.object({ id: z.string().min(1).max(2048), rawId: z.string().max(2048), type: z.literal('public-key'), clientExtensionResults: z.object({}).strip(),
   response: z.object({ clientDataJSON: z.string().max(8192), attestationObject: z.string().max(65536), transports: z.array(z.string()).max(10).optional() }).strip() }).strip();
-export const browserBinding = z.object({ deviceId: z.string().regex(/^device_[0-9a-f-]{36}$/), verificationKey: z.string().max(128), data: z.string().max(90000) }).strict();
+export const browserBinding = deviceRegistrationSchema;
 const browserFields = { browserId: z.string().uuid(), credentialId: z.string().min(1).max(2048), device: browserBinding };
 export const passkeyOperation = z.discriminatedUnion('op', [
+  z.object({op:z.literal('identity_read')}).strict(),
+  z.object({op:z.literal('identity_set'),record:accountKeyRecordSchema,event:identityEventSchema}).strict(),
+  z.object({op:z.literal('connection_approve'),certificate:connectionCertificateSchema,event:identityEventSchema}).strict(),
+  z.object({op:z.literal('connection_remove'),connectionId:z.string().min(1).max(200),event:identityEventSchema}).strict(),
   z.object({ op: z.literal('browser_list') }).strict(),
   z.object({ op: z.literal('browser_check'), browserId: z.string().uuid() }).strict(),
   z.object({ op: z.literal('browser_begin'), ...browserFields }).strict(),

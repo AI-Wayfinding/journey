@@ -95,7 +95,7 @@ export function createConsole(config: ConsoleConfig) {
       const setup = config.backend.sealedMode ? await config.backend.passkey({subject:session.subject,clientId:session.clientId},{op:'setup_status'}) : {complete:true};
       const waiting=typeof setup.readyAt==='number'&&setup.readyAt>now();
       const setupPaths=['/console/onboarding','/console/logout','/console/passkeys/options','/console/passkeys/register','/console/passkeys/addition-options','/console/setup/options','/console/setup/complete','/console/connections/register','/console/recovery/start'];
-      if(!setup.complete && !(setupPaths.includes(path)||(!waiting&&['/console/device/info','/console/device/enroll/options','/console/device/enroll/finish','/console/device/call'].includes(path)))) {
+      if(!setup.complete && !(setupPaths.includes(path)||(!waiting&&['/console/device/identity','/console/device/info','/console/device/enroll/options','/console/device/enroll/finish','/console/device/call'].includes(path)))) {
         if(request.method==='GET')return redirect('/console/onboarding');
         throw new Refused('Complete onboarding before using the console');
       }
