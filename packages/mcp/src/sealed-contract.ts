@@ -3,6 +3,7 @@ import { sealedDescriptor, sealedOfferDefinition } from './sealed-descriptors.ts
 import { admissionSchema, journeySettingsSchema } from './offers.ts';
 import { decodeBytes } from './relay.ts';
 import { Refused } from './errors.ts';
+import {connectionClaimSchema,connectionCertificateSchema,deviceRegistrationSchema} from '../../shared/account-identity.ts';
 
 export const SEALED_FORMAT = 'application/vnd.wayfinding.sealed+json;v=1' as const;
 export const SEALED_NOTICE = 'sealed — open in your client';
@@ -80,7 +81,8 @@ export const sealedInputs: Record<string,z.ZodObject> = {
   sealed_group:z.object({...ctx,groupId:sid,deviceId:sid.optional()}).strict(),
   sealed_group_commit:z.object({...ctx,groupId:sid,deviceId:sid,expectedSequence:snat,expectedEpoch:snat,action:z.enum(['bootstrap','add','remove','update']),targetDeviceId:sid.optional(),data:z.string().min(4).max(4*Math.ceil(SEALED_LIMITS.envelope/3))}).strict(),
   sealed_group_fetch:z.object({...ctx,groupId:sid,deviceId:sid,since:snat.default(0),limit:snat.min(1).max(100).default(100)}).strict(),
-  sealed_device_register:z.object({deviceId:sid,verificationKey:z.string().min(4).max(200),data:z.string().min(4).max(4*Math.ceil(SEALED_LIMITS.package/3))}).strict(),
+  sealed_connection_request:z.object({claim:connectionClaimSchema,proof:z.string().length(88),certificate:connectionCertificateSchema.optional()}).strict(),
+  sealed_device_register:deviceRegistrationSchema,
   sealed_device_binding:z.object({deviceId:sid}).strict(),
   sealed_package_reserve:z.object({...ctx,groupId:sid,deviceId:sid}).strict(),
   sealed_history_post:z.object({...ctx,groupId:sid,deviceId:sid,contexts:z.array(contentContext).min(1).max(100),envelope:sealedEnvelope}).strict(),
@@ -100,7 +102,7 @@ export const sealedInputs: Record<string,z.ZodObject> = {
   interview_read:z.object({...ctx,...round,personId:sid.optional()}).strict(),
   interview_assign:z.object({...ctx,...round,personId:sid,itemId:sid,version:snat.min(1)}).strict(),
 };
-export const bindingSchema=z.object({deviceId:sid,personId:sid,agentId:sid.optional(),verificationKey:z.string().max(200),data:z.string(),hash:sid,createdAt:snat}).strict();
+export const bindingSchema=z.object({deviceId:sid,personId:sid,agentId:sid.optional(),verificationKey:z.string().max(200),data:z.string(),hash:sid,createdAt:snat,credential:connectionCertificateSchema.optional(),packageSignature:z.string().optional()}).strict();
 export type DeviceBinding=z.infer<typeof bindingSchema>;
 export const contentSlot=z.object({key:sid,context:contentContext,source:contentContext.optional()}).strict();
 export const preparedContent=z.object({ticketId:sid,expiresAt:snat,slots:z.array(contentSlot).max(100),routing:sealedRoute}).strict();
