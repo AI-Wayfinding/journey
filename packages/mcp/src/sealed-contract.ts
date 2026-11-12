@@ -95,6 +95,7 @@ export const sealedInputs: Record<string,z.ZodObject> = {
   library_get:z.object({...ctx,...item,version:snat.min(1).optional()}).strict(),
   library_search:z.object({...ctx,projectId:sid.optional(),includeProjects:z.boolean().default(false),cursor:snat.default(0)}).strict(),
   library_delete:z.object({...ctx,...item}).strict(),
+  sealed_delete_check:z.object({...ctx,...item}).strict(),
   round_list:z.object({...ctx,cursor:snat.default(0)}).strict(),round_read:z.object({...ctx,...round,cursor:snat.default(0)}).strict(),
   interview_read:z.object({...ctx,...round,personId:sid.optional()}).strict(),
   interview_assign:z.object({...ctx,...round,personId:sid,itemId:sid,version:snat.min(1)}).strict(),

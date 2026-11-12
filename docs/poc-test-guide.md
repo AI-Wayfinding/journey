@@ -26,6 +26,10 @@ A group retains at most 4,096 application messages and 32 MiB of content ciphert
 
 Preparation tickets and pending uploads expire after ten minutes. Device checkpoints expire after thirty days without a successful fetch. Large-body uploads become readable only through a committed, entitled record/version reference. Item metadata edits also advance the content revision.
 
+Shared artifact writers may add content versions and edit metadata, but only the owner changes visibility. Check that metadata edits advance the ciphertext revision without consuming a content version. Topic authors may lock their topics; guides may moderate them; only post authors edit their posts. `packages/proxy/test/metadata.test.ts` runs these checks against both backends.
+
+A move must refuse predictable source-delete denial before creating a destination copy. After a copy succeeds, an unconfirmed delete returns a partial receipt with both artifact ids. Check `sourceState: unknown` even when the server accepted deletion but its reply was lost. Inspect both records before retrying; do not treat this as a completed move or retry it blindly.
+
 Before final publication, the proxy saves its advanced ratchets and exact pending ciphertext. After a lost reply, it checks the server receipt and either completes locally or retries that same ciphertext. A proved uncommitted, expired ticket can be abandoned without rolling a ratchet back. Unresolved handshake/history delivery fails closed; do not restore an old MLS snapshot.
 
 The current proxy requires the server to report `sealed-v1` before startup and each remote operation. It saves a local mode pin and refuses a missing mode, a downgrade or a legacy store without an explicit migration. The old relay tests use a test-only harness; there is no plaintext fallback in the shipped proxy.

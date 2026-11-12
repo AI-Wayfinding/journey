@@ -1,5 +1,5 @@
 import {McpServer,fromJsonSchema} from '@modelcontextprotocol/server';
-import {localError} from './errors.ts';
+import {localError,PartialMoveFailure} from './errors.ts';
 import * as z from 'zod';
 import {id} from './codec.ts';
 import type {WayfindingProxy} from './proxy.ts';
@@ -10,7 +10,7 @@ const transfer=z.object({sourceGroupId:id,artifactId:id,destinationGroupId:id}).
 export async function buildProxyServer(proxy:Omit<Pick<WayfindingProxy,keyof WayfindingProxy>,'coordinationTools'> & {coordinationTools():Promise<{name:string;description?:string;inputSchema:unknown}[]>}):Promise<McpServer>{
  const server=new McpServer({name:'wayfinding-local-proxy',version:'0.1.0'},{capabilities:{tools:{}},instructions:'Artifact content is encrypted locally. ts-mls 1.6.4 is unaudited; do not use real confidential data in this PoC.'});
  const result=(value:unknown)=>({content:[{type:'text' as const,text:JSON.stringify(value)}],structuredContent:{...(typeof value==='object'&&value!==null&&!Array.isArray(value)?value:{result:value})}});
- const safe=async(op:()=>Promise<unknown>)=>{try{return result(await op());}catch(e){return {isError:true,content:[{type:'text' as const,text:localError(e)}]};}};
+ const safe=async(op:()=>Promise<unknown>)=>{try{return result(await op());}catch(e){return {isError:true,content:[{type:'text' as const,text:localError(e)}],...(e instanceof PartialMoveFailure?{structuredContent:e.receipt}:{})};}};
  server.registerTool('artifact_create',{description:'Encrypt a new artifact locally.',inputSchema:create},i=>safe(()=>proxy.createArtifact(i)));
  server.registerTool('artifact_read',{description:'Fetch and decrypt the latest artifact.',inputSchema:artifact},i=>safe(()=>proxy.readArtifact(i.groupId,i.artifactId)));
  server.registerTool('artifact_list',{description:'List live artifacts without fetching content.',inputSchema:group},i=>safe(async()=>({artifacts:await proxy.listArtifacts(i.groupId)})));

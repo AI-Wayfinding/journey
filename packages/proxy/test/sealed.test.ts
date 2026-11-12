@@ -410,3 +410,23 @@ test('sealed per-device upload quotas cannot be charged to another member',async
  await storage.put(JSON.stringify(['sealed-v1','upload-quota',own]),JSON.stringify(16*1024*1024));
  await assert.rejects(backend.sealedExecute('alice','sealed_blob_put',{journeyId,ticketId:prepared.ticketId,slot:'content',deviceId:own,data:'eA=='}),/device upload quota/);
 });
+
+
+test('sealed move refuses non-owner deletion before creating any destination copy',async t=>{
+ const {a,connect}=await fixture(t),journeyId=String((await a.client.call('journey_create',{name:'Shared source',policy:'open',defaultRole:'write'})).journeyId),b=await connect('bob');
+ await b.client.call('journey_join',{journeyId});await b.client.prepareGroup(journeyId);await a.client.sync(journeyId);await b.client.sync(journeyId);
+ const itemId=recordId(await a.client.call('library_add',{journeyId,name:'Owned by Alice',text:'Body'}),'library'),destination=String((await b.client.call('journey_create',{name:'Bob destination',policy:'open',defaultRole:'write'})).journeyId),proxy=await WayfindingProxy.open(b.remote,b.store);
+ await assert.rejects(proxy.copyArtifact(journeyId,itemId,destination,true));assert.deepEqual(await proxy.listArtifacts(destination),[]);assert.equal((await proxy.readArtifact(journeyId,itemId)).content,'Body');
+ const copy=await proxy.copyArtifact(journeyId,itemId,destination,false);assert.equal((await proxy.readArtifact(destination,copy.artifactId)).content,'Body');
+});
+
+test('sealed move returns an explicit partial receipt when source deletion is unconfirmed',async t=>{
+ const {a}=await fixture(t),journeyId=String((await a.client.call('journey_create',{name:'Source',policy:'open',defaultRole:'write'})).journeyId),itemId=recordId(await a.client.call('library_add',{journeyId,name:'Original',text:'Body'}),'library'),destination=String((await a.client.call('journey_create',{name:'Destination',policy:'open',defaultRole:'write'})).journeyId);
+ let deleteAccepted=false;const remote:SealedRemote={listTools:()=>a.remote.listTools(),callTool:async r=>{if(r.name==='library_delete'){if(deleteAccepted)await a.remote.callTool(r);throw new Error('UNTRUSTED deletion transport detail');}return a.remote.callTool(r);}},proxy=await WayfindingProxy.open(remote,a.store);
+ const {buildProxyServer}=await import('../src/server.ts'),{InMemoryTransport}=await import('@modelcontextprotocol/sdk/inMemory.js'),server=await buildProxyServer(proxy),client=new Client({name:'partial-move',version:'1'}),[left,right]=InMemoryTransport.createLinkedPair();await Promise.all([server.connect(left),client.connect(right)]);t.after(()=>client.close());
+ const result=await client.callTool({name:'artifact_move',arguments:{sourceGroupId:journeyId,artifactId:itemId,destinationGroupId:destination}});assert.equal(result.isError,true);assert.doesNotMatch(JSON.stringify(result),/UNTRUSTED/);
+ const receipt=z.object({status:z.literal('partial'),sourceArtifactId:z.literal(itemId),destinationArtifactId:z.string(),sourceState:z.literal('unknown'),destinationState:z.literal('created')}).parse(result.structuredContent);
+ assert.equal((await proxy.readArtifact(destination,receipt.destinationArtifactId)).content,'Body');assert.equal((await proxy.listArtifacts(destination)).length,1);
+ deleteAccepted=true;const lostReply=await client.callTool({name:'artifact_move',arguments:{sourceGroupId:journeyId,artifactId:itemId,destinationGroupId:destination}});assert.equal(lostReply.isError,true);
+ const accepted=z.object({status:z.literal('partial'),sourceState:z.literal('unknown'),destinationArtifactId:z.string()}).parse(lostReply.structuredContent);assert.equal((await proxy.readArtifact(destination,accepted.destinationArtifactId)).content,'Body');await assert.rejects(proxy.readArtifact(journeyId,itemId));
+});

@@ -3,6 +3,7 @@ import {id,utf8} from './codec.ts';
 import type {LocalStore} from './store.ts';
 import {SealedClient,type SealedRemote} from './sealed-client.ts';
 import {sealedRemoteCall} from './mode.ts';
+import {PartialMoveFailure} from './errors.ts';
 
 export interface Artifact {artifactId:string;name:string;type:string;size:number;version:number;deleted:boolean}
 export interface CreateArtifact {groupId:string;name:string;type:string;content:string}
@@ -43,7 +44,8 @@ export class WayfindingProxy {
  private async deleteInner(_groupId:string,artifactId:string){await this.sealed.call('library_delete',{itemId:artifactId});}
  copyArtifact(sourceGroupId:string,artifactId:string,destinationGroupId:string,move=false):Promise<Artifact>{return this.serial(async()=>{
   if(sourceGroupId===destinationGroupId)throw new Error('Choose a different destination group');
+  if(move)await this.sealed.preflightDelete(artifactId);
   const source=await this.readInner(sourceGroupId,artifactId),copy=await this.createInner({groupId:destinationGroupId,name:source.name,type:source.type,content:source.content});
-  if(move)await this.deleteInner(sourceGroupId,artifactId);return copy;
+  if(move){try{await this.deleteInner(sourceGroupId,artifactId);}catch{throw new PartialMoveFailure(artifactId,copy.artifactId);}}return copy;
  });}
 }

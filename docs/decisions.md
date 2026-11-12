@@ -312,6 +312,12 @@ Dan's brief for v2 was to write the spec, build what seems best, and refine late
 - **What:** sealed artifacts, topics and posts use the generated item, topic and post models. Writers may add versions and update metadata on shared artifacts; only the owner changes visibility. Delete still needs owner or guide authority. Content versions stay separate from ciphertext revisions. Topic authors may lock their topics, guides may moderate, and only post authors edit posts. Old sealed records without rule state require an explicit migration; the server does not infer authority for them.
 - **Source:** `packages/mcp/src/sealed-metadata.ts`; the same behavioural tests run against legacy and sealed backends in `packages/proxy/test/metadata.test.ts`.
 
+### 43. Preflight move deletion and report partial completion
+
+- **Decided by:** CQ-03 remediation applies the existing move policy.
+- **What:** a move checks live source delete authority through the same generated item transition before creating the destination. Delete checks again at execution. If the copy exists but deletion is unconfirmed, the local tool returns an error with a partial receipt naming both artifacts, `destinationState: created` and `sourceState: unknown`. Inspect both records before retrying; a network failure cannot prove whether the source remains.
+- **Source:** `packages/proxy/src/proxy.ts`; non-owner destination-empty and lost-delete-reply tests in `packages/proxy/test/sealed.test.ts`.
+
 ## Open
 
 - **Remaining sealing work:** device trust hardening, independent security review, ts-mls audit and browser distribution assurance remain launch blockers. Forum, library, sensemaking, offers, tasks and identity descriptors use sealed-v1. The console now has an opt-in browser encryption device, with ids/placeholders while locked. Nothing in this change deploys, resets, migrates or erases old plaintext data.
