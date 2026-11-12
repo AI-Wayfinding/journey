@@ -2,6 +2,7 @@ import {McpServer,fromJsonSchema} from '@modelcontextprotocol/server';
 import {localError,PartialMoveFailure} from './errors.ts';
 import * as z from 'zod';
 import {id} from './codec.ts';
+import {publicKeySchema} from '../../shared/account-identity.ts';
 import type {WayfindingProxy} from './proxy.ts';
 const group=z.object({groupId:id}).strict();
 const artifact=z.object({groupId:id,artifactId:id}).strict();
@@ -22,6 +23,9 @@ export async function buildProxyServer(proxy:Omit<Pick<WayfindingProxy,keyof Way
  server.registerTool('mls_group_add',{description:'Add a live journey member or owned personal device; share entitled history.',inputSchema:group.extend({personId:id,deviceId:id}).strict()},i=>safe(async()=>{await proxy.addMember(i.groupId,i.personId,i.deviceId);return {added:true};}));
  server.registerTool('mls_group_remove',{description:'Remove only your own devices; member removal is a separate journey action.',inputSchema:group.extend({personId:id}).strict()},i=>safe(async()=>{await proxy.removeMember(i.groupId,i.personId);return {removed:true};}));
  server.registerTool('mls_group_sync',{description:'Process ordered MLS messages and re-share keys after admission.',inputSchema:group},i=>safe(async()=>{await proxy.sync(i.groupId);return {synchronized:true};}));
+
+ server.registerTool('account_safety_numbers',{description:'View journey member safety numbers and local trust status before synchronization. Compare changed numbers outside Wayfinding.',inputSchema:z.object({journeyId:id}).strict()},i=>safe(async()=>{const view=await proxy.call('journey_read',{journeyId:i.journeyId});return {journeyId:i.journeyId,identities:view.identities,identityLog:view.identityLog};}));
+ server.registerTool('account_trust_key',{description:'Trust an account key only after the user compares its safety number with that person outside Wayfinding. Never accept a changed number automatically.',inputSchema:z.object({personId:id,publicKey:publicKeySchema,expectedSafetyNumber:z.string().min(1).max(200)}).strict()},i=>safe(async()=>{await proxy.trustAccountKey(i.personId,i.publicKey,i.expectedSafetyNumber);return {trusted:true};}));
  for(const tool of await proxy.coordinationTools()){
   // The wire SDK types permit arbitrary JSON here; validate the schema shape at this boundary.
   const shape=z.object({type:z.literal('object'),properties:z.record(z.string(),z.record(z.string(),z.unknown())).optional(),required:z.array(z.string()).optional(),additionalProperties:z.boolean().optional()}).parse(tool.inputSchema);

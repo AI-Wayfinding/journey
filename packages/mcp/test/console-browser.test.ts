@@ -38,7 +38,7 @@ async function fixture(){
  const authorize=async(change:Parameters<typeof backend.beginAuthorization>[1])=>{const options=await backend.beginAuthorization(identity,change);return backend.completeAuthorization(identity,change,await key.assert(String(options.challenge),++counter));};
  const complete=async(browserId:string,recoveryProof:string,wrappingKey=key)=>{const fields={browserId,recoveryProof},options=await post('/console/setup/options',fields);await post('/console/setup/complete',{...fields,assertion:await wrappingKey.assert(String(options.challenge),++counter)});};
  const ready=async(a:Awaited<ReturnType<typeof device>>)=>{await a.client.enrollGroup(a.personal);await a.client.call('account_update',{name:'Synthetic browser'});await complete(a.browserId,'b'.repeat(43));};
- return {backend,target,send,post,requests,device,signingAccount,complete,ready,csrf,identity,key,authorize,advance:(ms:number)=>{now+=ms;},signIn};
+ return {get now(){return now},backend,target,send,post,requests,device,signingAccount,complete,ready,csrf,identity,key,authorize,advance:(ms:number)=>{now+=ms;},signIn};
 }
 test('console browser sealed writes never send plaintext; admission, local search and revocation fence',async()=>{
  const f=await fixture(),a=await f.device(),markers=['BROWSER-PROFILE-CANARY','BROWSER-CARD-CANARY','BROWSER-CLIENT-CANARY','BROWSER-POST-CANARY','BROWSER-LIBRARY-CANARY','BROWSER-OFFER-CANARY','BROWSER-NEW-CONTENT'];
@@ -81,12 +81,19 @@ test('console browser approve and decline reasons are sealed; tasks and rounds d
  const signer=await keyPair('browser-offering'),remote=new Client({name:'browser-offering',version:'1'});await remote.connect(new StreamableHTTPClientTransport(RESOURCE,{fetch:bridge(app(signer,f.backend)),requestInit:{headers:{authorization:`Bearer ${await token(signer,{sub:'alice',client_id:'browser-test-endpoint'})}`}}}));t.after(()=>remote.close());
  const files=new Map<string,string>(),account=await f.signingAccount(),trusted=trustedAccountRemote(remote,account),endpoint=await SealedClient.open(trusted,{async read(k){return files.get(k)},async write(k,v){files.set(k,v)}},a.client.personId,{endorse:async claim=>(await account.artifacts(claim)).certificate}),jd=await endpoint.prepareGroup(j);await a.client.addMember(j,endpoint.personId,jd.deviceId);
  const offerId=`offer-${crypto.randomUUID()}`;await a.client.call('offer_set',{agentId,offer:{id:offerId,name:'Review',description:'Synthetic',inputSchema:{type:'object'},admission:{rules:[],default:'hold'},journeySettings:{[j]:{enabled:true}}}});await a.client.call('offer_publish',{agentId,offerId});
+ // One recovered member in another journey must not hide decisions here.
+ const changedJourney=String((await a.client.call('journey_create',{name:'Needs comparison',policy:'open',defaultRole:'write'})).journeyId);
+ await f.backend.execute('alice',{tool:'agent_add',input:{journeyId:changedJourney,agentId}},clientId);
+ await installTestAccountIdentity(f.backend,'carol','test-console',f.now);await f.backend.execute('carol',{tool:'journey_join',input:{journeyId:changedJourney}},clientId);
+ await a.client.call('journey_read',{journeyId:changedJourney});
+ const b=await f.device();await b.client.enrollGroup(b.personal);await a.client.sync(a.personal);await b.client.sync(b.personal);await b.client.call('journey_read',{journeyId:changedJourney});
+ await f.backend.passkey({subject:'carol',clientId:'test-console',signedInAt:f.now},{op:'recovery_start'});f.advance(259200001);
+ await installTestAccountIdentity(f.backend,'carol','test-console',f.now);await f.signIn();
  const bob=await f.backend.execute('bob',{tool:'account_read',input:{}},clientId);
  await f.backend.execute('alice',{tool:'journey_invite',input:{journeyId:j,personId:String(bob.personId)}},clientId);
  await f.backend.execute('bob',{tool:'journey_join',input:{journeyId:j}},clientId);
- const b=await f.device();await b.client.enrollGroup(b.personal);await a.client.sync(a.personal);await b.client.sync(b.personal);
  for(const action of ['approve','decline'] as const){
-  const draft=await endpoint.call('task_create',{journeyId:j,agentId,offerId,name:'BROWSER-TASK-NAME-CANARY',input:{text:'BROWSER-TASK-INPUT-CANARY'},deadline:Date.now()+300000,maxRounds:2});
+  const draft=await endpoint.call('task_create',{journeyId:j,agentId,offerId,name:'BROWSER-TASK-NAME-CANARY',input:{text:'BROWSER-TASK-INPUT-CANARY'},deadline:f.now+300000,maxRounds:2});
   const taskId=String(draft.taskId),groupId=String(draft.groupId);
   assert.equal(draft.admission,'pending');
   const metadata=await f.backend.execute('alice',{tool:'journey_read',input:{journeyId:j}},clientId);
@@ -102,11 +109,11 @@ test('console browser approve and decline reasons are sealed; tasks and rounds d
   }finally{ui.restore();}
   await a.client.sync(j);
   await endpoint.sync(groupId);assert.equal((await b.client.enrollGroup(groupId)).admitted,true);
-  await endpoint.call('task_create',{journeyId:j,taskId,agentId,offerId,name:'BROWSER-TASK-NAME-CANARY',input:{text:'BROWSER-TASK-INPUT-CANARY'},deadline:Date.now()+300000,maxRounds:2});
+  await endpoint.call('task_create',{journeyId:j,taskId,agentId,offerId,name:'BROWSER-TASK-NAME-CANARY',input:{text:'BROWSER-TASK-INPUT-CANARY'},deadline:f.now+300000,maxRounds:2});
   const agentHtml=await (await f.send(`/console/agents/${agentId}`)).text();assert.doesNotMatch(agentHtml,/action="\/console\/offers\/decide"/);
   const decisionUi=workspaceDom(`/console/agents/${agentId}`);
   try {
-   await decisionUi.render(b.client);assert.match(decisionUi.work.textContent,/BROWSER-TASK-NAME-CANARY/);assert.match(decisionUi.work.textContent,/BROWSER-TASK-INPUT-CANARY/);
+   await decisionUi.render(b.client);assert.match(decisionUi.work.textContent,/safety number comparison required/);assert.match(decisionUi.work.textContent,/BROWSER-TASK-NAME-CANARY/);assert.match(decisionUi.work.textContent,/BROWSER-TASK-INPUT-CANARY/);
    decisionUi.input('Decision reason (optional)',`BROWSER-${action}-REASON-CANARY`);
    await decisionUi.click(action==='approve'?'Approve request':'Decline request');
   }finally{decisionUi.restore();}

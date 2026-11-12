@@ -51,3 +51,16 @@ test('packet verification refuses a valid signing binding for a different device
  const reopened=await SealedClient.open(a.remote,a.store,a.client.personId);
  await assert.rejects(reopened.call('library_get',{itemId}),/device.*mismatch/i);
 });
+
+for(const audience of ['journey','private'] as const)test(`automatic admission refuses a hidden or foreign pending identity (${audience})`,async t=>{
+ const {backend,connect,a,journeyId}=await fixture(t),b=await connect('bob');await b.client.call('journey_join',{journeyId});
+ const device=await b.client.prepareGroup(journeyId),binding=await backend.accountsHost.deviceBinding(device.deviceId);await verifyDeviceBinding(binding);
+ const personal=String((await backend.execute('alice',{tool:'account_read',input:{}})).personalGroupId);if(audience==='private')await a.client.enrollGroup(personal);
+ a.calls.length=0;a.setIntercept((name,_args,value)=>{
+  if(audience==='journey'&&name==='journey_read'){const identities={...(value.identities as Record<string,unknown>)};delete identities[b.client.personId];return {...value,identities};}
+  if(audience==='private'&&name==='sealed_group'&&String(value.groupId).startsWith('private_'))return {...value,pending:[binding]};
+  return value;
+ });
+ await assert.rejects(a.client.sync(audience==='journey'?journeyId:personal),{message:audience==='journey'?'Pending connection owner is not a displayed journey member':'Private audience admits only the owner’s current account key'});
+ assert.equal(a.calls.includes('sealed_package_reserve'),false);assert.equal(a.calls.includes('sealed_group_commit'),false);assert.equal(a.calls.includes('sealed_history_post'),false);
+});

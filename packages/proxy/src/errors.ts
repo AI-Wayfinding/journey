@@ -14,4 +14,5 @@ export class PartialMoveFailure extends Error {
  readonly receipt:{status:'partial';sourceArtifactId:string;destinationArtifactId:string;sourceState:'unknown';destinationState:'created'};
  constructor(sourceArtifactId:string,destinationArtifactId:string){super('Move incomplete; destination exists; source deletion is unconfirmed. Inspect both records before retrying.');this.receipt={status:'partial',sourceArtifactId,destinationArtifactId,sourceState:'unknown',destinationState:'created'};}
 }
-export function localError(error:unknown):string{return error instanceof PartialMoveFailure?error.message:error instanceof RemoteFailure?error.message:error instanceof z.ZodError?'Invalid local tool input':'Local operation failed; synchronize or reopen the device';}
+export class SafetyNumberChangedError extends Error {constructor(){super('Account safety number changed; use account_safety_numbers to view it, compare outside Wayfinding, then use account_trust_key with the compared number before synchronizing.');}}
+export function localError(error:unknown):string{return error instanceof SafetyNumberChangedError?error.message:error instanceof PartialMoveFailure?error.message:error instanceof RemoteFailure?error.message:error instanceof z.ZodError?'Invalid local tool input':'Local operation failed; synchronize or reopen the device';}

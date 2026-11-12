@@ -55,7 +55,8 @@ export async function manageIdentity(account:Account,storage:KeyValueStorage,ope
  }
  if(operation.op==='connection_approve'){
   const cert=await verifyConnection(operation.certificate),key=activeIdentity(account),connection=account.connections?.find(c=>c.claim.connectionId===cert.connectionId);
-  check(connection&&!connection.revokedAt&&connection.createdAt>now-600000,'Live pending connection required');
+  // Freshness limits request bursts, not an exact claim explicitly signed later.
+  check(connection&&!connection.revokedAt,'Live pending connection required');
   check(cert.accountPublicKey===key.identity.publicKey&&cert.generation===key.identity.generation&&JSON.stringify(connectionClaim(cert))===JSON.stringify(connection!.claim),'Exact pending connection required');
   await checkEvent(account,operation.event,'connection-added',cert.connectionId);
   if(!connection!.certificate){connection!.certificate=cert;appendIdentityEvent(account,operation.event);}return {certificate:cert};

@@ -55,6 +55,17 @@ export class BrowserStore implements LocalStore{
   });
   this.pending=commit.catch(()=>{});return commit;
  }
+ /** Discard only a never-enrolled request, while still holding its writer fence. */
+ async discardPending(){
+  const commit=this.pending.then(async()=>{
+   if(!this.key)throw new Error('Device locked');
+   let root:{certificate?:unknown};try{root=z.object({certificate:z.unknown().optional()}).parse(JSON.parse(this.values['connection-identity']??'null'));}catch{throw new Error('Invalid pending connection record; refusing discard');}
+   if(root.certificate||this.values['sealed-state'])throw new Error('Only a pending connection can be discarded');
+   const db=await database();try{await new Promise<void>((resolve,reject)=>{const tx=db.transaction('vaults','readwrite',{durability:'strict'});tx.objectStore('vaults').delete(recordKey(this.record.context.origin,this.record.context.personId));tx.oncomplete=()=>resolve();tx.onerror=tx.onabort=()=>reject(new Error('Cannot discard pending connection'));});}finally{db.close();}
+   this.lock();
+  });
+  this.pending=commit.catch(()=>{});return commit;
+ }
  // A pagehide can race an IndexedDB commit. Keep the writer fence until it drains.
  lock(){this.key=undefined;this.values={};void this.pending.then(()=>this.release());}
 }

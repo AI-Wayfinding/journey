@@ -30,13 +30,13 @@ for(const live of [false,true])test(`recovery compacts 128 historical roots and 
  await f.backend.sealedExecute('alice','sealed_device_register',device.registration);
  state=JSON.parse(String(await f.backend.accountStorage.get('accounts')));account=state.accounts[0];
  assert.equal(account.identityEvents.length,4096);assert.equal(account.connections.length,1);assert.equal(account.connections[0].claim.generation,1);
- const before=f.backend.snapshot();await assert.rejects(f.backend.passkey(identity,{op:'connection_remove',connectionId:device.credential.connectionId,event:await signIdentityEvent(next.key.privateKey,{personId:next.account.personId,generation:1,accountPublicKey:next.key.publicKey,connectionId:device.credential.connectionId,action:'connection-removed',at:signedInAt})}),/capacity/i);assert.equal(f.backend.snapshot(),before);
+ const before=f.backend.snapshot();await assert.rejects(f.backend.passkey(identity,{op:'connection_remove',connectionId:device.credential.connectionId,event:await signIdentityEvent(next.key.privateKey,{personId:next.account.personId,generation:1,accountPublicKey:next.key.publicKey,connectionId:device.credential.connectionId,action:'connection-removed',at:signedInAt})}),{message:'Account identity log capacity reached'});assert.equal(f.backend.snapshot(),before);
  assert.equal(JSON.parse(String(await f.backend.accountStorage.get('accounts'))).accounts[0].identityEvents.length,4096);
 });
 
 for(const [events,live] of [[4096,false],[4095,true],[4096,true]] as const)test(`recovery refuses before destructive changes when its journal cannot fit (${events},live=${live})`,async()=>{
  const f=await fixture(events,live),before=f.backend.snapshot();
- await assert.rejects(f.backend.passkey(f.identity,{op:'recovery_start'}),/capacity|journal|log/i);
+ await assert.rejects(f.backend.passkey(f.identity,{op:'recovery_start'}),{message:'Account identity log capacity reached; recovery was not started'});
  assert.equal(f.backend.snapshot(),before);
  const account=JSON.parse(String(await f.backend.accountStorage.get('accounts'))).accounts[0];assert.equal(account.identityEvents.length,events);assert.equal(account.passkeys.length,1);assert.equal(account.onboarding.complete,true);assert.equal(account.recovery?.readyAt,undefined);
 });

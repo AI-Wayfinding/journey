@@ -1,6 +1,6 @@
 import * as z from 'zod';
 import {sealedRemoteCall,pinSealedMode} from './mode.ts';
-import {RemoteFailure} from './errors.ts';
+import {RemoteFailure,SafetyNumberChangedError} from './errors.ts';
 import {descriptions,type ToolName} from '../../mcp/src/commands.ts';
 import { firstPosition } from '../../shared/first-position.ts';
 import { offerDefinitionSchema, presetPolicy, validateData, boundedJson } from '../../mcp/src/offers.ts';
@@ -81,7 +81,7 @@ export class SealedClient {
   const approved=await verifyConnection(result.certificate);if(!this.sameClaim(approved))throw new Error('Approved connection certificate does not match the connection root');this.connection.certificate=approved;await this.persistConnection();await this.observeAccount({publicKey:approved.accountPublicKey,generation:approved.generation},approved.personId);
  }
  private trustStatus(personId:string,identity:AccountIdentity){const pin=this.accountTrust.pins[personId];return !pin?'untrusted' as const:matchesCurrent(pin,identity)?'trusted' as const:'changed' as const;}
- private async observeAccount(identity:AccountIdentity,personId:string){const pin=this.accountTrust.pins[personId];if(matchesHistory(pin,identity))return;const status=this.trustStatus(personId,identity);if(status==='changed')throw new Error(`Account safety number changed for ${personId}; call trustAccountKey after comparing it`);if(!pin||pin.generation===undefined){this.accountTrust.pins[personId]={...replacePin(pin,identity,pin?.compared),generation:identity.generation};await this.persistTrust();}}
+ private async observeAccount(identity:AccountIdentity,personId:string){const pin=this.accountTrust.pins[personId];if(matchesHistory(pin,identity))return;const status=this.trustStatus(personId,identity);if(status==='changed')throw new SafetyNumberChangedError();if(!pin||pin.generation===undefined){this.accountTrust.pins[personId]={...replacePin(pin,identity,pin?.compared),generation:identity.generation};await this.persistTrust();}}
  async trustAccountKey(personId:string,publicKey:string,expectedSafetyNumber:string):Promise<void>{const identityKey=publicKeySchema.parse(publicKey),actual=await safetyNumber(identityKey);if(actual!==expectedSafetyNumber)throw new Error('Account safety number mismatch');personId=id.parse(personId);const old=this.accountTrust.pins[personId];this.accountTrust.pins[personId]=replacePin(old,{publicKey:identityKey,...(old?.publicKey===identityKey&&old.generation!==undefined?{generation:old.generation}:{})},true);await this.persistTrust();}
  async verifyAccountLog(personId:string,events:unknown){const pin=this.accountTrust.pins[personId];if(!pin)throw new Error('No pinned account key');const result=await pinnedIdentityLog(pin,personId,events);this.accountTrust.pins[personId]=result.pin;await this.persistTrust();return result.entries;}
  private async journeyTrust(value:Record<string,unknown>){
@@ -102,7 +102,20 @@ export class SealedClient {
  private async journeyLog(value:Record<string,unknown>){return Promise.all(z.array(identityEventSchema).parse(value.identityLog??[]).map(async event=>{const verified=await verifyIdentityEvent(event),identity={publicKey:event.accountPublicKey,generation:event.generation},pin=this.accountTrust.pins[event.personId];return {...event,verified,verification:verified?'self-signed':'server-asserted',accountTrust:matchesHistory(pin,identity)?'historical':(matchesCurrent(pin,identity)&&!pin?.compared?'untrusted':this.trustStatus(event.personId,identity))};}));}
  private async binding(value:unknown,expectedDeviceId?:string):Promise<DeviceBinding>{const parsed=bindingSchema.parse(value);if(expectedDeviceId!==undefined&&parsed.deviceId!==expectedDeviceId)throw new Error('Authenticated device binding mismatch');const certificate=await verifyDeviceBinding(parsed);await this.observeAccount({publicKey:certificate.accountPublicKey,generation:certificate.generation},certificate.personId);return parsed;}
  private async bindings(values:DeviceBinding[]){return Promise.all(values.map(value=>this.binding(value)));}
- private async readGroupView(value:unknown){const view=groupView.parse(value);const trust=await this.journeyTrust(await this.callRemote('journey_read',{journeyId:journeyFor(view.groupId)}));if(Object.values(trust).some(row=>row.accountTrust==='changed'))throw new Error('Account safety number changed; compare the new safety number before synchronizing');return {...view,devices:await this.bindings(view.devices),pending:await this.bindings(view.pending)};}
+ private async checkAdmission(groupId:string,target:DeviceBinding,identities:Record<string,AccountIdentity>){
+  const cert=await verifyDeviceBinding(target);
+  if(groupId.startsWith('private_')){
+   if(!groupId.endsWith(`_${this.personId}`)||cert.personId!==this.personId||!matchesCurrent(this.accountTrust.pins[this.personId],{publicKey:cert.accountPublicKey,generation:cert.generation}))throw new Error('Private audience admits only the owner’s current account key');
+  }
+  const displayed=identities[cert.personId];if(!displayed)throw new Error('Pending connection owner is not a displayed journey member');
+  if(cert.accountPublicKey!==displayed.publicKey||cert.generation!==displayed.generation)throw new Error('Pending connection must use the displayed current account key');
+ }
+ private async readGroupView(value:unknown){
+  const view=groupView.parse(value),trust=await this.journeyTrust(await this.callRemote('journey_read',{journeyId:journeyFor(view.groupId)}));
+  if(Object.values(trust).some(row=>row.accountTrust==='changed'))throw new SafetyNumberChangedError();
+  for(const target of view.pending)await this.checkAdmission(view.groupId,target,trust);
+  return {...view,identities:trust,devices:await this.bindings(view.devices),pending:await this.bindings(view.pending)};
+ }
  private async verifyRoster(roster:DeviceBinding[]){await this.bindings(roster);}
  private async persist(){try{const groups:Record<string,Saved>={};for(const [id,g] of this.groups){g.saved.mls=encode(await g.mls.exportState());groups[id]=g.saved;}await this.store.write('sealed-state',JSON.stringify({version:1,actorId:this.actorId,personalJourney:this.personalJourney,pending:this.pending,groups}));}catch(error){this.failed=true;throw error;}}
  private group(id:string){const g=this.groups.get(id);if(!g)throw new Error('Prepare or create the sealed audience first');if(g.saved.blocked)throw new Error('Ambiguous MLS delivery; refusing ratchet rollback or retry');return g;}
@@ -142,6 +155,7 @@ export class SealedClient {
   const g=this.group(groupId),v=await this.readGroupView(await this.callRemote('sealed_group',{journeyId:journeyFor(groupId),groupId}));
   const target=await this.binding(await this.callRemote('sealed_package_reserve',{journeyId:journeyFor(groupId),groupId,deviceId}),deviceId);
   if(target.personId!==personId)throw new Error('Authenticated target owner mismatch');
+  await this.checkAdmission(groupId,target,v.identities);
   const c=await g.mls.add(decode(target.data));g.saved.roster.push(target);this.assertRoster(g);
   await this.commit(groupId,g,v,'add',json({commit:encode(c.commit),welcome:c.welcome?encode(c.welcome):undefined}),deviceId);
  }

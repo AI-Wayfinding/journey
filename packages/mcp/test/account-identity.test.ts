@@ -29,8 +29,8 @@ test('account identity requires an account signature before any connection or ML
  await assert.rejects(backend.sealedExecute('alice','sealed_device_register',{...signed,data:btoa('SUBSTITUTION')}));
  const binding=await backend.sealedExecute('alice','sealed_device_register',signed);assert.equal(binding.personId,account.personId);
  await backend.passkey(identity,{op:'connection_remove',connectionId:claim.connectionId,event:await signIdentityEvent(key.privateKey,{personId:account.personId,generation:0,accountPublicKey:key.publicKey,connectionId:claim.connectionId,action:'connection-removed',at:Date.now()})});
- await assert.rejects(backend.accountsHost.deviceBinding(String(binding.deviceId)),/revoked|connection/i);
- const replacement=await generateSigningKey();await assert.rejects(backend.passkey(identity,{op:'identity_set',record:{identity:{publicKey:replacement.publicKey,generation:0},recoveryWrap:{format:'wayfinding-browser-vault-1',iv:'AA==',ciphertext:'AA=='}},event:await signIdentityEvent(replacement.privateKey,{personId:account.personId,generation:0,accountPublicKey:replacement.publicKey,action:'account-key-set',at:Date.now()})}),/already|identity|key/i);
+ await assert.rejects(backend.accountsHost.deviceBinding(String(binding.deviceId)),{message:'Connection is not signed or was revoked'});
+ const replacement=await generateSigningKey();await assert.rejects(backend.passkey(identity,{op:'identity_set',record:{identity:{publicKey:replacement.publicKey,generation:0},recoveryWrap:{format:'wayfinding-browser-vault-1',iv:'AA==',ciphertext:'AA=='}},event:await signIdentityEvent(replacement.privateKey,{personId:account.personId,generation:0,accountPublicKey:replacement.publicKey,action:'account-key-set',at:Date.now()})}),{message:'Account key already set; recover it instead'});
 });
 
 test('journey journal retains events through departure without disclosing later connection changes',async()=>{
@@ -62,7 +62,7 @@ test('console revocation succeeds for two MLS leaves sharing one account-signed 
  const devices=[`device_${crypto.randomUUID()}`,`device_${crypto.randomUUID()}`];for(const deviceId of devices){const registration={deviceId,verificationKey:root.publicKey,data:btoa(deviceId),credential:certificate};await backend.sealedExecute('alice','sealed_device_register',{...registration,packageSignature:await signPackage(root.privateKey,registration)});}
  const browserId=crypto.randomUUID(),state=JSON.parse(String(await backend.accountStorage.get('accounts')));state.accounts[0].onboarding={complete:true};state.accounts[0].browsers=[{id:browserId,credentialId:'test',devices}];await backend.accountStorage.put('accounts',JSON.stringify(state));
  const result=await browserPost(backend,identity,'/console/device/revoke',{csrf:'test',browserId});assert.equal(result.revoked,true);assert.equal(result.revocation,'complete');
- const listed=await backend.passkey(identity,{op:'browser_list'});assert.equal((listed.browsers as Array<{live:boolean}>)[0]!.live,false);for(const deviceId of devices)await assert.rejects(backend.accountsHost.deviceBinding(deviceId),/revoked|connection/i);
+ const listed=await backend.passkey(identity,{op:'browser_list'});assert.equal((listed.browsers as Array<{live:boolean}>)[0]!.live,false);for(const deviceId of devices)await assert.rejects(backend.accountsHost.deviceBinding(deviceId),{message:'Connection is not signed or was revoked'});
 });
 
 for(const storedAlias of [false,true])test(`no-code recovery compares actual public-key bytes, including base64 aliases (storedAlias=${storedAlias})`,async()=>{

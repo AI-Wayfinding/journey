@@ -15,6 +15,7 @@ const el=<K extends keyof HTMLElementTagNameMap>(tag:K,text?:string)=>{const n=d
 function field(parent:HTMLElement,label:string,password=false){const l=el('label',label),n=el('input');n.autocomplete='off';if(password)n.type='password';l.append(n);parent.append(l);return n;}
 function button(parent:HTMLElement,label:string,action:()=>Promise<void>){const b=el('button',label);b.type='button';b.addEventListener('click',()=>void run(action));parent.append(b);return b;}
 const setup=document.getElementById('onboarding'),main=document.getElementById('main');
+const needsSetup=Boolean(setup)&&setup?.dataset.complete!=='true';
 const root=document.getElementById('connection-controls')??el('section');
 if(!root.parentNode&&main){root.append(el('h2','This browser connection'));main.append(root);}
 const status=el('p','Locked. Unlock this connection to read private content.');status.role='status';
@@ -44,6 +45,7 @@ async function open(info:Record<string,unknown>,render=true,code?:string,onReady
   status.textContent='Connection signature required. Your connection identity is saved in this browser.';
   const accountCode=field(controls,'Account recovery code (optional)',true);button(controls,'Use account recovery code to sign this connection',async()=>{const code=accountCode.value;accountCode.value='';await open(info,render,code,onReady,pendingCode);});
   button(controls,'Check for approval',async()=>{try{await open(info,render,undefined,onReady,pendingCode);}catch(e){lock();await connectionControls();throw e;}});
+  button(controls,'Discard pending connection from this browser',async()=>{await current.discardPending();lock();await connectionControls();});
   button(controls,'Lock this connection',async()=>{lock();await connectionControls();});return;
  }
  const admission=await client.enrollGroup(String(info.personalGroupId));stamp(current.browserId,true);
@@ -79,7 +81,7 @@ async function connectionControls(){
   if(revoked){status.textContent='This browser connection was removed. Its old encrypted storage cannot be reused.';button(controls,'Discard removed connection from this browser',async()=>{await forgetRevokedVault(origin,personId);await connectionControls();});return;}
   const unlock=async(method:{code:string}|{prf:Uint8Array})=>{
    release=await singleWriter(origin,personId);
-   try{store=await BrowserStore.unlock(record,method,release);release=undefined;await open(info,!setup,setup&&'code'in method?method.code:undefined,async()=>{if(setup)await resumeSetup(info);});}catch(e){lock();await connectionControls();throw e;}finally{if('prf'in method)method.prf.fill(0);}
+   try{store=await BrowserStore.unlock(record,method,release);release=undefined;await open(info,!needsSetup,needsSetup&&'code'in method?method.code:undefined,async()=>{if(needsSetup)await resumeSetup(info);});}catch(e){lock();await connectionControls();throw e;}finally{if('prf'in method)method.prf.fill(0);}
   };
   button(controls,'Unlock with passkey',async()=>{const prf=await evaluatePrf(record.credentialId,decode(record.prfSalt));if(!prf)throw new Error('This passkey does not support private-key unlock. Use your recovery code.');await unlock({prf});});
   const saved=field(controls,'Recovery code',true);button(controls,'Unlock with recovery code',async()=>{const code=saved.value;saved.value='';await unlock({code});});
