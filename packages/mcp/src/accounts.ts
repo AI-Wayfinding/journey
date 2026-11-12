@@ -360,7 +360,7 @@ export class AccountsHost {
       const offer = agent.offers?.find(o => o.id === decision.offerId);
       if (!offer) return;
       const who = 'person' in decision.who ? { person: decision.who.person } : { agent: decision.who.agent };
-      offer.admission.rules = [{ who, journeys: [decision.journeyId], decision: decision.byAgent && (agent.offerSettings ?? DEFAULT_SETTINGS).maxAdmission === 'hold' && decision.decision === 'allow' ? 'hold' : decision.decision, ceilingBound: decision.byAgent }, ...offer.admission.rules.filter(r => JSON.stringify(r.who) !== JSON.stringify(who) || JSON.stringify(r.journeys) !== JSON.stringify([decision.journeyId]))].slice(0, 50);
+      offer.admission.rules = [{ who, journeys: [decision.journeyId], decision: decision.byAgent && (agent.offerSettings ?? DEFAULT_SETTINGS).maxAdmission === 'hold' && decision.decision === 'allow' ? 'hold' as const : decision.decision, ceilingBound: decision.byAgent }, ...offer.admission.rules.filter(r => JSON.stringify(r.who) !== JSON.stringify(who) || JSON.stringify(r.journeys) !== JSON.stringify([decision.journeyId]))].slice(0, 50);
       offer.version++; offer.updatedAt = this.now();
       agent.standingReceipts = [...(agent.standingReceipts ?? []), decision.id];
       await this.save(state);
