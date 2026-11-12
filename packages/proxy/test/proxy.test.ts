@@ -6,7 +6,7 @@ import {join} from 'node:path';
 import {Client,StreamableHTTPClientTransport,InMemoryTransport} from '@modelcontextprotocol/client';
 import {MemoryBackend} from '../../mcp/src/backend.ts';
 import {app,bridge,keyPair,RESOURCE,token} from '../../mcp/test/helpers.ts';
-import {WayfindingProxy} from '../src/proxy.ts';
+import {WayfindingProxy} from './legacy-proxy.ts';
 import {FileStore} from '../src/file-store.ts';
 import {buildProxyServer} from '../src/server.ts';
 import {decode} from '../src/codec.ts';

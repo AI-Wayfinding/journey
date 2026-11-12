@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {Client,StreamableHTTPClientTransport} from '@modelcontextprotocol/client';
 import {MemoryBackend} from '../../mcp/src/backend.ts';
 import {app,bridge,keyPair,RESOURCE,token} from '../../mcp/test/helpers.ts';
-import {WayfindingProxy} from '../src/proxy.ts';
+import {WayfindingProxy} from './legacy-proxy.ts';
 import {createMlsGroup} from '../src/mls/index.ts';
 import {decode} from '../src/codec.ts';
 import type {LocalStore} from '../src/store.ts';

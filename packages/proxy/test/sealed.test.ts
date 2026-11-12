@@ -64,7 +64,7 @@ test('sealed proxy unhandled tools stay hidden and cannot forward plaintext',asy
  for(const tool of tools)assert.doesNotMatch(tool.name,/^(artifact_|mls_|sealed_|content_)/);
  await assert.rejects(client.call('whoami',{body:'NEVER-FORWARD-PLAINTEXT'}),z.ZodError);
  assert.deepEqual(forwarded,[]);
- await client.call('whoami');assert.deepEqual(forwarded,[{name:'whoami',arguments:{}}]);
+ await client.call('whoami');assert.deepEqual(forwarded,[{name:'account_read',arguments:{}},{name:'whoami',arguments:{}}]);
 });
 
 test('sealed proxy storage canary covers forum library versions projects rounds interviews and contributions',async t=>{

@@ -1,4 +1,5 @@
 import * as z from 'zod';
+import {sealedRemoteCall,pinSealedMode} from './mode.ts';
 import { firstPosition } from '../../shared/first-position.ts';
 import { offerDefinitionSchema, presetPolicy, validateData, boundedJson } from '../../mcp/src/offers.ts';
 import { privateProfile, publicProfile, cardDescriptor, sealedDescriptor, definitionRef } from '../../mcp/src/sealed-descriptors.ts';
@@ -45,11 +46,12 @@ export class SealedClient {
  static async open(remote:SealedRemote,store:LocalStore,personId:string):Promise<SealedClient>{
   requireSynthetic('synthetic');const who=await SealedClient.remoteCall(remote,'whoami',{});const agent=z.object({id}).nullable().optional().parse(who.agent);const c=new SealedClient(remote,store,personId,agent?.id??personId);
   const account=await c.callRemote('account_read',{});c.personalAlias=id.parse(account.personalGroupId);
+  await pinSealedMode(store,personId);
   if(account.descriptor)c.personalJourney=sealedDescriptor.parse(account.descriptor).privateDefinition.journeyId;
   const raw=await store.read('sealed-state');if(raw){const state=parseJSON(stateSchema,raw);if(state.actorId!==c.actorId)throw new Error('Sealed store belongs to another actor');c.pending=state.pending;c.personalJourney=state.personalJourney??c.personalJourney;for(const [key,saved] of Object.entries(state.groups)){const mls=await createMlsGroup(utf8.encode(saved.deviceId));await mls.importState(decode(saved.mls));c.groups.set(key,{saved,mls});}}
   await c.recover();return c;
  }
- private static async remoteCall(remote:SealedRemote,name:string,args:Record<string,unknown>):Promise<Record<string,unknown>> {const r=await remote.callTool({name,arguments:args});if(r.isError)throw new Error(r.content?.map(c=>c.type==='text'?c.text:'').join('\n')??'Sealed operation refused');return z.record(z.string(),z.unknown()).parse(r.structuredContent);}
+ private static remoteCall=sealedRemoteCall;
  private callRemote(name:string,args:Record<string,unknown>){if(this.failed)throw new Error('Local persistence failed; reopen latest store');return SealedClient.remoteCall(this.remote,name,args);}
  private async persist(){try{const groups:Record<string,Saved>={};for(const [id,g] of this.groups){g.saved.mls=encode(await g.mls.exportState());groups[id]=g.saved;}await this.store.write('sealed-state',JSON.stringify({version:1,actorId:this.actorId,personalJourney:this.personalJourney,pending:this.pending,groups}));}catch(error){this.failed=true;throw error;}}
  private group(id:string){const g=this.groups.get(id);if(!g)throw new Error('Prepare or create the sealed audience first');if(g.saved.blocked)throw new Error('Ambiguous MLS delivery; refusing ratchet rollback or retry');return g;}

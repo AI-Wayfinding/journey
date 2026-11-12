@@ -28,6 +28,8 @@ Preparation tickets and pending uploads expire after ten minutes. Device checkpo
 
 Before final publication, the proxy saves its advanced ratchets and exact pending ciphertext. After a lost reply, it checks the server receipt and either completes locally or retries that same ciphertext. A proved uncommitted, expired ticket can be abandoned without rolling a ratchet back. Unresolved handshake/history delivery fails closed; do not restore an old MLS snapshot.
 
+The current proxy requires the server to report `sealed-v1` before startup and each remote operation. It saves a local mode pin and refuses a missing mode, a downgrade or a legacy store without an explicit migration. The old relay tests use a test-only harness; there is no plaintext fallback in the shipped proxy.
+
 ### Offers, task exchange and private names
 
 Run these checks with synthetic fixtures and enrolled local devices, not the browser console. First use of P creates a personal-workspace journey and requires `journey.create` as well as the action's normal authority and explicit read/device keys. Workspace aliases are device-local; the proxy does not silently add capabilities or recover another device's alias:

@@ -294,6 +294,12 @@ Dan's brief for v2 was to write the spec, build what seems best, and refine late
 - **What:** each device has separate handshake, application and upload quotas. Handshake traffic never consumes the application budget. Uploads bind to an authenticated, admitted device. Retries charge once; abandoned and expired uncommitted uploads refund their reservations and delete unreferenced bytes. Committed uploads remain charged.
 - **Source:** `packages/mcp/src/sealed-content.ts`; quota, attribution, retry and expiry tests in `packages/proxy/test/sealed.test.ts`.
 
+### 40. Pin the local proxy to sealed-v1
+
+- **Decided by:** F3 remediation applies the sealed-only client boundary.
+- **What:** the shipped proxy has no plaintext relay fallback. Startup and remote operations require a live `sealed-v1` account report. Each store pins that mode and account; legacy local stores require an explicit migration. Historical relay tests run against a test-only harness, while sealed tests exercise the shipped client.
+- **Source:** `packages/proxy/src/mode.ts`; mode downgrade and real FileStore restart tests.
+
 ## Open
 
 - **Remaining sealing work:** device trust hardening, independent security review, ts-mls audit and browser distribution assurance remain launch blockers. Forum, library, sensemaking, offers, tasks and identity descriptors use sealed-v1. The console now has an opt-in browser encryption device, with ids/placeholders while locked. Nothing in this change deploys, resets, migrates or erases old plaintext data.

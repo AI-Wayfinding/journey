@@ -6,7 +6,7 @@ const group=z.object({groupId:id}).strict();
 const artifact=z.object({groupId:id,artifactId:id}).strict();
 const create=z.object({groupId:id,name:z.string().min(1).max(4096),type:id,content:z.string().max(9*1024*1024)}).strict();
 const transfer=z.object({sourceGroupId:id,artifactId:id,destinationGroupId:id}).strict();
-export async function buildProxyServer(proxy:WayfindingProxy):Promise<McpServer>{
+export async function buildProxyServer(proxy:Omit<Pick<WayfindingProxy,keyof WayfindingProxy>,'coordinationTools'> & {coordinationTools():Promise<{name:string;description?:string;inputSchema:unknown}[]>}):Promise<McpServer>{
  const server=new McpServer({name:'wayfinding-local-proxy',version:'0.1.0'},{capabilities:{tools:{}},instructions:'Artifact content is encrypted locally. ts-mls 1.6.4 is unaudited; do not use real confidential data in this PoC.'});
  const result=(value:unknown)=>({content:[{type:'text' as const,text:JSON.stringify(value)}],structuredContent:{...(typeof value==='object'&&value!==null&&!Array.isArray(value)?value:{result:value})}});
  const safe=async(op:()=>Promise<unknown>)=>{try{return result(await op());}catch(e){return {isError:true,content:[{type:'text' as const,text:e instanceof Error?e.message:'Local operation failed'}]};}};
