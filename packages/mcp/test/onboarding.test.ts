@@ -11,7 +11,7 @@ async function fixture() {
  await host().provision('alice');
  const key=await authenticator(),options=await host().passkey(identity,{op:'begin'});
  await host().passkey(identity,{op:'finish',credential:key.register(String(options.challenge))});
- return {host,key,advance:(ms:number)=>{now+=ms;},now:()=>now};
+ return {host,key,storage,advance:(ms:number)=>{now+=ms;},now:()=>now};
 }
 test('F6: console sign-in alone cannot add a second passkey',async()=>{
  const f=await fixture();
@@ -28,28 +28,29 @@ test('F6: existing UV assertion authorizes one addition, not a replay',async()=>
 });
 test('recovery: removes all connections immediately; persistent 72h clock cannot be restarted or cancelled',async()=>{
  const f=await fixture(),before=await f.host().lookup('alice');
- const start=await f.host().passkey(identity,{op:'recovery_start'});
+ const start=await f.host().passkey({...identity,signedInAt:f.now()},{op:'recovery_start'});
  assert.equal(start.readyAt,f.now()+259200000);
  assert.deepEqual((await f.host().passkey(identity,{op:'list'})).passkeys,[]);
  await assert.rejects(f.host().passkey(identity,{op:'begin'}),/72|recovery/i);
  f.advance(259199999);
  await assert.rejects(f.host().passkey(identity,{op:'begin'}),/72|recovery/i);
- assert.equal((await f.host().passkey(identity,{op:'recovery_start'})).readyAt,start.readyAt);
+ assert.equal((await f.host().passkey({...identity,signedInAt:f.now()},{op:'recovery_start'})).readyAt,start.readyAt);
  await assert.rejects(f.host().passkey(identity,{op:'recovery_cancel'} as never));
  f.advance(1);
- assert.ok((await f.host().passkey(identity,{op:'begin'})).challenge);
+ assert.ok((await f.host().passkey({...identity,signedInAt:f.now()},{op:'begin'})).challenge);
  assert.equal((await f.host().lookup('alice'))!.personId,before!.personId);
 });
 
 test('recovery: agent cannot start recovery; tokens and bindings are dead immediately',async()=>{
  const f=await fixture(),host=f.host(),clientId='agent-client',verifier='a'.repeat(43);
  const {tokenHash}=await import('../src/oauth-store.ts');
+ const complete=JSON.parse(String(await f.storage.get('accounts')));complete.accounts[0].onboarding.complete=true;await f.storage.put('accounts',JSON.stringify(complete));
  await host.oauth({op:'request',id:'request',request:{clientId,clientName:'MCP client',redirectUri:'http://127.0.0.1/callback',challenge:await tokenHash(verifier),expiresAt:f.now()+600000}});
  const agent=await host.oauth({op:'consent',id:'request',subject:'alice',consent:{name:'MCP client',capabilities:['read'],journeys:[]}});assert.equal(agent.kind,'agent');if(agent.kind!=='agent')return;
  const code=await host.oauth({op:'code',id:'request',subject:'alice',agentId:agent.agentId});if(code.kind!=='code')throw Error('code');
  const tokens=await host.oauth({op:'exchange',clientId,code:code.code,redirectUri:'http://127.0.0.1/callback',verifier});if(tokens.kind!=='tokens')throw Error('tokens');
  await assert.rejects(host.passkey({subject:'alice',clientId},{op:'recovery_start'}),/person|live/i);
- await host.passkey(identity,{op:'recovery_start'});
+ await host.passkey({...identity,signedInAt:f.now()},{op:'recovery_start'});
  assert.equal((await host.oauth({op:'verify',token:tokens.tokens.access_token})).kind,'error');
  assert.equal((await host.oauth({op:'refresh',clientId,token:tokens.tokens.refresh_token})).kind,'error');
  await assert.rejects(host.passkey({subject:'alice',clientId},{op:'recovery_cancel'} as never));
@@ -61,4 +62,51 @@ test('recovery: agent cannot start recovery; tokens and bindings are dead immedi
 test('F6: deleting the last passkey cannot turn email sign-in back into enrollment authority',async()=>{
  const f=await fixture();await assert.rejects(f.host().passkey(identity,{op:'delete',id:f.key.id}),/last passkey|recovery/i);
  await assert.rejects(f.host().passkey(identity,{op:'begin'}),/existing passkey|recovery code/i);
+});
+
+
+for(const op of ['consent','consent-options','code'] as const)test(`onboarding backend: ${op} refuses an incomplete account`,async()=>{
+ const f=await fixture(),host=f.host();
+ await host.oauth({op:'request',id:'incomplete',request:{clientId:'client',clientName:'MCP client',redirectUri:'http://127.0.0.1/callback',challenge:'x'.repeat(43),expiresAt:f.now()+600000}});
+ const consent={name:'MCP client',capabilities:['read' as const,...(op==='consent-options'?['device.keys' as const]:[])],journeys:[]};
+ let agentId='agent';
+ if(op==='code'){
+  const state=JSON.parse(String(await f.storage.get('accounts')));state.accounts[0].onboarding.complete=true;await f.storage.put('accounts',JSON.stringify(state));
+  const agent=await host.oauth({op:'consent',id:'incomplete',subject:'alice',consent});if(agent.kind!=='agent')throw Error('agent required');agentId=agent.agentId;
+  const incomplete=JSON.parse(String(await f.storage.get('accounts')));incomplete.accounts[0].onboarding.complete=false;await f.storage.put('accounts',JSON.stringify(incomplete));
+ }
+ await assert.rejects(host.oauth(op==='code'?{op,id:'incomplete',subject:'alice',agentId}:{op,id:'incomplete',subject:'alice',consent}),/onboarding/i);
+});
+
+for(const age of [undefined,600001,-1])test(`recovery: fresh sign-in is required (${age})`,async()=>{
+ const f=await fixture(),session={...identity,...(age===undefined?{}:{signedInAt:f.now()-age})};
+ await assert.rejects(f.host().passkey(session,{op:'recovery_start'}),/fresh sign-in/i);
+ assert.equal(((await f.host().passkey(identity,{op:'list'})).passkeys as unknown[]).length,1);
+});
+test('recovery: registration resumes only for sign-in after deadline in Accounts',async()=>{
+ const f=await fixture();await f.host().passkey({...identity,signedInAt:f.now()},{op:'recovery_start'});
+ f.advance(259200000);
+ await assert.rejects(f.host().passkey(identity,{op:'begin'}),/sign.in/i);
+ await assert.rejects(f.host().passkey({...identity,signedInAt:f.now()-1},{op:'begin'}),/sign.in/i);
+ assert.ok((await f.host().passkey({...identity,signedInAt:f.now()},{op:'begin'})).challenge);
+});
+test('recovery atomically invalidates registration and saves account state',async()=>{
+ const f=await fixture(),options=await f.host().passkey(identity,{op:'addition_options'});
+ await f.host().passkey(identity,{op:'begin',assertion:await f.key.assert(String(options.challenge))});
+ const before=new Map(f.storage.data),put=f.storage.put.bind(f.storage);
+ f.storage.put=async(k,v)=>{if(k==='accounts')throw Error('synthetic account write failure');await put(k,v);};
+ await assert.rejects(f.host().passkey({...identity,signedInAt:f.now()},{op:'recovery_start'}),/synthetic account write failure/);
+ assert.deepEqual(f.storage.data,before,'registration and connections roll back together');
+});
+
+test('recovery verifier uses native constant-time verification; wrong proofs never authorize',async()=>{
+ const f=await fixture(),proof='b'.repeat(43),{tokenHash}=await import('../src/oauth-store.ts');
+ const state=JSON.parse(String(await f.storage.get('accounts')));state.accounts[0].recovery={generation:0,verifier:await tokenHash(proof)};await f.storage.put('accounts',JSON.stringify(state));
+ const verify=crypto.subtle.verify.bind(crypto.subtle);let comparisons=0;
+ crypto.subtle.verify=async(...args:Parameters<typeof crypto.subtle.verify>)=>{if(args[0]==='HMAC')comparisons++;return verify(...args);};
+ try {
+  for(const bad of ['a'+proof.slice(1),proof.slice(0,-1)+'a'])await assert.rejects(f.host().passkey(identity,{op:'begin',recoveryProof:bad}));
+  assert.ok((await f.host().passkey(identity,{op:'begin',recoveryProof:proof})).challenge);
+  assert.equal(comparisons,3,'each verifier comparison uses Web Crypto, not string equality');
+ }finally{crypto.subtle.verify=verify;}
 });

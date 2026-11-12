@@ -68,6 +68,13 @@ async function fixture(sealed=false) {
   return { backend, send, login, post, authorize, exchange, consent, client, upstream, advance: (ms: number) => { now += ms; }, document: (v: unknown) => { document = v; } };
 }
 
+
+test('onboarding: OAuth redirects incomplete accounts before consent GET and POST',async()=>{
+ const f=await fixture(true),cookie=await f.login(),start=await f.authorize(),path=start.headers.get('location')!;
+ for(const r of [await f.send(path,{headers:{cookie}}),await f.post('/oauth/consent',{csrf:'unused',request:new URL(path,origin).searchParams.get('request'),decision:'allow',name:'MCP client'},cookie)]){
+  assert.equal(r.status,303);assert.equal(r.headers.get('location'),'/console/onboarding');
+ }
+});
 test('oauth AS: a replayed authorization code revokes its issued token family', async () => {
   const f = await fixture(), cookie = await f.login(), code = await f.consent(cookie);
   const tokens = await (await f.exchange(code)).json() as {access_token:string;refresh_token:string};
@@ -385,6 +392,10 @@ async function deviceConsentFixture(sealed=false) {
   const identity = { subject: 'alice', clientId: consoleClient };
   const options = await f.backend.passkey(identity, { op: 'begin' });
   await f.backend.passkey(identity, { op: 'finish', credential: key.register(String(options.challenge)) });
+  if(sealed){
+    // This fixture isolates OAuth policy; full browser onboarding is covered in console-browser.test.ts.
+    const state=JSON.parse(String(await f.backend.accountStorage.get('accounts')));state.accounts[0].onboarding.complete=true;await f.backend.accountStorage.put('accounts',JSON.stringify(state));
+  }
   async function pending() {
     const path = (await f.authorize()).headers.get('location')!;
     const html = await (await f.send(path, { headers: { cookie } })).text();

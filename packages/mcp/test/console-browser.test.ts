@@ -32,10 +32,13 @@ async function fixture(){
  let counter=0;
  const device=async(enrollmentKey=key)=>{const browserId=crypto.randomUUID(),remote=consoleRemote(post,browserId,async device=>{const fields={browserId,credentialId:enrollmentKey.id,device},o=await post('/console/device/enroll/options',fields);return post('/console/device/enroll/finish',{...fields,assertion:await enrollmentKey.assert(String(o.challenge),++counter)});}),files=new Map<string,string>(),account=await post('/console/device/info',{});return {browserId,remote,files,client:await SealedClient.open(remote,{async read(k){return files.get(k)},async write(k,v){files.set(k,v)}},String(account.personId)),personal:String(account.personalGroupId)};};
  const authorize=async(change:Parameters<typeof backend.beginAuthorization>[1])=>{const options=await backend.beginAuthorization(identity,change);return backend.completeAuthorization(identity,change,await key.assert(String(options.challenge),++counter));};
- return {backend,target,send,post,requests,device,csrf,identity,key,authorize,advance:(ms:number)=>{now+=ms;},signIn};
+ const complete=async(browserId:string,recoveryProof:string,wrappingKey=key)=>{const fields={browserId,recoveryProof},options=await post('/console/setup/options',fields);await post('/console/setup/complete',{...fields,assertion:await wrappingKey.assert(String(options.challenge),++counter)});};
+ const ready=async(a:Awaited<ReturnType<typeof device>>)=>{await a.client.enrollGroup(a.personal);await a.client.call('account_update',{name:'Synthetic browser'});await complete(a.browserId,'b'.repeat(43));};
+ return {backend,target,send,post,requests,device,complete,ready,csrf,identity,key,authorize,advance:(ms:number)=>{now+=ms;},signIn};
 }
 test('console browser sealed writes never send plaintext; admission, local search and revocation fence',async()=>{
  const f=await fixture(),a=await f.device(),markers=['BROWSER-PROFILE-CANARY','BROWSER-CARD-CANARY','BROWSER-CLIENT-CANARY','BROWSER-POST-CANARY','BROWSER-LIBRARY-CANARY','BROWSER-OFFER-CANARY','BROWSER-NEW-CONTENT'];
+ await f.ready(a);
  const j=String((await a.client.call('journey_create',{name:'Browser journey',policy:'invite',defaultRole:'write'})).journeyId);
  await a.client.enrollGroup(a.personal);
  await a.client.call('account_update',{name:markers[0]});assert.equal((await a.client.call('account_read',{})).name,markers[0]);
@@ -59,7 +62,7 @@ test('console browser sealed writes never send plaintext; admission, local searc
  for(const marker of markers){assert.equal(f.requests.join('\n').includes(marker),false,`request plaintext ${marker}`);assert.equal(f.backend.snapshot().includes(marker),false,`storage plaintext ${marker}`);for(const bytes of f.backend.blobs.data.values())assert.equal(Buffer.from(bytes).includes(Buffer.from(marker)),false,`blob plaintext ${marker}`);}
 });
 test('console browser approve and decline reasons are sealed; tasks and rounds decrypt through the shared client',async t=>{
- const f=await fixture(),a=await f.device(),j=String((await a.client.call('journey_create',{name:'Decision journey',policy:'invite',defaultRole:'write'})).journeyId);
+ const f=await fixture(),a=await f.device();await f.ready(a);const j=String((await a.client.call('journey_create',{name:'Decision journey',policy:'invite',defaultRole:'write'})).journeyId);
  const agentId=String((await a.client.call('agent_create',{name:'Offering endpoint'})).agentId);
  await f.authorize({kind:'card',agentId,capabilities:['read','task.manage','device.keys']});await f.backend.execute('alice',{tool:'agent_add',input:{journeyId:j,agentId}},clientId);await f.authorize({kind:'bind',clientId:'browser-test-endpoint',agentId});
  const signer=await keyPair('browser-offering'),remote=new Client({name:'browser-offering',version:'1'});await remote.connect(new StreamableHTTPClientTransport(RESOURCE,{fetch:bridge(app(signer,f.backend)),requestInit:{headers:{authorization:`Bearer ${await token(signer,{sub:'alice',client_id:'browser-test-endpoint'})}`}}}));t.after(()=>remote.close());
@@ -88,7 +91,7 @@ test('onboarding and code recovery: private name, saved code, unified connection
  await a.client.enrollGroup(a.personal);
  assert.equal((await f.send('/console/setup/complete',{csrf:f.csrf,browserId:a.browserId,recoveryProof})).status,403,'name/profile required');
  await a.client.call('account_update',{name:'ONBOARDING-PRIVATE-NAME'});
- await f.post('/console/setup/complete',{browserId:a.browserId,recoveryProof});
+ await f.complete(a.browserId,recoveryProof);
  const before=await f.backend.execute('alice',{tool:'account_read',input:{}},clientId),html=await (await f.send('/console')).text();
  assert.match(html,/Your connections/);assert.match(html,/Browser/);assert.match(html,/Added/);assert.match(html,/Last used/);assert.ok(html.includes(a.browserId));assert.doesNotMatch(html,/Private browser device|<h2>Agents<\/h2>|ONBOARDING-PRIVATE-NAME/);
  assert.equal((await f.send('/console/passkeys/options',{csrf:f.csrf})).status,403);
@@ -105,11 +108,26 @@ test('onboarding and code recovery: private name, saved code, unified connection
  assert.equal(f.backend.snapshot().includes(code),false);assert.equal(f.backend.snapshot().includes('ONBOARDING-PRIVATE-NAME'),false);
 });
 
+
+test('onboarding: a second console session cannot plant its own recovery verifier',async()=>{
+ const f=await fixture(),a=await f.device();await a.client.enrollGroup(a.personal);await a.client.call('account_update',{name:'Alice'});
+ const second=new ConsoleSessions(f.backend,secret,origin,Date.now),cookie=(await second.create(SESSION_COOKIE,{kind:'session',...f.identity,csrf:'attacker-csrf',signedInAt:Date.now(),expiresAt:Date.now()+600000})).split(';')[0]!;
+ const recoveryProof='x'.repeat(43);
+ const response=await f.send('/console/setup/complete',{csrf:'attacker-csrf',browserId:a.browserId,recoveryProof},{cookie});
+ assert.equal(response.status,403,'session and visible browser id are not passkey authority');
+ assert.equal((await f.backend.passkey(f.identity,{op:'setup_status'})).complete,false);
+ assert.equal((await f.send('/console/passkeys/options',{csrf:f.csrf,recoveryProof})).status,403,'planted code must not authorize a passkey');
+ assert.equal((await f.send('/console/device/revoke',{csrf:f.csrf,browserId:a.browserId})).status,403,'device revocation is not a setup operation');
+ const enrolled=await f.backend.passkey(f.identity,{op:'browser_check',browserId:a.browserId});
+ for(const memberId of enrolled.devices as string[])await f.backend.execute('alice',{tool:'personal_group_remove',input:{memberId}},f.identity.clientId);
+ assert.equal((await f.send('/console/setup/options',{csrf:f.csrf,browserId:a.browserId,recoveryProof})).status,403,'a removed leaf cannot complete onboarding');
+});
+
 test('no-code recovery completes only after 72h and fresh sign-in; old browsers and agents stay revoked',async()=>{
  const {recoveryCode,recoveryAuthorization}=await import('../../browser/src/vault.ts');
  const f=await fixture(),old=await f.device(),enrolled=await old.client.enrollGroup(old.personal);await old.client.call('account_update',{name:'Before recovery'});
  const recoveryProof=await recoveryAuthorization(recoveryCode(),origin,old.client.personId);
- await f.post('/console/setup/complete',{browserId:old.browserId,recoveryProof});
+ await f.complete(old.browserId,recoveryProof);
  const agent=await old.client.call('agent_create',{name:'Old agent'});
  assert.equal((await f.send('/console/recovery/start',{csrf:f.csrf,confirm:'wrong'})).status,403);
  assert.equal((await f.send('/console/recovery/start',{csrf:f.csrf,confirm:'REMOVE ALL CONNECTIONS'})).status,303);
@@ -124,7 +142,7 @@ test('no-code recovery completes only after 72h and fresh sign-in; old browsers 
  const fresh=await f.device(key);assert.equal((await fresh.client.enrollGroup(fresh.personal)).admitted,true);
  await fresh.client.call('account_update',{name:'After recovery'});
  const newProof=await recoveryAuthorization(recoveryCode(),origin,fresh.client.personId);
- await f.post('/console/setup/complete',{browserId:fresh.browserId,recoveryProof:newProof});
+ await f.complete(fresh.browserId,newProof,key);
  assert.equal(fresh.client.personId,old.client.personId);
  assert.equal((await fresh.client.call('account_read',{})).name,'After recovery');
  const status=await f.backend.passkey(f.identity,{op:'setup_status'});assert.equal(status.complete,true);assert.equal(typeof status.recoveredAt,'number');assert.equal(status.readyAt,null);

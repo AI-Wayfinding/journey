@@ -12,7 +12,7 @@ async function fixture(){
  const cookie=(await sessions.create(SESSION_COOKIE,{kind:'session',...identity,csrf:'test-csrf',signedInAt:now,expiresAt:now+300000000})).split(';')[0]!;
  const target=createConsole({backend,secret,resource:RESOURCE,issuer:ISSUER,now:()=>now,verifier:{async verifyAccessToken(){throw Error('not used');}}});
  const send=(path:string,body?:Record<string,unknown>)=>target.fetch(new Request(RESOURCE.origin+path,{method:body?'POST':'GET',headers:{cookie,origin:RESOURCE.origin,'content-type':'application/json'},...(body?{body:JSON.stringify({csrf:'test-csrf',...body})}:{})}));
- return {backend,send,advance:(ms:number)=>{now+=ms;}};
+ return {backend,send,now:()=>now,advance:(ms:number)=>{now+=ms;}};
 }
 test('onboarding: incomplete account cannot reach console, profile work or agent controls',async()=>{
  const f=await fixture();
@@ -21,8 +21,15 @@ test('onboarding: incomplete account cannot reach console, profile work or agent
  const r=await f.send('/console/onboarding');assert.equal(r.status,200);assert.match(await r.text(),/Set your name/);
 });
 
+
+for(const tool of ['agent_list','journey_list','sealed_catalog'])test(`onboarding setup call refuses ${tool}`,async()=>{
+ const f=await fixture(),j=await f.backend.sealedExecute('alice','journey_create',{policy:'invite',defaultRole:'read'},identity.clientId);
+ const input=tool==='sealed_catalog'?{journeyId:String(j.journeyId)}:{};
+ const response=await f.send('/console/device/call',{browserId:crypto.randomUUID(),tool,input});
+ assert.equal(response.status,403,tool);
+});
 test('recovery HTTP: all registration endpoints need a sign-in after the uncancellable deadline',async()=>{
- const f=await fixture();await f.backend.passkey(identity,{op:'recovery_start'});
+ const f=await fixture();await f.backend.passkey({...identity,signedInAt:f.now()},{op:'recovery_start'});
  assert.equal((await f.send('/console/device/info',{})).status,403);
  const waiting=await f.send('/console/onboarding');assert.match(await waiting.text(),/Nothing can cancel/);
  f.advance(259200000);

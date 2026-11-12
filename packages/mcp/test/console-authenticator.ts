@@ -2,7 +2,7 @@ import { isoCBOR } from '@simplewebauthn/server/helpers';
 
 const b64 = (value: Uint8Array) => Buffer.from(value).toString('base64url');
 const bytes = (value: string) => new TextEncoder().encode(value);
-const hash = async (value: Uint8Array) => new Uint8Array(await crypto.subtle.digest('SHA-256', value));
+const hash = async (value: Uint8Array) => new Uint8Array(await crypto.subtle.digest('SHA-256', new Uint8Array(value)));
 export async function authenticator() {
   const keys = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
   const jwk = await crypto.subtle.exportKey('jwk', keys.publicKey);

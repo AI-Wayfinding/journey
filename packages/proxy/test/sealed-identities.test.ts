@@ -26,6 +26,8 @@ test('sealed identity storage canary and explicit journey aliases',async t=>{
 
 test('sealed consent drops custom client labels and preserves id-only authority controls',async()=>{
  const backend=new MemoryBackend({async get(){return {name:'WORKOS-PRIVATE-NAME',email:'workos-private@example.test'};}},Date.now,testPasskeys,true),account=await backend.accountsHost.provision('owner');
+ // Isolate sealed consent policy; console-browser tests cover completing onboarding.
+ const state=JSON.parse(String(await backend.accountStorage.get('accounts')));state.accounts[0].onboarding.complete=true;await backend.accountStorage.put('accounts',JSON.stringify(state));
  const {clientMetadata}=await import('../../mcp/src/oauth-contract.ts');const registration=await backend.oauth({op:'register',client:clientMetadata.parse({client_name:'CUSTOM-OAUTH-LABEL',redirect_uris:['http://127.0.0.1:8717/callback']})});assert.equal(registration.kind,'client');
  const clientId='https://example.com/'+ 'metadata'.repeat(20);await backend.oauth({op:'request',id:'request',request:{clientId,clientName:'CUSTOM-PENDING-LABEL',redirectUri:'http://127.0.0.1:8717/callback',challenge:'a'.repeat(43),expiresAt:Date.now()+300000}});
  await assert.rejects(backend.consentAgent('owner','request',{name:'CUSTOM-AGENT-LABEL',capabilities:['read'],journeys:[]}),/sealed/);

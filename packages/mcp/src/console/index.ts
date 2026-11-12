@@ -94,15 +94,15 @@ export function createConsole(config: ConsoleConfig) {
       const session = await sessions.require(request);
       const setup = config.backend.sealedMode ? await config.backend.passkey({subject:session.subject,clientId:session.clientId},{op:'setup_status'}) : {complete:true};
       const waiting=typeof setup.readyAt==='number'&&setup.readyAt>now();
-      const setupPaths=['/console/onboarding','/console/logout','/console/passkeys/options','/console/passkeys/register','/console/passkeys/addition-options','/console/setup/complete','/console/connections/register','/console/recovery/start'];
-      if(!setup.complete && !(setupPaths.includes(path)||(!waiting&&path.startsWith('/console/device/')))) {
+      const setupPaths=['/console/onboarding','/console/logout','/console/passkeys/options','/console/passkeys/register','/console/passkeys/addition-options','/console/setup/options','/console/setup/complete','/console/connections/register','/console/recovery/start'];
+      if(!setup.complete && !(setupPaths.includes(path)||(!waiting&&['/console/device/info','/console/device/enroll/options','/console/device/enroll/finish','/console/device/call'].includes(path)))) {
         if(request.method==='GET')return redirect('/console/onboarding');
         throw new Refused('Complete onboarding before using the console');
       }
       if(waiting&&request.method==='POST'&&!['/console/logout','/console/recovery/start'].includes(path))throw new Refused('Wait the full 72 hours');
       if(typeof setup.readyAt==='number'&&setup.readyAt<=now()&&request.method==='POST'&&!['/console/logout','/console/recovery/start'].includes(path)&&(session.signedInAt===undefined||session.signedInAt<setup.readyAt))return redirect('/console/login');
       if (request.method === 'POST') {
-        const body = await formBody(request, session.csrf, origin, path==='/console/device/call'?15*1024*1024:96*1024), identity = { subject: session.subject, clientId: session.clientId };
+        const body = await formBody(request, session.csrf, origin, path==='/console/device/call'?15*1024*1024:96*1024), identity = { subject: session.subject, clientId: session.clientId, signedInAt: session.signedInAt };
         if (path === '/console/logout') {
           await sessions.read(request, SESSION_COOKIE, 'delete');
           // Land on the signed-out home page: /console/login would bounce through AuthKit, whose own session signs the person straight back in.
@@ -116,8 +116,8 @@ export function createConsole(config: ConsoleConfig) {
         if(path==='/console/connections/remove'){
           await browserPost(config.backend,identity,'/console/device/revoke',{csrf:session.csrf,browserId:body.browserId});return redirect('/console');
         }
-        if(path==='/console/setup/complete')return Response.json(await config.backend.passkey(identity,{op:'setup_complete',browserId:z.string().uuid().parse(body.browserId),recoveryProof:z.string().parse(body.recoveryProof)}),{headers});
-        if(config.backend.sealedMode&&path.startsWith('/console/device/'))return Response.json(await browserPost(config.backend,identity,path,body),{headers});
+        if(path==='/console/setup/options'||path==='/console/setup/complete')return Response.json(await config.backend.passkey(identity,{op:path.endsWith('/options')?'setup_options':'setup_complete',browserId:z.string().uuid().parse(body.browserId),recoveryProof:z.string().parse(body.recoveryProof),...(body.assertion?{assertion:body.assertion}:{})}),{headers});
+        if(config.backend.sealedMode&&path.startsWith('/console/device/'))return Response.json(await browserPost(config.backend,identity,path,body,now()),{headers});
         if(path==='/console/passkeys/addition-options')return Response.json(await config.backend.passkey(identity,{op:'addition_options'}),{headers});
         if (path === '/console/passkeys/options') {
           const keys=await config.backend.passkey(identity,{op:'list'});

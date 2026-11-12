@@ -7,8 +7,25 @@ import { Refused, parseCommand, type ToolData } from '../commands.ts';
 const browserId=z.string().uuid();
 const enrollment=z.object({csrf:z.string(),browserId,credentialId:z.string().max(2048),device:browserBinding,assertion:assertionSchema.optional()}).strict();
 const metadata=new Set(['account_read','agent_list','agent_capabilities','offer_list','offer_settings','offer_journey_set','offer_publish','offer_retire','journey_list','journey_read','personal_group_read','personal_group_remove','tasks_list']);
-export async function browserPost(backend:ConsoleBackend,identity:ClientIdentity,path:string,body:Record<string,unknown>):Promise<ToolData>{
+// SealedClient.open, enrollGroup(personal), account_update and resumed profile reads.
+// Personal workspace bootstrap also prepares its General board and private audience.
+const setupTools=new Set(['whoami','account_read','account_update','personal_group_read',
+ 'journey_create','journey_descriptor','board_create','identity_descriptor',
+ 'content_prepare','content_status','content_abandon','sealed_blob_put','sealed_blob_get',
+ 'sealed_record_read','sealed_group','sealed_group_commit','sealed_group_fetch',
+ 'sealed_device_binding','sealed_package_reserve','sealed_history_post']);
+function setupTool(tool:string,input:Record<string,unknown>):boolean {
+ if(!setupTools.has(tool))return false;
+ if(tool==='journey_create')return input.policy==='invite'&&input.defaultRole==='read';
+ if(tool==='content_prepare')return ['journey_descriptor','board_create'].includes(String(input.action))||input.action==='library_add'&&z.object({visibility:z.literal('private')}).strict().safeParse(input.routing).success||input.action==='identity_descriptor'&&z.object({kind:z.literal('profile'),contentRevision:z.number(),private:z.literal(true)}).strict().safeParse(input.routing).success;
+ const publications=z.object({sealed:z.object({publications:z.record(z.string(),z.unknown())})}).safeParse(input);
+ if(tool==='account_update')return !publications.success||Object.keys(publications.data.sealed.publications).length===0;
+ return true;
+}
+export async function browserPost(backend:ConsoleBackend,identity:ClientIdentity,path:string,body:Record<string,unknown>,now:number=Date.now()):Promise<ToolData>{
   if(!backend.sealedMode||!backend.sealedExecute||!backend.whoami)throw new Refused('Browser sealed generation required');
+  const setup=await backend.passkey(identity,{op:'setup_status'});
+  if(!setup.complete&&(!['/console/device/info','/console/device/enroll/options','/console/device/enroll/finish','/console/device/call'].includes(path)||typeof setup.readyAt==='number'&&(setup.readyAt>now||identity.signedInAt===undefined||identity.signedInAt<setup.readyAt)))throw new Refused('Complete onboarding before using browser controls');
   if(path==='/console/device/info'){
     z.object({csrf:z.string()}).strict().parse(body);
     const account=await backend.execute(identity.subject,parseCommand('account_read',{}),identity.clientId);
@@ -29,6 +46,7 @@ export async function browserPost(backend:ConsoleBackend,identity:ClientIdentity
   }
   if(path!=='/console/device/call')throw new Refused('Unknown browser route');
   const input=z.object({csrf:z.string(),browserId,tool:z.string().min(1).max(100),input:z.record(z.string(),z.unknown())}).strict().parse(body);
+  if(!setup.complete&&!setupTool(input.tool,input.input))throw new Refused('Only setup tools are allowed before onboarding completes');
   if(input.tool==='sealed_device_register')throw new Refused('Fresh passkey enrollment required');
   const schema=sealedInputs[input.tool];
   if(schema){

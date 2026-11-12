@@ -20,7 +20,7 @@ import { SEALED_NOTICE, bindingSchema, sealedInputs, type DeviceBinding } from '
 import { recordOperation, consoleRecord, passkeyOperation, type RecordOperation, type ConsoleRecord, type PasskeyOperation } from './console/contract.ts';
 import { managePasskey } from './console/passkeys.ts';
 import { browserEnrollment, type BrowserRegistration } from './console/browser-enrollment.ts';
-import { accountSecurity } from './console/account-security.ts';
+import { accountSecurity, onboardingComplete } from './console/account-security.ts';
 export interface Profile { name: string; email: string }
 export interface Profiles { get(subject: string): Promise<Profile> }
 export class UpstreamUserDeleted extends Refused { constructor() { super('Upstream account removed'); } }
@@ -169,6 +169,8 @@ export class AccountsHost {
       const state = await this.load();
       if ((operation.op === 'consent' || operation.op === 'consent-options' || operation.op === 'code') && state.accounts.find(a=>a.subject===operation.subject)?.recovery?.readyAt !== undefined) throw new Refused('Finish account recovery before connecting agents');
       if (operation.op === 'consent' || operation.op === 'consent-options' || operation.op === 'code') {
+        const account=state.accounts.find(a=>a.subject===operation.subject);
+        if(this.sealedMode&&(!account||!onboardingComplete(account)))throw new Refused('Complete onboarding before connecting agents');
         state.oauth ??= { clients: [], requests: [], codes: [], access: [], refresh: [] };
         const request = await anonymous.request(operation.id);
         if (request) state.oauth.requests.push({ id: operation.id, request });
@@ -563,13 +565,22 @@ export class AccountsHost {
       const state = await this.load(), account = state.accounts.find(a => a.subject === identity.subject);
       if (!account || this.resolve(account, identity.clientId).agent) throw new Refused('Only a live person manages passkeys');
       const operation = passkeyOperation.parse(supplied);
+      if(operation.op==='recovery_start'){
+        this.storage.begin();
+        try {
+          const result=await accountSecurity(account,state.accounts,this.storage,this.verifier,identity,operation,this.now());
+          if(state.oauth){
+            state.oauth.codes=state.oauth.codes.filter(t=>t.personId!==account.personId);
+            state.oauth.access=state.oauth.access.filter(t=>t.personId!==account.personId);
+            state.oauth.refresh=state.oauth.refresh.filter(t=>t.personId!==account.personId);
+          }
+          await this.save(state);
+          await this.storage.base.transaction(tx=>this.storage.flush(tx));
+          return result!;
+        } finally { this.storage.end(); }
+      }
       const security = await accountSecurity(account, state.accounts, this.storage, this.verifier, identity, operation, this.now());
       if (security) {
-        if(operation.op==='recovery_start'&&state.oauth){
-          state.oauth.codes=state.oauth.codes.filter(t=>t.personId!==account.personId);
-          state.oauth.access=state.oauth.access.filter(t=>t.personId!==account.personId);
-          state.oauth.refresh=state.oauth.refresh.filter(t=>t.personId!==account.personId);
-        }
         if(operation.op!=='setup_status')await this.save(state); return security;
       }
       if(operation.op.startsWith('browser_'))return this.storage.transaction(async()=>{
