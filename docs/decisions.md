@@ -276,6 +276,12 @@ Dan's brief for v2 was to write the spec, build what seems best, and refine late
 - **Recovery gap:** successor groups remain unimplemented. Recovery needs a fault marker, a new group generation and `supersedes` link, fresh packages, readable-history transfer, and atomic replacement of every affected audience reference. Implement those together; do not rewrite an old log or restore a consumed ratchet.
 - **Source:** F1 remediation; `.work/drafts/sealing.md`, group lifecycle.
 
+### 37. Share first-position guidance across sealed and legacy rounds
+
+- **Decided by:** F1–CQ-04 remediation applies the existing round design.
+- **What:** both paths use the same client-safe fifteen-question first-position interview. The sealed path encrypts this guidance before upload; its privacy wording describes sealing and visible routing metadata.
+- **Source:** `packages/shared/first-position.ts`; decrypted guidance regression in `packages/proxy/test/sealed.test.ts`.
+
 ## Open
 
 - **Remaining sealing work:** device trust hardening, independent security review, ts-mls audit and browser distribution assurance remain launch blockers. Forum, library, sensemaking, offers, tasks and identity descriptors use sealed-v1. The console now has an opt-in browser encryption device, with ids/placeholders while locked. Nothing in this change deploys, resets, migrates or erases old plaintext data.

@@ -340,3 +340,13 @@ test('sealed eligible reader bootstraps a new empty audience without a guide',as
  const {backend,connect}=await fixture(t),journeyId=String((await backend.sealedExecute('alice','journey_create',{policy:'open',defaultRole:'read'})).journeyId);
  const b=await connect('bob');await b.client.call('journey_join',{journeyId});assert.equal((await b.client.enrollGroup(journeyId)).admitted,true);
 });
+
+
+test('sealed rounds decrypted default guidance contains the first-position interview',async t=>{
+ const {a}=await fixture(t),journeyId=String((await a.client.call('journey_create',{name:'Guidance',policy:'open',defaultRole:'write'})).journeyId);
+ const roundId=recordId(await a.client.call('round_create',{journeyId,title:'First position',goal:'Locate ourselves'}),'round');
+ const round=await a.client.call('round_read',{roundId}),guidance=await a.client.call('library_get',{itemId:round.guidanceItemId});
+ assert.equal(String(guidance.text).match(/^\d+\./gm)?.length,15);
+ assert.match(String(guidance.text),/Ask one question at a time/);
+ assert.doesNotMatch(String(guidance.text),/server can read/);
+});
