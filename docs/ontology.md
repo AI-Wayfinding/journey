@@ -83,6 +83,8 @@ Wayfinding checks every change against written rules before it saves anything. T
 - a journey never loses its last guide;
 - removing a person removes their agents in the same step;
 - only an artifact's owner (or a guide) deletes it, and versions never overwrite each other;
+- writers may version shared artifacts and change their metadata; only the owner changes visibility;
+- content versions and encrypted-record revisions are separate: changing a label does not create a content version;
 - a post's author is never changed, and only its author edits it;
 - an interview stays private until its own participant shares it;
 - only participants contribute to a round, and only while it is open or synthesising;
@@ -90,4 +92,4 @@ Wayfinding checks every change against written rules before it saves anything. T
 
 ## What this proof of concept does not do yet
 
-In this proof of concept the server can read forum posts, interview notes and library text, so cloud agents such as Claude can use them. Real people's confidential material should not go in until end-to-end encryption covers these too and the review is done.
+Sealed-v1 keeps forum posts, interview notes and library text encrypted between eligible devices. The server stores ciphertext and coordination metadata. The PoC still needs independent security review and an audit of ts-mls before confidential material or real users arrive.

@@ -26,7 +26,7 @@ export class WayfindingProxy {
  exportGroup(groupId:string){return this.serial(()=>this.sealed.exportGroup(groupId));}
  coordinationTools(){return this.sealed.tools();}
  call(name:string,input:Record<string,unknown>={}){return this.serial(()=>this.sealed.call(name,input));}
- private artifact(item:Record<string,unknown>):Artifact{return {artifactId:id.parse(item.recordId),name:String(item.name??''),type:String(item.mimeType??item.kind??'other'),size:utf8.encode(String(item.text??item.content??'')).length,version:Number(item.revision),deleted:false};}
+ private artifact(item:Record<string,unknown>):Artifact{return {artifactId:id.parse(item.recordId),name:String(item.name??''),type:String(item.mimeType??item.kind??'other'),size:utf8.encode(String(item.text??item.content??'')).length,version:Number(item.version??item.revision),deleted:false};}
  createArtifact(input:CreateArtifact){return this.serial(()=>this.createInner(input));}
  private async createInner(input:CreateArtifact):Promise<Artifact>{
   const r=await this.sealed.call('library_add',{journeyId:await this.sealed.artifactJourney(input.groupId),visibility:input.groupId===this.personalGroupId?'private':'members',name:input.name,mimeType:input.type,text:input.content});

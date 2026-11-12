@@ -306,6 +306,12 @@ Dan's brief for v2 was to write the spec, build what seems best, and refine late
 - **What:** local tool descriptions and schemas come from the shipped catalogue. Remote titles, descriptions, annotations and metadata are discarded. Remote errors map to a fixed vocabulary; stale-write retry uses a typed code rather than forwarded error prose. Other tool exceptions also return fixed local messages.
 - **Source:** `packages/proxy/src/errors.ts`; malicious-description and real local-MCP error tests.
 
+### 42. Use the generated content metadata rules in sealed-v1
+
+- **Decided by:** CQ-01 remediation restores the shared coordination policy.
+- **What:** sealed artifacts, topics and posts use the generated item, topic and post models. Writers may add versions and update metadata on shared artifacts; only the owner changes visibility. Delete still needs owner or guide authority. Content versions stay separate from ciphertext revisions. Topic authors may lock their topics, guides may moderate, and only post authors edit posts. Old sealed records without rule state require an explicit migration; the server does not infer authority for them.
+- **Source:** `packages/mcp/src/sealed-metadata.ts`; the same behavioural tests run against legacy and sealed backends in `packages/proxy/test/metadata.test.ts`.
+
 ## Open
 
 - **Remaining sealing work:** device trust hardening, independent security review, ts-mls audit and browser distribution assurance remain launch blockers. Forum, library, sensemaking, offers, tasks and identity descriptors use sealed-v1. The console now has an opt-in browser encryption device, with ids/placeholders while locked. Nothing in this change deploys, resets, migrates or erases old plaintext data.

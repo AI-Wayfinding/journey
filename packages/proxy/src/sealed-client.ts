@@ -256,7 +256,7 @@ export class SealedClient {
   }
   if(Object.hasOwn(sealedInputs,name)){
    const wire:Record<string,unknown>={journeyId};for(const field of Object.keys(sealedInputs[name]!.shape))if(parsed[field]!==undefined)wire[field]=parsed[field];
-   if(name==='interview_assign'&&wire.version===undefined){const item=await this.callRemote('library_get',{journeyId,itemId:parsed.itemId});wire.version=item.revision;}
+   if(name==='interview_assign'&&wire.version===undefined){const item=await this.callRemote('library_get',{journeyId,itemId:parsed.itemId});wire.version=item.version;}
    const result=await this.callRemote(name,wire),syncGroups=new Set<string>();const walk=(value:unknown)=>{if(!value||typeof value!=='object')return;if(Array.isArray(value)){value.forEach(walk);return;}const obj=value as Record<string,unknown>;if(obj.context){const c=contentContext.parse(obj.context);syncGroups.add(c.groupId);}Object.values(obj).forEach(walk);};walk(result);for(const groupId of syncGroups)if(this.groups.has(groupId))await this.sync(groupId);
    if(name==='round_read'&&result.more){const contributions=z.array(z.unknown()).parse(result.contributions);let cursor=nat.parse(result.cursor);for(;;){const next=await this.callRemote(name,{...wire,cursor});contributions.push(...z.array(z.unknown()).parse(next.contributions));cursor=nat.parse(next.cursor);if(!next.more)break;}result.contributions=contributions;result.more=false;result.cursor=cursor;}
    const rendered=await this.render(result);
