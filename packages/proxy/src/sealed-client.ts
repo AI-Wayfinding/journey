@@ -1,5 +1,7 @@
 import * as z from 'zod';
 import {sealedRemoteCall,pinSealedMode} from './mode.ts';
+import {RemoteFailure} from './errors.ts';
+import {descriptions,type ToolName} from '../../mcp/src/commands.ts';
 import { firstPosition } from '../../shared/first-position.ts';
 import { offerDefinitionSchema, presetPolicy, validateData, boundedJson } from '../../mcp/src/offers.ts';
 import { privateProfile, publicProfile, cardDescriptor, sealedDescriptor, definitionRef } from '../../mcp/src/sealed-descriptors.ts';
@@ -150,7 +152,7 @@ export class SealedClient {
   let result:Record<string,unknown>;
   try{result=await this.callRemote(action,{journeyId,ticketId:prepared.ticketId,devices,envelopes});}
   catch(error){
-   if(attempt<2&&error instanceof Error&&/Content revision changed|Prepared epoch is stale|Sealed epoch mismatch/.test(error.message)){
+   if(attempt<2&&error instanceof RemoteFailure&&error.code==='stale'){
     await this.callRemote('content_abandon',{journeyId,ticketId:prepared.ticketId});await this.recover();
     return this.write(action,journeyId,routing,data,defaults,attempt+1);
    }throw error;
@@ -268,6 +270,9 @@ export class SealedClient {
   return this.callRemote(name,parsed);
  }
  // A remote registration is not permission to forward plaintext. Unknown tools stay hidden.
- async tools(){const tools=(await this.remote.listTools()).tools;return tools.filter(t=>Object.hasOwn(localInputs,t.name)&&!t.name.startsWith('artifact_')&&!t.name.startsWith('mls_')&&!t.name.startsWith('sealed_')&&!t.name.startsWith('content_')).map(t=>({...t,inputSchema:z.toJSONSchema(localInputs[t.name as keyof typeof localInputs],{io:'input'})}));}
+ async tools(){
+  let tools;try{tools=(await this.remote.listTools()).tools;}catch{throw new RemoteFailure('unavailable');}
+  return tools.filter(t=>Object.hasOwn(localInputs,t.name)&&!t.name.startsWith('artifact_')&&!t.name.startsWith('mls_')&&!t.name.startsWith('sealed_')&&!t.name.startsWith('content_')).map(t=>({name:t.name,description:t.name==='whoami'?'Read your authenticated person and agent identity.':descriptions[t.name as ToolName]??'Operate on locally sealed content.',inputSchema:z.toJSONSchema(localInputs[t.name as keyof typeof localInputs],{io:'input'})}));
+ }
  async exportGroup(groupId:string){return encode(await this.group(await this.audienceId(groupId)).mls.exportState());}
 }

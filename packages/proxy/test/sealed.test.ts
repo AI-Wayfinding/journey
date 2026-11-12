@@ -103,7 +103,7 @@ test('sealed proxy new readers get live retained journey history but never priva
  await a.client.call('interview_write',{roundId,text:'PRIVATE-I-CANARY'});
  const b=await connect('bob');await b.client.call('journey_join',{journeyId});const device=await b.client.prepareGroup(journeyId);await a.client.addMember(journeyId,b.client.personId,device.deviceId);await b.client.sync(journeyId);
  assert.equal((await b.client.call('library_get',{itemId})).text,'Retained body');
- await assert.rejects(b.client.call('interview_read',{roundId,personId:a.client.personId}),/private/);
+ await assert.rejects(b.client.call('interview_read',{roundId,personId:a.client.personId}),/^Error: Remote operation refused$/);
  await a.client.call('interview_share',{roundId});assert.equal((await b.client.call('interview_read',{roundId,personId:a.client.personId})).text,'PRIVATE-I-CANARY');
  await a.client.call('round_participants',{roundId,add:[b.client.personId],remove:[]});
  await b.client.call('interview_write',{roundId,text:'BOB-PUBLISHED-PERSISTS'});await b.client.call('interview_share',{roundId});
@@ -226,8 +226,8 @@ test('sealed board archive refuses posting and can reopen',async t=>{
  await a.client.call('board_update',{boardId,archived:true});
  const boards=records(await backend.sealedExecute('alice','forum_boards',{journeyId}));
  assert.equal(z.object({scalars:z.object({archived:z.number()})}).parse(boards.find(b=>b.recordId===boardId)!.rule).scalars.archived,1);
- await assert.rejects(a.client.call('post_create',{topicId,body:'Refused'}),/Open board/);
- await assert.rejects(a.client.call('topic_create',{boardId,title:'Refused',body:'Refused'}),/Open board/);
+ await assert.rejects(a.client.call('post_create',{topicId,body:'Refused'}),/^Error: Remote operation refused$/);
+ await assert.rejects(a.client.call('topic_create',{boardId,title:'Refused',body:'Refused'}),/^Error: Remote operation refused$/);
  await a.client.call('board_update',{boardId,archived:false});
  await a.client.call('post_create',{topicId,body:'Reopened'});
  assert.equal(z.array(z.object({body:z.string()})).parse((await a.client.call('topic_read',{topicId})).posts).at(-1)!.body,'Reopened');

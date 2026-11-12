@@ -300,6 +300,12 @@ Dan's brief for v2 was to write the spec, build what seems best, and refine late
 - **What:** the shipped proxy has no plaintext relay fallback. Startup and remote operations require a live `sealed-v1` account report. Each store pins that mode and account; legacy local stores require an explicit migration. Historical relay tests run against a test-only harness, while sealed tests exercise the shipped client.
 - **Source:** `packages/proxy/src/mode.ts`; mode downgrade and real FileStore restart tests.
 
+### 41. Keep remote prose out of the local tool boundary
+
+- **Decided by:** F8 remediation applies the local-client trust boundary.
+- **What:** local tool descriptions and schemas come from the shipped catalogue. Remote titles, descriptions, annotations and metadata are discarded. Remote errors map to a fixed vocabulary; stale-write retry uses a typed code rather than forwarded error prose. Other tool exceptions also return fixed local messages.
+- **Source:** `packages/proxy/src/errors.ts`; malicious-description and real local-MCP error tests.
+
 ## Open
 
 - **Remaining sealing work:** device trust hardening, independent security review, ts-mls audit and browser distribution assurance remain launch blockers. Forum, library, sensemaking, offers, tasks and identity descriptors use sealed-v1. The console now has an opt-in browser encryption device, with ids/placeholders while locked. Nothing in this change deploys, resets, migrates or erases old plaintext data.
