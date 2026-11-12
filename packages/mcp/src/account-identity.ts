@@ -5,6 +5,7 @@ import {Refused,type ToolData} from './commands.ts';
 import {cell,personalGroupRule,bindingRule} from './rules.ts';
 import {stepCard} from './agents.ts';
 import {accountKeyRecordSchema,connectionClaim,verifyValue,verifyConnection,verifyDeviceBinding,verifyIdentityEvent,requestFingerprint,safetyNumber,type ConnectionClaim,type ConnectionCertificate,type IdentityEvent} from '../../shared/account-identity.ts';
+import {encode,decode} from '../../proxy/src/codec.ts';
 
 const check=(condition:unknown,message:string)=>{if(!condition)throw new Refused(message);};
 export function activeIdentity(account:Account){const key=account.accountKey;check(key&&key.identity.generation===(account.recovery?.generation??0),'Set up or recover your account key in a trusted browser');return key!;}
@@ -47,7 +48,7 @@ export async function manageIdentity(account:Account,storage:KeyValueStorage,ope
   const record=accountKeyRecordSchema.parse(operation.record),generation=account.recovery?.generation??0;
   check(account.passkeys.length&&record.identity.generation===generation&&!account.onboarding?.complete,'A first passkey/browser setup is required for the account key');
   check(!account.accountKey||account.accountKey.identity.generation<generation,'Account key already set; recover it instead');
-  check(!account.accountKey||account.accountKey.identity.publicKey!==record.identity.publicKey,'No-code recovery requires a different account key');
+  check(!account.accountKey||encode(decode(account.accountKey.identity.publicKey))!==record.identity.publicKey,'No-code recovery requires a different account key');
   const event=operation.event;
   check(event.personId===account.personId&&event.generation===generation&&event.accountPublicKey===record.identity.publicKey&&event.action==='account-key-set'&&event.connectionId===undefined&&event.previousPublicKey===account.accountKey?.identity.publicKey&&await verifyIdentityEvent(event),'Account key initialization signature mismatch');
   account.accountKey=record;appendIdentityEvent(account,event);return {accountKey:record};

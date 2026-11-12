@@ -58,6 +58,7 @@ Use fresh synthetic accounts; older unsigned connections must be enrolled again.
 4. In a journey, compare member safety numbers outside Wayfinding. Replace a member's server-provided MLS package or packet key in an in-process fixture: browser/proxy admission and history sharing must refuse it. Unsigned old records must also fail.
 5. Check the journey identity log for signed connection additions and removals. Alter a signed entry: verification must fail. An unsigned removal must say **Server report — unsigned**, never verified. These checks do not prove journal completeness.
 6. Remove a signed connection from the unlocked browser. Its later enrollment, reads and new audience packages must fail. Recovery without the code must revoke all old connections and agents immediately. Advance the synthetic clock past the 72-hour deadline and sign in again; first-browser setup must create a different number, with a change entry visible in the member's journeys. Compare and accept the new number before encrypting to that member. Agents need fresh authorization and connection signatures.
+7. Run `node --test packages/mcp/test/recovery-capacity.test.ts packages/proxy/test/account-encoding.test.ts`. A reset at 128 historical roots must allow a fresh signed connection. A full journal must refuse before changing passkeys, agents or recovery state. Noncanonical base64 aliases of the old key must not count as a replacement key.
 
 ### Browser connections, onboarding and recovery
 

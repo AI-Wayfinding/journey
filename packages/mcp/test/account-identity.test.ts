@@ -59,3 +59,12 @@ test('console revocation succeeds for two MLS leaves sharing one account-signed 
  const result=await browserPost(backend,identity,'/console/device/revoke',{csrf:'test',browserId});assert.equal(result.revoked,true);assert.equal(result.revocation,'complete');
  const listed=await backend.passkey(identity,{op:'browser_list'});assert.equal((listed.browsers as Array<{live:boolean}>)[0]!.live,false);for(const deviceId of devices)await assert.rejects(backend.accountsHost.deviceBinding(deviceId),/revoked|connection/i);
 });
+
+for(const storedAlias of [false,true])test(`no-code recovery compares actual public-key bytes, including base64 aliases (storedAlias=${storedAlias})`,async()=>{
+ const {backend,account,key,identity,record}=await fixture(),alphabet='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/',alias=key.publicKey.slice(0,-2)+alphabet[alphabet.indexOf(key.publicKey.at(-2)!)|1]+'=';
+ assert.deepEqual(Buffer.from(alias,'base64'),Buffer.from(key.publicKey,'base64'));
+ const state=JSON.parse(String(await backend.accountStorage.get('accounts')));state.accounts[0].recovery={generation:1,readyAt:2};state.accounts[0].onboarding={complete:false};if(storedAlias)state.accounts[0].accountKey.identity.publicKey=alias;await backend.accountStorage.put('accounts',JSON.stringify(state));
+ const publicKey=storedAlias?key.publicKey:alias,previousPublicKey=storedAlias?alias:key.publicKey,body={personId:account.personId,generation:1,accountPublicKey:publicKey,action:'account-key-set' as const,previousPublicKey,at:Date.now()};
+ const event={...body,signature:await signValue(key.privateKey,'wayfinding-identity-event-1',body)},before=backend.snapshot();
+ await assert.rejects(backend.passkey(identity,{op:'identity_set',record:{...record,identity:{publicKey,generation:1}},event}),/different.*key|canonical/i);assert.equal(backend.snapshot(),before);
+});

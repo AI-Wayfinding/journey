@@ -2,7 +2,7 @@ import * as z from 'zod';
 import {encode,decode,json} from '../proxy/src/codec.ts';
 
 const id=z.string().min(1).max(200),nat=z.number().int().nonnegative().safe();
-export const publicKeySchema=z.string().length(44);
+export const publicKeySchema=z.string().length(44).refine(value=>{try{const bytes=decode(value);return bytes.length===32&&encode(bytes)===value;}catch{return false;}},'Canonical Ed25519 public key required');
 export const accountIdentitySchema=z.object({publicKey:publicKeySchema,generation:nat}).strict();
 export type AccountIdentity=z.infer<typeof accountIdentitySchema>;
 export const connectionClaimSchema=z.object({personId:id,agentId:id.optional(),connectionId:id,verificationKey:publicKeySchema,generation:nat,accountPublicKey:publicKeySchema}).strict();
@@ -48,6 +48,7 @@ export async function verifyDeviceBinding(value:unknown):Promise<ConnectionCerti
  return cert;
 }
 export async function safetyNumber(publicKey:string):Promise<string>{
+ publicKey=publicKeySchema.parse(publicKey);
  const bytes=new Uint8Array(await crypto.subtle.digest('SHA-256',json(['wayfinding-safety-number-1',publicKey])));
  // Six 16-bit chunks (~96 bits), rendered as six fixed-width human-comparable groups.
  return Array.from({length:6},(_,i)=>String(bytes[i*2]!*256+bytes[i*2+1]!).padStart(5,'0')).join(' ');
