@@ -274,12 +274,13 @@ Dan's brief for v2 was to write the spec, build what seems best, and refine late
 - **Decided by:** hardening task, security finding F13.
 - **What:** standing decisions affect only the journey where the task was decided. Agent-created allows remain bounded by the owner’s admission ceiling, including later ceiling reductions. Manual approval still admits only the selected task.
 
-## Open
 
 ### 36. Agents manage only their own cards
 
 - **Decided by:** hardening task, security finding F14.
 - **What:** a bound agent can list and read only its own card, and can narrow or withdraw only that card. The person can still manage every owned agent.
+
+## Open
 
 - **Remaining sealing work:** device trust hardening, independent security review, ts-mls audit and browser distribution assurance remain launch blockers. Forum, library, sensemaking, offers, tasks and identity descriptors use sealed-v1. The console now has an opt-in browser encryption device, with ids/placeholders while locked. Nothing in this change deploys, resets, migrates or erases old plaintext data.
 - **Stage 7, review:** not done. Dan's formal review of the rules and an independent security review must pass before real users or confidential data arrive.
