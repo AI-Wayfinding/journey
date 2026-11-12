@@ -12,6 +12,12 @@ export async function readVault(origin:string,personId:string):Promise<VaultReco
 async function saveVault(record:VaultRecord):Promise<void>{
  const db=await database();try{await new Promise<void>((resolve,reject)=>{const tx=db.transaction('vaults','readwrite',{durability:'strict'});tx.objectStore('vaults').put(record,recordKey(record.context.origin,record.context.personId));tx.oncomplete=()=>resolve();tx.onerror=tx.onabort=()=>reject(new Error('Cannot commit private browser state; lock and reopen'));});}finally{db.close();}
 }
+
+/** Only offer this after the server reports that this connection is revoked. */
+export async function forgetRevokedVault(origin:string,personId:string):Promise<void>{
+ const release=await singleWriter(origin,personId),db=await database();
+ try{await new Promise<void>((resolve,reject)=>{const tx=db.transaction('vaults','readwrite',{durability:'strict'});tx.objectStore('vaults').delete(recordKey(origin,personId));tx.oncomplete=()=>resolve();tx.onerror=tx.onabort=()=>reject(new Error('Cannot retire revoked connection'));});}finally{db.close();release();}
+}
 /** Held for the entire unlocked lifetime. Never fall back to concurrent ratchet writers. */
 export async function singleWriter(origin:string,personId:string):Promise<()=>void>{
  if(!navigator.locks)throw new Error('This browser needs Web Locks for safe MLS storage');

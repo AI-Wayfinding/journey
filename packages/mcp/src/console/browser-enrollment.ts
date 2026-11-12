@@ -9,10 +9,11 @@ import { browserBinding, type PasskeyOperation } from './contract.ts';
 export type BrowserRegistration = z.infer<typeof browserBinding>;
 export async function browserEnrollment(account:Account,storage:KeyValueStorage,verifier:PasskeyVerifier,identity:ClientIdentity,operation:PasskeyOperation,now:number,register:(input:BrowserRegistration)=>Promise<ToolData>):Promise<ToolData>{
   const browsers=account.browsers??=[],live=(id:string)=>{const i=account.identities.findIndex(x=>x.id===id);return i>=0&&cell(account.group,'Members',i+2)!==0;};
-  if(operation.op==='browser_list')return {browsers:browsers.map(b=>({id:b.id,credentialId:b.credentialId,devices:b.devices,live:b.devices.some(live)}))};
+  if(operation.op==='browser_list')return {browsers:browsers.map(b=>({id:b.id,credentialId:b.credentialId,devices:b.devices,live:b.devices.some(live),createdAt:b.createdAt??null,lastUsedAt:b.lastUsedAt??null}))};
   if(operation.op==='browser_check'){
     const b=browsers.find(b=>b.id===operation.browserId);
     if(!b||!account.passkeys.some(p=>p.id===b.credentialId)||!b.devices.every(live))throw new Refused('Browser device revoked');
+    if(b.lastUsedAt===undefined||now-b.lastUsedAt>=3600000)b.lastUsedAt=now;
     return {devices:b.devices};
   }
   if(operation.op!=='browser_begin'&&operation.op!=='browser_finish')throw new Refused('Unknown browser operation');
@@ -31,7 +32,7 @@ export async function browserEnrollment(account:Account,storage:KeyValueStorage,
   if(!pending||pending.digest!==digest||pending.expiresAt<=now)throw new Refused('Fresh exact browser enrollment assertion required');
   const proof=await verifier.verify(operation.assertion,pending.challenge,account.passkeys);
   if(proof.credentialId!==credentialId)throw new Refused('Wrapping passkey mismatch');
-  const binding=await register(device);const browser=old??{id:browserId,credentialId,devices:[]};if(!browser.devices.includes(device.deviceId))browser.devices.push(device.deviceId);if(!old)browsers.push(browser);account.browsers=browsers;
+  const binding=await register(device);const browser=old??{id:browserId,credentialId,devices:[],createdAt:now,lastUsedAt:now};if(!browser.devices.includes(device.deviceId))browser.devices.push(device.deviceId);if(!old)browsers.push(browser);account.browsers=browsers;
   const credential=account.passkeys.find(c=>c.id===credentialId)!;credential.counter=proof.counter;credential.lastUsedAt=now;
   await storage.put(key,'null');return binding;
 }

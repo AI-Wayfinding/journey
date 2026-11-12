@@ -208,7 +208,7 @@ test('console: OAuth metadata and PKCE login create an eight-hour hardened sessi
   const cookie = login.finish.headers.get('set-cookie')!;
   for (const flag of ['HttpOnly', 'Secure', 'SameSite=Lax', 'Max-Age=28800', 'Path=/']) assert.ok(cookie.includes(flag), flag);
   assert.doesNotMatch(cookie, /Domain=/i);
-  assert.match(await (await f.send('/console', { headers: { cookie: login.cookie } })).text(), /Journeys.*Agents.*Connect your agent/s);
+  assert.match(await (await f.send('/console', { headers: { cookie: login.cookie } })).text(), /Journeys.*Your connections.*Connect your agent/s);
 });
 
 
@@ -373,8 +373,13 @@ test('console: registration and assertions reject wrong origin, expiry, counter 
   f.advance(300_001);
   const expired = await key.assert(second.challenge, 2);
   assert.equal((await post('/console/authorize/complete', { change, assertion: expired })).status, 403, 'five minute assertion expiry');
+  // Keep a second, assertion-authorized passkey: removing the last key is forbidden.
+  const survivor = await authenticator();
+  const addition = await (await post('/console/passkeys/addition-options', {})).json() as {challenge:string};
+  const registrationOptions = await (await post('/console/passkeys/options', {assertion:await key.assert(addition.challenge, 2)})).json() as {challenge:string};
+  assert.equal((await post('/console/passkeys/register', {credential:survivor.register(registrationOptions.challenge)})).status,303);
   const pending = await (await post('/console/authorize/options', { change })).json() as { challenge: string };
-  const deleted = await key.assert(pending.challenge, 2);
+  const deleted = await key.assert(pending.challenge, 3);
   // Session survives; deleting a key clears every outstanding exact-change challenge.
   assert.equal((await post('/console/passkeys/delete', { id: key.id })).status, 303);
   assert.equal((await post('/console/authorize/complete', { change, assertion: deleted })).status, 403);

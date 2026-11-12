@@ -131,6 +131,7 @@ export function createOAuth(config: { backend?: CoordinationBackend; console?: C
           return redirect(`/console/login?prompt=login${returnTo}`);
         }
         await sessions.require(request);
+        if(backend.sealedMode&&!(await config.console.backend.passkey({subject:session.subject,clientId:session.clientId},{op:'setup_status'})).complete)return redirect('/console/onboarding');
         const body = request.method === 'POST' ? await formBody(request, session.csrf, origin) : undefined;
         const id = z.string().regex(/^[A-Za-z0-9_-]{43}$/).parse(body ? body.request : url.searchParams.get('request'));
         const pending = await backend.oauth({ op: 'request', id });

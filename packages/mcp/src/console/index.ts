@@ -7,6 +7,7 @@ const SIGNED_OUT_COOKIE = '__Host-wayfinding-signed-out';
 
 import { workspacePage } from './workspace.ts';
 import { home, agentPage, passkeysPage, confirmation, journeyPage, routeId } from './pages.ts';
+import { setupPage, profilePage } from './setup.ts';
 import { style as baseStyle, webauthn, landingStyle } from './assets.ts';
 const style = baseStyle + landingStyle;
 import { parseCommand } from '../commands.ts';
@@ -48,6 +49,7 @@ export function createConsole(config: ConsoleConfig) {
         if (record?.kind !== 'session') return html(landingPage({ signedIn: false }, config.resource.href));
         try {
           const account = await config.backend.execute(record.subject, { tool: 'account_read', input: {} }, record.clientId);
+          if(config.backend.sealedMode && !(await config.backend.passkey({subject:record.subject,clientId:record.clientId},{op:'setup_status'})).complete)return redirect('/console/onboarding');
           const name = String(account.nickname ?? account.name ?? account.email ?? 'Your account');
           return html(landingPage({ signedIn: true, name, csrf: record.csrf }, config.resource.href));
         } catch { return html(landingPage({ signedIn: false }, config.resource.href)); }
@@ -90,15 +92,38 @@ export function createConsole(config: ConsoleConfig) {
       // A page visit without a valid session goes to sign-in; POSTs stay refused.
       if (request.method === 'GET' && (await sessions.read(request, SESSION_COOKIE))?.kind !== 'session') return redirect('/console/login');
       const session = await sessions.require(request);
+      const setup = config.backend.sealedMode ? await config.backend.passkey({subject:session.subject,clientId:session.clientId},{op:'setup_status'}) : {complete:true};
+      const waiting=typeof setup.readyAt==='number'&&setup.readyAt>now();
+      const setupPaths=['/console/onboarding','/console/logout','/console/passkeys/options','/console/passkeys/register','/console/passkeys/addition-options','/console/setup/options','/console/setup/complete','/console/connections/register','/console/recovery/start'];
+      if(!setup.complete && !(setupPaths.includes(path)||(!waiting&&['/console/device/info','/console/device/enroll/options','/console/device/enroll/finish','/console/device/call'].includes(path)))) {
+        if(request.method==='GET')return redirect('/console/onboarding');
+        throw new Refused('Complete onboarding before using the console');
+      }
+      if(waiting&&request.method==='POST'&&!['/console/logout','/console/recovery/start'].includes(path))throw new Refused('Wait the full 72 hours');
+      if(typeof setup.readyAt==='number'&&setup.readyAt<=now()&&request.method==='POST'&&!['/console/logout','/console/recovery/start'].includes(path)&&(session.signedInAt===undefined||session.signedInAt<setup.readyAt))return redirect('/console/login');
       if (request.method === 'POST') {
-        const body = await formBody(request, session.csrf, origin, path==='/console/device/call'?15*1024*1024:96*1024), identity = { subject: session.subject, clientId: session.clientId };
+        const body = await formBody(request, session.csrf, origin, path==='/console/device/call'?15*1024*1024:96*1024), identity = { subject: session.subject, clientId: session.clientId, signedInAt: session.signedInAt };
         if (path === '/console/logout') {
           await sessions.read(request, SESSION_COOKIE, 'delete');
           // Land on the signed-out home page: /console/login would bounce through AuthKit, whose own session signs the person straight back in.
           return redirect('/', [cookie(SESSION_COOKIE, '', 0), cookie(SIGNED_OUT_COOKIE, '1', 600)]);
         }
-        if(config.backend.sealedMode&&path.startsWith('/console/device/'))return Response.json(await browserPost(config.backend,identity,path,body),{headers});
-        if (path === '/console/passkeys/options') return Response.json(await config.backend.passkey(identity, { op: 'begin' }), { headers });
+        if(path==='/console/recovery/start'){
+          if(body.confirm!=='REMOVE ALL CONNECTIONS')throw new Refused('Confirm removal of all connections');
+          await config.backend.passkey(identity,{op:'recovery_start'});return redirect('/console/onboarding');
+        }
+        if(path==='/console/connections/register')return Response.json(await config.backend.passkey(identity,{op:'finish',credential:registration.parse(body.credential)}),{headers});
+        if(path==='/console/connections/remove'){
+          await browserPost(config.backend,identity,'/console/device/revoke',{csrf:session.csrf,browserId:body.browserId});return redirect('/console');
+        }
+        if(path==='/console/setup/options'||path==='/console/setup/complete')return Response.json(await config.backend.passkey(identity,{op:path.endsWith('/options')?'setup_options':'setup_complete',browserId:z.string().uuid().parse(body.browserId),recoveryProof:z.string().parse(body.recoveryProof),...(body.assertion?{assertion:body.assertion}:{})}),{headers});
+        if(config.backend.sealedMode&&path.startsWith('/console/device/'))return Response.json(await browserPost(config.backend,identity,path,body,now()),{headers});
+        if(path==='/console/passkeys/addition-options')return Response.json(await config.backend.passkey(identity,{op:'addition_options'}),{headers});
+        if (path === '/console/passkeys/options') {
+          const keys=await config.backend.passkey(identity,{op:'list'});
+          if(z.array(z.unknown()).parse(keys.passkeys).length===0&&(session.signedInAt===undefined||session.signedInAt>now()||now()-session.signedInAt>600000))throw new Refused('Sign in again before creating your first passkey');
+          return Response.json(await config.backend.passkey(identity,{op:'begin',...(body.assertion?{assertion:body.assertion}:{}),...(body.recoveryProof?{recoveryProof:z.string().parse(body.recoveryProof)}:{})}),{headers});
+        }
         if (path === '/console/passkeys/register') {
           await config.backend.passkey(identity, { op: 'finish', credential: registration.parse(body.credential) });
           return redirect('/console/passkeys?notice=registered');
@@ -206,6 +231,10 @@ export function createConsole(config: ConsoleConfig) {
         if(config.backend.sealedMode)text=text.replace('</head>',`<script type="module" src="${browserPath}" integrity="${browserIntegrity}" crossorigin="anonymous"></script></head>`).replace(/<p role="note">Proof of concept\.[\s\S]*?<\/p>/,'<p role="note">Synthetic data only. Content is sealed on your devices. Unlock this browser to read or write it. No key escrow: losing all devices and recovery material loses content. The hosted page can be replaced by its operator; this PoC does not protect against that.</p>');
         return new Response(notice ? text.replace(STATUS, `<p id="status" role="status" aria-live="polite" class="notice">${notice}</p>`) : text,{headers:{...headers,'Content-Type':'text/html; charset=utf-8'}});
       };
+
+      if(path==='/console/onboarding')return html(setupPage(session.csrf,setup,now()));
+      if(path==='/console/profile')return html(profilePage(session.csrf,setup));
+      if(path==='/console/recover')return html(setupPage(session.csrf,setup,now(),true));
       if (path === '/console' || path === '/console/') return html(await home(config.backend, identity, session.csrf));
       if (path === '/console/passkeys') return html(await passkeysPage(config.backend, identity, session.csrf));
       if (path.startsWith('/console/agents/')) return html(await agentPage(config.backend, identity, routeId(path, '/console/agents/'), session.csrf));

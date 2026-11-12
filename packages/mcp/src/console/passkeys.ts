@@ -27,15 +27,16 @@ export async function managePasskey(account: Account, accounts: Account[], stora
       userID: new Uint8Array(new TextEncoder().encode(account.personId)), userName: account.nickname ?? account.name,
       attestationType: 'none', supportedAlgorithmIDs: [-7, -257],
       authenticatorSelection: { residentKey: 'required', userVerification: 'required' }, excludeCredentials: account.passkeys.map(c => ({ id: c.id })) });
-    await storage.put(key, JSON.stringify({ challenge: options.challenge, expiresAt: now + 300_000 }));
+    await storage.put(key, JSON.stringify({ challenge: options.challenge, expiresAt: now + 300_000, credentials:account.passkeys.map(k=>k.id).sort().join(','), authorized:true }));
     return { ...options };
   }
   if(operation.op!=='finish')throw new Refused('Browser enrollment uses the host enrollment path');
-  let pending: { challenge: string; expiresAt: number } | null = null;
+  let pending: { challenge: string; expiresAt: number; credentials: string; authorized: true } | null = null;
   const raw = await storage.get(key);
-  try { pending = typeof raw === 'string' ? JSON.parse(raw) as { challenge: string; expiresAt: number } : null; }
+  try { pending = typeof raw === 'string' ? JSON.parse(raw) as { challenge: string; expiresAt: number; credentials: string; authorized: true } : null; }
   catch { throw new Refused('Invalid stored registration'); }
   if (!pending || pending.expiresAt <= now) throw new Refused('Fresh passkey registration required');
+  if(pending.authorized!==true||pending.credentials!==account.passkeys.map(k=>k.id).sort().join(','))throw new Refused('Fresh authorized registration required');
   const verified = await verifyRegistrationResponse({ response: operation.credential, expectedChallenge: pending.challenge,
     expectedOrigin: 'https://poc.wayfinding.support', expectedRPID: 'poc.wayfinding.support', requireUserVerification: true, supportedAlgorithmIDs: [-7, -257] });
   if (!verified.verified) throw new Refused('Passkey registration refused');

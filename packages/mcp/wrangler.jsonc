@@ -19,7 +19,7 @@
   "r2_buckets": [{ "binding": "BLOBS", "bucket_name": "wayfinding-ciphertext" }],
   "durable_objects": {
     "bindings": [
-      { "name": "JOURNEYS", "class_name": "JourneySealedV1" },
+      { "name": "JOURNEYS", "class_name": "JourneyResetV1" },
       { "name": "ACCOUNTS", "class_name": "AccountsPartitionedV1" }
     ]
   },
@@ -27,6 +27,11 @@
     { "tag": "v1", "new_sqlite_classes": ["Journey", "Accounts"] },
     { "tag": "v2", "new_sqlite_classes": ["JourneyV2", "AccountsV2"] },
     { "tag": "sealed-v1", "new_sqlite_classes": ["JourneySealedV1", "AccountsSealedV1"] },
-    { "tag": "accounts-partitioned-v1", "new_sqlite_classes": ["AccountsPartitionedV1"] }
+    { "tag": "accounts-partitioned-v1", "new_sqlite_classes": ["AccountsPartitionedV1"] },
+    {
+      "tag": "prototype-reset-v1",
+      "new_sqlite_classes": ["JourneyResetV1"],
+      "deleted_classes": ["Journey", "Accounts", "JourneyV2", "AccountsV2", "JourneySealedV1", "AccountsSealedV1"]
+    }
   ]
 }
