@@ -113,7 +113,7 @@ Malformed/plaintext sealed inputs, incomplete multi-envelope manifests, oversize
 
 ## Historical v2 walkthrough (not sealed-v1)
 
-The Worker authorization server replaces AuthKit MCP tokens with its own tokens; existing MCP clients must sign in again after deployment. The sealed-v1 source also switches bindings to fresh `JourneySealedV1` and `AccountsSealedV1` classes with an appended migration. Old classes and data remain intact. Neither change is deployed by this work, and changing bindings does not erase old plaintext.
+The Worker authorization server replaces AuthKit MCP tokens with its own tokens; existing MCP clients must sign in again after deployment. The `prototype-reset-v1` migration deletes every earlier storage class and its data. Journeys start empty in `JourneyResetV1`, and accounts in `AccountsPartitionedV1`. Everyone signs up again.
 
 ### Connect and name an agent
 
