@@ -21,8 +21,17 @@ import { managePasskey } from './console/passkeys.ts';
 import { browserEnrollment, type BrowserRegistration } from './console/browser-enrollment.ts';
 export interface Profile { name: string; email: string }
 export interface Profiles { get(subject: string): Promise<Profile> }
+export class UpstreamUserDeleted extends Refused { constructor() { super('Upstream account removed'); } }
+function tombstone(account: Account): void {
+  account.live = false;
+  for (const [i, agent] of account.agents.entries()) {
+    agent.live = false; agent.card = stepCard(agent.card, 'withdraw');
+    account.bindings = bindingRule.step(account.bindings, { op: 2, client: 0, agent: i + 2, personAsserted: 0, agentIsOwnLive: 0, personLive: 0, boundAgentLive: 0 });
+  }
+  account.assertions = [];
+}
 export interface Account extends Profile, AgentAccount { browsers?: { id: string; credentialId: string; devices: string[] }[]; descriptor?:SealedDescriptor; emailIndex?:string; subject: string; personId: string; nickname?: string; group: Snapshot; identities: { id: string; name: string; kind: 'device' | 'agent' }[] }
-interface AccountsState { emailKey?:string; rulesHash: RulesStamp; accounts: Account[]; journeys: string[]; oauth?: OAuthState; allowances?: AllowanceReceipt[]; permits?: AdmissionPermit[] }
+interface AccountsState { removedSubjects?: string[]; emailKey?:string; rulesHash: RulesStamp; accounts: Account[]; journeys: string[]; oauth?: OAuthState; allowances?: AllowanceReceipt[]; permits?: AdmissionPermit[] }
 
 function parseDevice(raw:string):DeviceBinding{try{return bindingSchema.parse(JSON.parse(raw));}catch{throw new Refused('Invalid stored authenticated device binding');}}
 // The Accounts serial is the admission linearisation point for every journey.
@@ -115,6 +124,14 @@ export class AccountsHost {
         return oauthStep({ accounts: [stored.account], oauth: { clients: [], requests: [], codes: [], access: [stored.token], refresh: [] } }, operation, this.now());
       }
       const state = await this.load();
+      if (operation.op === 'refresh') {
+        const hash = await tokenHash(operation.token), token = state.oauth?.refresh.find(t => t.hash === hash && t.clientId === operation.clientId && !t.used && t.expiresAt > this.now());
+        const account = token && state.accounts.find(a => a.subject === token.subject && a.live);
+        if (account) {
+          try { await this.profiles.get(account.subject); }
+          catch (error) { if (error instanceof UpstreamUserDeleted) tombstone(account); else return { kind: 'error', error: 'temporarily_unavailable' }; }
+        }
+      }
       if(this.sealedMode&&(operation.op==='consent-options'||operation.op==='consent')){const request=state.oauth?.requests.find(r=>r.id===operation.id)?.request;if(!request||operation.consent.name!=='MCP client')throw new Refused('Names must be sealed by an enrolled proxy; consent uses client id only');}
       if(this.sealedMode&&operation.op==='manage'&&operation.name!==undefined&&operation.name!==operation.agentId)throw new Refused('Agent names must be sealed by an enrolled proxy');
       let deviceAsserted = false;
@@ -154,6 +171,7 @@ export class AccountsHost {
   provision(subject: string): Promise<Account> {
     return this.serial.run(async () => {
       const state = await this.load();
+      if (state.removedSubjects?.includes(subject)) throw new Refused('Account removed');
       const existing = state.accounts.find((a) => a.subject === subject);
       if (existing) return existing;
       const profile = await this.profiles.get(subject);
@@ -234,13 +252,8 @@ export class AccountsHost {
   removePerson(subject: string): Promise<void> {
     return this.serial.run(async () => {
       const state = await this.load(), account = state.accounts.find(a => a.subject === subject);
-      if (!account) throw new Refused('Account not found');
-      account.live = false;
-      for (const [i, agent] of account.agents.entries()) {
-        agent.live = false; agent.card = stepCard(agent.card, 'withdraw');
-        account.bindings = bindingRule.step(account.bindings, { op: 2, client: 0, agent: i + 2, personAsserted: 0, agentIsOwnLive: 0, personLive: 0, boundAgentLive: 0 });
-      }
-      account.assertions = [];
+      if (!(state.removedSubjects ??= []).includes(subject)) state.removedSubjects.push(subject);
+      if (account) tombstone(account);
       await this.save(state);
     });
   }
@@ -564,6 +577,7 @@ export class WorkOSProfiles implements Profiles {
       redirect: 'manual',
       headers: { authorization: `Bearer ${this.apiKey}` }, signal: AbortSignal.timeout(10_000),
     });
+    if (response.status === 404) throw new UpstreamUserDeleted();
     if (!response.ok) throw new Refused('Account profile lookup failed');
     const user: unknown = await response.json();
     if (typeof user !== 'object' || user === null || !('id' in user) || user.id !== subject || !('email' in user) || typeof user.email !== 'string') {

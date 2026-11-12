@@ -166,7 +166,7 @@ export function createOAuth(config: { backend?: CoordinationBackend; console?: C
         const result = grant === 'authorization_code' ? await backend.oauth({ op: 'exchange', clientId, code: oauthId.parse(p.get('code')), redirectUri: oauthId.parse(p.get('redirect_uri')), verifier: z.string().regex(/^[A-Za-z0-9._~-]{43,128}$/).parse(p.get('code_verifier')) })
           : grant === 'refresh_token' ? await backend.oauth({ op: 'refresh', clientId, token: oauthId.parse(p.get('refresh_token')) }) : undefined;
         if (!result) return oauthError('unsupported_grant_type');
-        return result.kind === 'tokens' ? json(result.tokens) : oauthError(result.kind === 'error' ? result.error : 'invalid_grant');
+        return result.kind === 'tokens' ? json(result.tokens) : oauthError(result.kind === 'error' ? result.error : 'invalid_grant', result.kind === 'error' && result.error === 'temporarily_unavailable' ? 503 : 400);
       }
       return oauthError('invalid_request', 405);
     } catch { return oauthError(consentRoute ? 'access_denied' : 'invalid_request', consentRoute ? 403 : 400); }
