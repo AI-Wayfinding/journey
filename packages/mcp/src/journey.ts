@@ -194,7 +194,7 @@ export class JourneyHost {
         const person = kind === 2 ? cell(state.membership, 'AddedBy', slot) : slot;
         return [{ memberId: m.id, name: m.name, kind: kind === 1 ? 'person' : 'agent', role: decodeChoice(JOURNEY.role, cell(state.membership, 'Roles', person), 'role'), guide: kind === 1 && cell(state.membership, 'Guides', slot) === 1, owner: kind === 2 ? state.identities[person - 1]?.id : undefined }];
       }),
-      pending: state.identities.flatMap((m, i) => { const p = cell(state.membership, 'Pending', i + 1); return p ? [{ personId: m.id, name: m.name, status: decodeChoice(JOURNEY.pending, p, 'pending') }] : []; }),
+      pending: state.identities.flatMap((m, i) => { const p = cell(state.membership, 'Pending', i + 1); return p && (p !== JOURNEY.pending.indexOf('invited') || m.id === personId) ? [{ personId: m.id, name: m.name, status: decodeChoice(JOURNEY.pending, p, 'pending') }] : []; }),
       projects: state.projects.map((p) => ({ projectId: p.id, name: p.name, purpose: p.purpose, status: decodeChoice(PROJECT.status, scalar(p.rule, 'status'), 'project status'), members: state.identities.filter((_, i) => cell(p.rule, 'Members', i + 1) === 1).map((m) => m.id) })),
       agents: state.agents.map(a => ({ agentId: a.id, owner: a.owner, signed: false, read: false, write: false, grant: false })),
       grants: state.grants.map((g) => ({ grantId: g.id, need: g.need, resource: g.resource, expiresAt: g.expiresAt, status: ['unissued', 'live', 'revoked', 'ended'][scalar(g.rule, 'status')], usesLeft: scalar(g.rule, 'usesLeft') })),

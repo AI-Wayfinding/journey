@@ -9,9 +9,10 @@ export const admissionRuleSchema = z.object({
   who: z.union([z.enum(['owner', 'guide', 'members', 'people', 'agents']), z.object({ person: id }).strict(), z.object({ agent: id }).strict()]),
   journeys: z.array(id).max(128).optional(), decision,
   limit: z.object({ count: z.number().int().min(1).max(1000), per: z.enum(['hour', 'day', 'week']) }).strict().optional(),
+  ceilingBound: z.boolean().optional(),
 }).strict();
 export const admissionSchema = z.object({ rules: z.array(admissionRuleSchema).max(50), default: decision }).strict();
-export type AdmissionRule = z.infer<typeof admissionRuleSchema> & { ceilingBound?: boolean };
+export type AdmissionRule = z.infer<typeof admissionRuleSchema>;
 export type AdmissionPolicy = { rules: AdmissionRule[]; default: 'allow' | 'hold' | 'deny' };
 export const settingsSchema = z.object({ publishWithoutReview: z.boolean(), maxAdmission: z.enum(['hold', 'allow']), maxRequestsPerDay: z.number().int().min(0).max(1000) }).strict();
 export type OwnerOfferSettings = z.infer<typeof settingsSchema>;

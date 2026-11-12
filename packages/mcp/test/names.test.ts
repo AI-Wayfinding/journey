@@ -99,7 +99,9 @@ test('names: every journey state response resolves current people names, preserv
   const personId = (await f.call(nameless, 'account_read')).personId as string;
   const invited = await f.call(f.alice, 'journey_invite', { journeyId, personId });
   assert.doesNotMatch(JSON.stringify(invited), /nameless@example.test/);
-  assert.equal((invited.pending as Pending[])[0]!.name, 'Wayfinding member');
+  assert.deepEqual(invited.pending, [], 'Invitations stay private until the person joins');
+  const joinedNameless = await f.call(nameless, 'journey_join', { journeyId });
+  assert.equal((joinedNameless.members as Member[]).find(m => m.memberId === personId)!.name, 'Wayfinding member');
 });
 
 test('names: email invites match exactly ignoring case and non-guides cannot trigger account lookup', async t => {
@@ -119,7 +121,11 @@ test('names: email invites match exactly ignoring case and non-guides cannot tri
   assert.deepEqual(await f.call(f.alice, 'journey_invite', { journeyId, email: 'missing@example.test' }), accepted);
   const invited = await f.call(f.alice, 'journey_invite', { journeyId, email: 'BOB@EXAMPLE.TEST' });
   assert.deepEqual(invited, accepted);
-  assert.equal(f.emailLookups(), 3, 'The lookup counter must observe successful and unsuccessful guide lookups');
+  const afterKnown = await f.call(f.alice, 'journey_read', { journeyId });
+  assert.deepEqual(afterKnown.pending, [], 'A pending email invitation must not expose the existing account');
+  await f.call(f.alice, 'journey_invite', { journeyId, email: 'another-missing@example.test' });
+  assert.deepEqual(await f.call(f.alice, 'journey_read', { journeyId }), afterKnown);
+  assert.equal(f.emailLookups(), 4, 'The lookup counter must observe successful and unsuccessful guide lookups');
   assert.deepEqual(await f.call(f.alice, 'journey_invite', { journeyId, email: 'bob@example.test' }), accepted);
   const joined = await f.call(f.bob, 'journey_join', { journeyId });
   assert.deepEqual((joined.members as Member[]).map(m => m.memberId), [f.a, f.b]);

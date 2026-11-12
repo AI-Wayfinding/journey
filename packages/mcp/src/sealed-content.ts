@@ -14,7 +14,7 @@ import { decodeBytes, encodeBytes, type BlobStore } from './relay.ts';
 import { tokenHash } from './oauth-store.ts';
 
 export interface SealedAuthority { binding(deviceId:string):Promise<DeviceBinding>; reserve(expected:DeviceBinding,groupId:string):Promise<DeviceBinding> }
-interface Group { id:string; task?:TaskAudience; owner?:string; roundId?:string; epoch:number; sequence:number; bytes:number; messages:number; handshakeBytes?:number; handshakeMessages?:number; devices:DeviceBinding[]; pendingDevices?:string[]; usedDevices?:string[]; checkpoints:Record<string,number>; createdAt:number }
+interface Group { id:string; task?:TaskAudience; owner?:string; roundId?:string; epoch:number; sequence:number; bytes:number; messages:number; handshakeBytes?:number; handshakeMessages?:number; admissionBytes?:number; admissionMessages?:number; devices:DeviceBinding[]; pendingDevices?:string[]; usedDevices?:string[]; checkpoints:Record<string,number>; createdAt:number }
 interface Reference { context:ContentContext; blob:string; hash:string; size:number; sequence:number; attachment?:string }
 interface RecordState { id:string; taskId?:string; type:string; parentId:string; owner:string; revision:number; createdAt:number; updatedAt:number; refs:Reference[]; rule?:Snapshot; topicSlot?:number; versions?:{version:number;revision:number}[]; visibility?:'members'|'private'; projectId?:string; target?:Record<string,string>; replyTo?:string; deleted?:boolean; hidden?:boolean; locked?:boolean; source?:{itemId:string;version:number}; previousRoundId?:string; relatedItemIds?:string[]; guidanceItemId?:string; documentItemId?:string }
 interface Index { revision:number; topics?:TopicRegistry; ids:string[]; groups:string[]; pending:string[];uploadBytes?:number }
@@ -50,11 +50,15 @@ async function authorizedTarget(e:SealedEnvironment,g:Group,deviceId:string):Pro
   e.deviceIds.add(target.deviceId);return target;
 }
 async function append(e:SealedEnvironment,g:Group,message:Omit<Message,'sequence'>){
-  const handshake=!['application','history'].includes(message.kind),kind=handshake?'handshake':'content';
-  const quotaKey=key('quota',g.id,message.deviceId,kind);
+  // One lifetime budget per person across all their devices and agents. Automatic
+  // roster changes/history have a separate budget from updates and application data.
+  const kind=message.kind==='application'?'content':message.kind==='update'?'handshake':'admission';
+  const quotaKey=key('quota',g.id,personId(e),kind);
   const used=await load<{bytes:number;messages:number}>(e.storage,quotaKey)??{bytes:0,messages:0};
-  check(used.bytes+message.size<=(handshake?4:16)*1024*1024&&used.messages<(handshake?128:2048),'Sealed device retention quota exhausted');
-  if(handshake){check((g.handshakeMessages??0)<4096&&(g.handshakeBytes??0)+message.size<=32*1024*1024,'Sealed handshake retention budget exhausted');g.handshakeMessages=(g.handshakeMessages??0)+1;g.handshakeBytes=(g.handshakeBytes??0)+message.size;}
+  const limits=kind==='content'?{bytes:16*1024*1024,messages:2048}:kind==='handshake'?{bytes:4*1024*1024,messages:128}:{bytes:64*1024*1024,messages:1024};
+  check(used.bytes+message.size<=limits.bytes&&used.messages<limits.messages,'Sealed person retention quota exhausted');
+  if(kind==='admission'){check((g.admissionMessages??0)<4096&&(g.admissionBytes??0)+message.size<=256*1024*1024,'Sealed admission retention budget exhausted');g.admissionMessages=(g.admissionMessages??0)+1;g.admissionBytes=(g.admissionBytes??0)+message.size;}
+  else if(kind==='handshake'){check((g.handshakeMessages??0)<4096&&(g.handshakeBytes??0)+message.size<=32*1024*1024,'Sealed handshake retention budget exhausted');g.handshakeMessages=(g.handshakeMessages??0)+1;g.handshakeBytes=(g.handshakeBytes??0)+message.size;}
   else {check(g.messages<SEALED_LIMITS.messages&&g.bytes+message.size<=SEALED_LIMITS.bytes,'Sealed group retention budget exhausted');g.messages++;g.bytes+=message.size;}
   await save(e.storage,quotaKey,{bytes:used.bytes+message.size,messages:used.messages+1});
   const sequence=++g.sequence;await save(e.storage,key('message',g.id,sequence),{...message,sequence});await save(e.storage,key('group',g.id),g);return sequence;
@@ -63,7 +67,7 @@ async function refundUploads(e:SealedEnvironment,index:Index,t:Ticket){
   if(t.result)return;
   for(const upload of Object.values(t.uploads??{})){
     index.uploadBytes=Math.max(0,(index.uploadBytes??0)-upload.size);
-    const k=key('upload-quota',upload.deviceId),used=await load<number>(e.storage,k)??0;
+    const k=key('upload-quota',t.personId),used=await load<number>(e.storage,k)??0;
     await save(e.storage,k,Math.max(0,used-upload.size));await e.blobs.delete(upload.blob);
   }
   t.uploads={};t.cancelled=true;t.prepared.expiresAt=0;
@@ -180,8 +184,8 @@ export async function sealedContent(e:SealedEnvironment,tool:string,supplied:unk
     const binding=await e.authority.binding(String(input.deviceId)),audience=await group(e,index,t!.prepared.slots.find(s=>s.key===slot)!.context.groupId);
     check(binding.personId===personId(e)&&binding.agentId===e.actor.agent?.id&&e.eligible(binding)&&audience.devices.some(d=>d.deviceId===binding.deviceId),'Authenticated upload device required');
     const prior=t!.uploads?.[slot];if(prior){check(prior.hash===hash,'Upload slot already bound to different ciphertext');return prior;}
-    e.deviceIds.add(binding.deviceId);const quotaKey=key('upload-quota',binding.deviceId),used=await load<number>(e.storage,quotaKey)??0;
-    check(used+bytes.length<=16*1024*1024,'Sealed device upload quota exhausted');await save(e.storage,quotaKey,used+bytes.length);
+    e.deviceIds.add(binding.deviceId);const quotaKey=key('upload-quota',personId(e)),used=await load<number>(e.storage,quotaKey)??0;
+    check(used+bytes.length<=16*1024*1024,'Sealed person upload quota exhausted');await save(e.storage,quotaKey,used+bytes.length);
     check(Object.values(t!.uploads??{}).reduce((n,u)=>n+u.size,bytes.length)<=SEALED_LIMITS.blob,'Ticket upload budget exhausted');
     check((index.uploadBytes??0)+bytes.length<=SEALED_LIMITS.bytes,'Retained upload budget exhausted');index.uploadBytes=(index.uploadBytes??0)+bytes.length;await save(e.storage,key('index'),index);
     const upload={blob:`blob_${crypto.randomUUID()}`,hash,size:bytes.length,deviceId:binding.deviceId};await e.blobs.put(upload.blob,bytes);
@@ -241,7 +245,7 @@ export async function sealedContent(e:SealedEnvironment,tool:string,supplied:unk
       const binding=await e.authority.binding(String(input.deviceId));check(binding.personId===personId(e)&&binding.agentId===e.actor.agent?.id&&e.eligible(binding),'Authenticated device binding required');check(input.expectedEpoch===g.epoch&&input.expectedSequence===g.sequence,'Sealed group CAS mismatch');
       const action=String(input.action);let target:DeviceBinding|undefined;
       if(action==='bootstrap'){check(!g.devices.length&&!g.sequence,'Group already bootstrapped');target=await authorizedTarget(e,g,binding.deviceId);g.devices.push(binding);}
-      else {check(g.devices.some(d=>d.deviceId===binding.deviceId),'Current group device required');if(action==='add'){check(g.devices.length<128,'Audience device capacity reached');target=await authorizedTarget(e,g,String(input.targetDeviceId));check(!g.devices.some(d=>d.deviceId===target!.deviceId),'Device already admitted');g.devices.push(target);}else if(action==='remove'){const id=String(input.targetDeviceId);target=g.devices.find(d=>d.deviceId===id);check(target,'Unknown removed device');check(target!.personId===binding.personId||!(await liveDevices(e,g)).some(d=>d.deviceId===id),'Only own devices or server-ineligible devices may be removed');g.devices=g.devices.filter(d=>d.deviceId!==id);}g.epoch++;}
+      else {check(g.devices.some(d=>d.deviceId===binding.deviceId),'Current group device required');if(action==='add'){check(g.devices.length<128,'Audience device capacity reached');target=await authorizedTarget(e,g,String(input.targetDeviceId));check(!g.devices.some(d=>d.deviceId===target!.deviceId),'Device already admitted');g.devices.push(target);}else if(action==='remove'){const id=String(input.targetDeviceId);target=g.devices.find(d=>d.deviceId===id);check(target,'Unknown removed device');check(binding.agentId?target!.deviceId===binding.deviceId:target!.personId===binding.personId||!(await liveDevices(e,g)).some(d=>d.deviceId===id),'Only own devices or server-ineligible devices may be removed');g.devices=g.devices.filter(d=>d.deviceId!==id);}g.epoch++;}
       if(target&&(action==='bootstrap'||action==='add')){check(!g.usedDevices?.includes(target.deviceId),'Key package was already consumed; register a new device package');await e.authority.reserve(target,g.id);g.usedDevices=[...(g.usedDevices??[]),target.deviceId];}
       if(target&&action==='add'||action==='bootstrap')g.checkpoints[target!.deviceId]=e.now;const bytes=decodeBytes(String(input.data),SEALED_LIMITS.envelope);if(action!=='remove')await current(e,g);if(action==='add')g.pendingDevices=g.pendingDevices?.filter(id=>id!==target!.deviceId);const sequence=await appendCiphertext(e,g,{epoch:g.epoch,kind:action as Message['kind'],deviceId:binding.deviceId,target},bytes);await save(e.storage,key('index'),index);return {sequence,epoch:g.epoch};
     }
