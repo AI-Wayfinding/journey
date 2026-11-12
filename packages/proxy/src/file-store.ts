@@ -18,7 +18,7 @@ export class FileStore implements LocalStore {
   await lock.writeFile(JSON.stringify({pid:process.pid}));
   return new FileStore(path,lock);
  }
- private path(name:string):string{if(!['state','oauth','sealed-state'].includes(name))throw new Error('Unknown local storage record');return join(this.directory,`${name}.json`);}
+ private path(name:string):string{if(!['state','oauth','sealed-state','content-mode'].includes(name))throw new Error('Unknown local storage record');return join(this.directory,`${name}.json`);}
  async read(name:string):Promise<string|undefined>{
   if(!this.lock)throw new Error('Store is closed');
   let file:FileHandle;try{file=await open(this.path(name),constants.O_RDONLY|constants.O_NOFOLLOW);}catch(e){if(e instanceof Error&&'code' in e&&e.code==='ENOENT')return;throw e;}

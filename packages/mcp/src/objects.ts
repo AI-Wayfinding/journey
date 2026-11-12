@@ -1,7 +1,8 @@
 import * as z from 'zod';
 import { writeRequestSchema, writePermitSchema, writeReceiptSchema, type WritePermit, type WriteReceipt } from './write-permits.ts';
+import { PartitionedAccountsStorage } from './accounts-storage.ts';
 import { allowanceRequestSchema, permitRequestSchema, type OfferAgent, type StandingDecision } from './offers.ts';
-const standingSchema = z.object({ id: z.string().min(1).max(200), owner: z.string().min(1).max(200), agentId: z.string().min(1).max(200), offerId: z.string().min(1).max(200), who: z.union([z.object({ person: z.string().min(1).max(200) }).strict(), z.object({ agent: z.string().min(1).max(200) }).strict()]), decision: z.enum(['allow', 'deny']) }).strict();
+const standingSchema = z.object({ id: z.string().min(1).max(200), owner: z.string().min(1).max(200), agentId: z.string().min(1).max(200), offerId: z.string().min(1).max(200), journeyId: z.string().min(1).max(200), byAgent: z.boolean(), who: z.union([z.object({ person: z.string().min(1).max(200) }).strict(), z.object({ agent: z.string().min(1).max(200) }).strict()]), decision: z.enum(['allow', 'deny']) }).strict();
 import { sealedDescriptor } from './sealed-descriptors.ts';
 import { AccountsHost, WorkOSProfiles, type Account } from './accounts.ts';
 import { Backend, type AccountsPort, type JourneyPort } from './backend.ts';
@@ -133,6 +134,7 @@ export class Accounts {
 }
 
 export class AccountsSealedV1 extends Accounts {constructor(state:ObjectState,env:Pick<ObjectBindings,'WORKOS_API_KEY'>&Partial<Pick<ObjectBindings,'BLOBS'>>){super(state,env,undefined,true);}}
+export class AccountsPartitionedV1 extends Accounts { constructor(state: ObjectState, env: Pick<ObjectBindings, 'WORKOS_API_KEY'> & Partial<Pick<ObjectBindings, 'BLOBS'>>) { super({ storage: new PartitionedAccountsStorage(state.storage) }, env, undefined, true); } }
 
 async function call<T>(namespace: ObjectNamespace, name: string, body: Record<string, unknown>): Promise<T> {
   const stub = namespace.getByName(name);
@@ -175,15 +177,18 @@ export function durableBackend(env: ObjectBindings,sealedMode=false): Backend {
     beginAuthorization: (identity, change) => call(env.ACCOUNTS, 'accounts', { action: 'beginAuthorization', subject: identity.subject, clientId: identity.clientId, change }),
     completeAuthorization: (identity, change, assertion) => call(env.ACCOUNTS, 'accounts', { action: 'completeAuthorization', subject: identity.subject, clientId: identity.clientId, change, assertion }),
   };
+  async function knownJourney(id: string): Promise<void> { if (!(await accounts.directory()).includes(id)) throw new Refused('Unknown journey'); }
+  async function journeyCall<T>(id: string, body: Record<string, unknown>): Promise<T> { await knownJourney(id); return call<T>(env.JOURNEYS, id, body); }
+  async function journeyWatch(id: string, personId: string, actor?: Actor): Promise<ReadableStream<Uint8Array>> { await knownJourney(id); return watch(env.JOURNEYS, id, personId, actor); }
   return new Backend(accounts, (id): JourneyPort => ({
-    sealed:(personId,tool,input,actor)=>call(env.JOURNEYS,id,{action:'sealed',personId,tool,input,actor}),
-    cancelWrite: permit => call<WriteReceipt>(env.JOURNEYS, id, { action: 'cancelWrite', permit }),
-    syncAgent: (personId, agentId, name, present) => call(env.JOURNEYS, id, { action: 'syncAgent', personId, agentId, name, present }),
-    requireGuide: (personId, command, actor) => call<void>(env.JOURNEYS, id, { action: 'requireGuide', personId, tool: command.tool, input: command.input, actor }),
-    execute: (personId, command, journeyId, actor) => call<ToolData>(env.JOURNEYS, id, { personId, journeyId, tool: command.tool, input: command.input, actor }),
-    summary: (personId, actor) => call<ToolData | undefined>(env.JOURNEYS, id, { action: 'summary', personId, actor }),
-    inbox: (personId, actor) => call<ToolData>(env.JOURNEYS, id, { action: 'inbox', personId, actor }),
-    watchInbox: (personId, actor) => watch(env.JOURNEYS, id, personId, actor),
-    task: (personId, method, taskId, actor) => call<ToolData>(env.JOURNEYS, id, { action: 'task', personId, method, taskId, actor }),
+    sealed:(personId,tool,input,actor)=>journeyCall(id,{action:'sealed',personId,tool,input,actor}),
+    cancelWrite: permit => journeyCall<WriteReceipt>(id, { action: 'cancelWrite', permit }),
+    syncAgent: (personId, agentId, name, present) => journeyCall(id, { action: 'syncAgent', personId, agentId, name, present }),
+    requireGuide: (personId, command, actor) => journeyCall<void>(id, { action: 'requireGuide', personId, tool: command.tool, input: command.input, actor }),
+    execute: (personId, command, journeyId, actor) => journeyCall<ToolData>(id, { personId, journeyId, tool: command.tool, input: command.input, actor }),
+    summary: (personId, actor) => journeyCall<ToolData | undefined>(id, { action: 'summary', personId, actor }),
+    inbox: (personId, actor) => journeyCall<ToolData>(id, { action: 'inbox', personId, actor }),
+    watchInbox: (personId, actor) => journeyWatch(id, personId, actor),
+    task: (personId, method, taskId, actor) => journeyCall<ToolData>(id, { action: 'task', personId, method, taskId, actor }),
   }),sealedMode);
 }

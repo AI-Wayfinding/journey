@@ -9,10 +9,11 @@ export const admissionRuleSchema = z.object({
   who: z.union([z.enum(['owner', 'guide', 'members', 'people', 'agents']), z.object({ person: id }).strict(), z.object({ agent: id }).strict()]),
   journeys: z.array(id).max(128).optional(), decision,
   limit: z.object({ count: z.number().int().min(1).max(1000), per: z.enum(['hour', 'day', 'week']) }).strict().optional(),
+  ceilingBound: z.boolean().optional(),
 }).strict();
 export const admissionSchema = z.object({ rules: z.array(admissionRuleSchema).max(50), default: decision }).strict();
 export type AdmissionRule = z.infer<typeof admissionRuleSchema>;
-export type AdmissionPolicy = z.infer<typeof admissionSchema>;
+export type AdmissionPolicy = { rules: AdmissionRule[]; default: 'allow' | 'hold' | 'deny' };
 export const settingsSchema = z.object({ publishWithoutReview: z.boolean(), maxAdmission: z.enum(['hold', 'allow']), maxRequestsPerDay: z.number().int().min(0).max(1000) }).strict();
 export type OwnerOfferSettings = z.infer<typeof settingsSchema>;
 export const DEFAULT_SETTINGS: OwnerOfferSettings = { publishWithoutReview: false, maxAdmission: 'hold', maxRequestsPerDay: 0 };
@@ -104,7 +105,7 @@ export type OfferDefinition = z.infer<typeof offerDefinitionSchema>;
 export interface OfferContent { name: string; description: string; tags: string[]; examples: string[]; inputSchema: Record<string, unknown>; outputSchema?: Record<string, unknown>; resource?: string; instructions?: string }
 export interface Offer { id: string; content: OfferContent; sealed?: SealedOfferDefinition; contentRevision: number; journeySettings: JourneySettings; admission: AdmissionPolicy; status: 'draft' | 'published' | 'retired'; version: number; createdAt: number; updatedAt: number; agentDefined?: boolean }
 export interface OfferAgent { id: string; name: string; owner: string; card: Snapshot; offers: Offer[]; settings: OwnerOfferSettings }
-export interface StandingDecision { id: string; owner: string; agentId: string; offerId: string; who: { person: string } | { agent: string }; decision: 'allow' | 'deny' }
+export interface StandingDecision { id: string; owner: string; agentId: string; offerId: string; journeyId: string; byAgent: boolean; who: { person: string } | { agent: string }; decision: 'allow' | 'deny' }
 // Host-only reservation: identity and guide status come from Journey authority, never tool input.
 export const allowanceRequestSchema = z.object({
   taskId: id, agentId: id, offerId: id, version: z.number().int().min(1), journeyId: id,

@@ -1,4 +1,8 @@
 import * as z from 'zod';
+import {sealedRemoteCall,pinSealedMode} from './mode.ts';
+import {RemoteFailure} from './errors.ts';
+import {descriptions,type ToolName} from '../../mcp/src/commands.ts';
+import { firstPosition } from '../../shared/first-position.ts';
 import { offerDefinitionSchema, presetPolicy, validateData, boundedJson } from '../../mcp/src/offers.ts';
 import { privateProfile, publicProfile, cardDescriptor, sealedDescriptor, definitionRef } from '../../mcp/src/sealed-descriptors.ts';
 import type { Client } from '@modelcontextprotocol/client';
@@ -24,7 +28,7 @@ type Group={saved:Saved,mls:MlsGroup};
 const pendingSchema=z.object({journeyId:id,action:sealedAction,ticketId:id,devices:z.record(z.string(),id),envelopes:z.record(z.string(),sealedEnvelope),packets:z.array(signedSchema)}).strict();
 type Pending=z.infer<typeof pendingSchema>;
 const stateSchema=z.object({version:z.literal(1),actorId:id,personalJourney:id.optional(),pending:pendingSchema.optional(),groups:z.record(z.string(),savedGroup)}).strict();
-const groupView=z.object({groupId:id,epoch:nat,sequence:nat,devices:z.array(bindingSchema),remove:z.array(id)});
+const groupView=z.object({groupId:id,epoch:nat,sequence:nat,devices:z.array(bindingSchema),remove:z.array(id),pending:z.array(bindingSchema).default([])});
 const messageSchema=z.object({sequence:nat,epoch:nat,kind:z.enum(['bootstrap','add','remove','update','application','history']),deviceId:id,data:base64,context:contentContext.optional(),target:bindingSchema.optional()});
 const handshake=z.object({commit:base64,welcome:base64.optional()}).strict();
 const packetKey=(c:ContentContext)=>JSON.stringify(c);
@@ -44,11 +48,12 @@ export class SealedClient {
  static async open(remote:SealedRemote,store:LocalStore,personId:string):Promise<SealedClient>{
   requireSynthetic('synthetic');const who=await SealedClient.remoteCall(remote,'whoami',{});const agent=z.object({id}).nullable().optional().parse(who.agent);const c=new SealedClient(remote,store,personId,agent?.id??personId);
   const account=await c.callRemote('account_read',{});c.personalAlias=id.parse(account.personalGroupId);
+  await pinSealedMode(store,personId);
   if(account.descriptor)c.personalJourney=sealedDescriptor.parse(account.descriptor).privateDefinition.journeyId;
   const raw=await store.read('sealed-state');if(raw){const state=parseJSON(stateSchema,raw);if(state.actorId!==c.actorId)throw new Error('Sealed store belongs to another actor');c.pending=state.pending;c.personalJourney=state.personalJourney??c.personalJourney;for(const [key,saved] of Object.entries(state.groups)){const mls=await createMlsGroup(utf8.encode(saved.deviceId));await mls.importState(decode(saved.mls));c.groups.set(key,{saved,mls});}}
   await c.recover();return c;
  }
- private static async remoteCall(remote:SealedRemote,name:string,args:Record<string,unknown>):Promise<Record<string,unknown>> {const r=await remote.callTool({name,arguments:args});if(r.isError)throw new Error(r.content?.map(c=>c.type==='text'?c.text:'').join('\n')??'Sealed operation refused');return z.record(z.string(),z.unknown()).parse(r.structuredContent);}
+ private static remoteCall=sealedRemoteCall;
  private callRemote(name:string,args:Record<string,unknown>){if(this.failed)throw new Error('Local persistence failed; reopen latest store');return SealedClient.remoteCall(this.remote,name,args);}
  private async persist(){try{const groups:Record<string,Saved>={};for(const [id,g] of this.groups){g.saved.mls=encode(await g.mls.exportState());groups[id]=g.saved;}await this.store.write('sealed-state',JSON.stringify({version:1,actorId:this.actorId,personalJourney:this.personalJourney,pending:this.pending,groups}));}catch(error){this.failed=true;throw error;}}
  private group(id:string){const g=this.groups.get(id);if(!g)throw new Error('Prepare or create the sealed audience first');if(g.saved.blocked)throw new Error('Ambiguous MLS delivery; refusing ratchet rollback or retry');return g;}
@@ -73,13 +78,25 @@ export class SealedClient {
   return this.personalJourney;
  }
  private async openDefinition(ref:z.infer<typeof definitionRef>){const raw=await this.callRemote('sealed_record_read',ref);await this.sync(ref.journeyId);return offerDefinitionSchema.parse((await this.render(raw)).definition);}
+ async preflightDelete(itemId:string):Promise<void>{await this.callRemote('sealed_delete_check',{journeyId:journeyFor(itemId),itemId});}
  private async audienceId(groupId:string){if(!groupId.startsWith('personal_'))return groupId;const journey=await this.artifactJourney(groupId);return `private_${journey.slice(8)}_${this.personId}`;}
  async createGroup(groupId:string):Promise<void>{if(groupId.startsWith('personal_')){const journey=await this.artifactJourney(groupId);await this.callRemote('content_prepare',{journeyId:journey,action:'library_add',routing:{visibility:'private'}});const audience=`private_${journey.slice(8)}_${this.personId}`;if(this.groups.has(audience))return this.sync(audience);return this.createGroup(audience);}const journeyId=journeyFor(groupId),v=groupView.parse(await this.callRemote('sealed_group',{journeyId,groupId}));if(v.sequence)throw new Error('Audience exists; prepare and request admission');const g=await this.prepare(groupId);await g.mls.create(utf8.encode(groupId));g.saved.roster=[bindingSchema.parse(await this.callRemote('sealed_device_binding',{deviceId:g.saved.deviceId}))];await this.commit(groupId,g,v,'bootstrap',json({}));}
- async prepareGroup(groupId:string){groupId=await this.audienceId(groupId);await this.callRemote('sealed_group',{journeyId:journeyFor(groupId),groupId});const g=await this.prepare(groupId);return {deviceId:g.saved.deviceId};}
+ async prepareGroup(groupId:string){groupId=await this.audienceId(groupId);await this.callRemote('sealed_group',{journeyId:journeyFor(groupId),groupId});const g=await this.prepare(groupId);await this.callRemote('sealed_group',{journeyId:journeyFor(groupId),groupId,deviceId:g.saved.deviceId});return {deviceId:g.saved.deviceId};}
  private async commit(groupId:string,g:Group,v:z.infer<typeof groupView>,action:'bootstrap'|'add'|'remove'|'update',data:Uint8Array,targetDeviceId?:string){g.saved.blocked=true;await this.persist();const r=await this.callRemote('sealed_group_commit',{journeyId:journeyFor(groupId),groupId,deviceId:g.saved.deviceId,expectedSequence:v.sequence,expectedEpoch:v.epoch,action,data:encode(data),...(targetDeviceId?{targetDeviceId}:{})});g.saved.own.push(nat.parse(r.sequence));g.saved.blocked=false;await this.persist();}
  private assertRoster(g:Group){if(!g.mls.matchesRoster(g.saved.roster.map(d=>decode(d.data))))throw new Error('MLS roster differs from authenticated device bindings');}
- async addMember(groupId:string,personId:string,deviceId:string){groupId=await this.audienceId(groupId);await this.sync(groupId);const g=this.group(groupId),v=groupView.parse(await this.callRemote('sealed_group',{journeyId:journeyFor(groupId),groupId}));const target=bindingSchema.parse(await this.callRemote('sealed_package_reserve',{journeyId:journeyFor(groupId),groupId,deviceId}));if(target.personId!==personId)throw new Error('Authenticated target owner mismatch');const c=await g.mls.add(decode(target.data));g.saved.roster.push(target);this.assertRoster(g);await this.commit(groupId,g,v,'add',json({commit:encode(c.commit),welcome:c.welcome?encode(c.welcome):undefined}),deviceId);await this.sync(groupId);await this.shareHistory(groupId);}
- async removeMember(groupId:string,personId:string){groupId=await this.audienceId(groupId);await this.sync(groupId);const g=this.group(groupId);for(const d of [...g.saved.roster].filter(d=>d.personId===personId))await this.remove(groupId,g,d);}
+ async addMember(groupId:string,personId:string,deviceId:string){
+  groupId=await this.audienceId(groupId);await this.sync(groupId);
+  if(this.group(groupId).saved.roster.some(d=>d.deviceId===deviceId))return;
+  await this.admit(groupId,personId,deviceId);await this.sync(groupId);await this.shareHistory(groupId);
+ }
+ private async admit(groupId:string,personId:string,deviceId:string){
+  const g=this.group(groupId),v=groupView.parse(await this.callRemote('sealed_group',{journeyId:journeyFor(groupId),groupId}));
+  const target=bindingSchema.parse(await this.callRemote('sealed_package_reserve',{journeyId:journeyFor(groupId),groupId,deviceId}));
+  if(target.personId!==personId)throw new Error('Authenticated target owner mismatch');
+  const c=await g.mls.add(decode(target.data));g.saved.roster.push(target);this.assertRoster(g);
+  await this.commit(groupId,g,v,'add',json({commit:encode(c.commit),welcome:c.welcome?encode(c.welcome):undefined}),deviceId);
+ }
+ async removeMember(groupId:string,personId:string){if(personId!==this.personId)throw new Error('Only own devices may be removed directly; remove the journey member instead');groupId=await this.audienceId(groupId);await this.sync(groupId);const g=this.group(groupId);for(const d of [...g.saved.roster].filter(d=>d.personId===personId))await this.remove(groupId,g,d);}
  private async remove(groupId:string,g:Group,d:DeviceBinding){const v=groupView.parse(await this.callRemote('sealed_group',{journeyId:journeyFor(groupId),groupId}));const c=await g.mls.remove(decode(d.data));g.saved.roster=g.saved.roster.filter(b=>b.deviceId!==d.deviceId);this.assertRoster(g);await this.commit(groupId,g,v,'remove',json({commit:encode(c.commit)}),d.deviceId);}
  private async verify(p:Signed,depth=0):Promise<void>{if(depth>1)throw new Error('Nested sealed origins refused');const b=bindingSchema.parse(await this.callRemote('sealed_device_binding',{deviceId:p.deviceId}));const key=await crypto.subtle.importKey('raw',decode(b.verificationKey),'Ed25519',false,['verify']);if(!await crypto.subtle.verify('Ed25519',key,decode(p.signature),json(unsigned(p))))throw new Error('Sealed signature mismatch');if(p.context.authorId!==(b.agentId??b.personId))throw new Error('Sealed author binding mismatch');if(p.origin){const origin=parseJSON(signedSchema,p.origin);await this.verify(origin,depth+1);if(origin.context.recordId!==p.context.recordId||origin.context.recordType!==p.context.recordType||origin.context.parentId!==p.context.parentId||origin.context.revision!==p.context.revision||JSON.stringify(origin.payload)!==JSON.stringify(p.payload))throw new Error('Sealed rewrap origin mismatch');}}
  private async accept(g:Group,value:unknown,expected?:ContentContext){const p=signedSchema.parse(value);if(expected&&packetKey(p.context)!==packetKey(expected))throw new Error('Sealed context mismatch');await this.verify(p);g.saved.cache[packetKey(p.context)]=p;}
@@ -91,7 +108,7 @@ export class SealedClient {
     else if(g.mls.epoch!==null){const raw=text.decode(await g.mls.open(decode(m.data)));if(m.kind==='application'){if(!m.context)throw new Error('Missing sealed context');await this.accept(g,parseJSON(signedSchema,raw),m.context);}else {const h=parseJSON(z.object({history:z.array(signedSchema).max(100)}).strict(),raw);for(const p of h.history){if(p.context.groupId!==groupId)throw new Error('Cross-audience history refused');await this.accept(g,p);}}}
    }g.saved.cursor=m.sequence;g.saved.blocked=false;g.saved.own=g.saved.own.filter(s=>s>m.sequence);await this.persist();}
   }
-  v=groupView.parse(await this.callRemote('sealed_group',{journeyId,groupId}));if(g.mls.epoch!==v.epoch)throw new Error('MLS epoch mismatch');this.assertRoster(g);if(JSON.stringify([...g.saved.roster.map(d=>d.deviceId)].sort())!==JSON.stringify(v.devices.map(d=>d.deviceId).sort()))throw new Error('Server roster mismatch');for(const id of v.remove){const d=g.saved.roster.find(d=>d.deviceId===id);if(d)await this.remove(groupId,g,d);}await this.persist();
+  v=groupView.parse(await this.callRemote('sealed_group',{journeyId,groupId}));if(g.mls.epoch!==v.epoch)throw new Error('MLS epoch mismatch');this.assertRoster(g);if(JSON.stringify([...g.saved.roster.map(d=>d.deviceId)].sort())!==JSON.stringify(v.devices.map(d=>d.deviceId).sort()))throw new Error('Server roster mismatch');for(const id of v.remove){const d=g.saved.roster.find(d=>d.deviceId===id);if(d)await this.remove(groupId,g,d);}for(const target of v.pending){if(!g.saved.roster.some(d=>d.deviceId===target.deviceId)){await this.admit(groupId,target.personId,target.deviceId);await this.sync(groupId);await this.shareHistory(groupId);}}await this.persist();
  }
  private async catalog(journeyId:string){const result:Record<string,unknown>[]=[];let cursor=0;for(;;){const page=await this.callRemote('sealed_catalog',{journeyId,cursor});result.push(...z.array(z.record(z.string(),z.unknown())).parse(page.records));if(!page.more)break;cursor=nat.parse(page.cursor);}return result;}
  private async shareHistory(groupId:string){
@@ -111,7 +128,7 @@ export class SealedClient {
  private async pack(journeyId:string,ticketId:string,slot:string,context:ContentContext,payload:Payload):Promise<Payload>{
   const plaintext=json(payload);if(plaintext.length<=65536)return payload;
   const key=contentKey(),data=await encrypt(plaintext,key,context.groupId,context.recordId,context.revision);
-  const upload=z.object({blob:id,hash:id,size:nat}).parse(await this.callRemote('sealed_blob_put',{journeyId,ticketId,slot,data}));
+  const upload=z.object({blob:id,hash:id,size:nat}).parse(await this.callRemote('sealed_blob_put',{journeyId,ticketId,slot,deviceId:this.group(context.groupId).saved.deviceId,data}));
   if(await this.hash(data)!==upload.hash||decode(data).length!==upload.size)throw new Error('Uploaded ciphertext receipt mismatch');
   return {blob:{...upload,key:encode(key),groupId:context.groupId,recordId:context.recordId,revision:context.revision}};
  }
@@ -127,7 +144,7 @@ export class SealedClient {
   // Allocate audiences first, then prepare again after synchronization changes epochs.
   let prepared=preparedContent.parse(await this.callRemote('content_prepare',{journeyId,action,routing}));for(const groupId of new Set(prepared.slots.map(s=>s.context.groupId))){if(!this.groups.has(groupId)){const v=groupView.parse(await this.callRemote('sealed_group',{journeyId,groupId}));if(v.sequence)throw new Error(`Prepare and request admission to ${groupId}`);await this.createGroup(groupId);}await this.sync(groupId);}prepared=preparedContent.parse(await this.callRemote('content_prepare',{journeyId,action,routing}));
   const envelopes:Record<string,SealedEnvelope>={};const pending:Signed[]=[];
-  for(const slot of prepared.slots){const g=this.group(slot.context.groupId);const old=this.latest(slot.context.recordId);let payload:Payload={...(old?await this.unpack(old):{}),...data};let origin:Signed|undefined;if(slot.source){origin=this.cached(slot.source);payload=origin.payload;}else if(slot.key==='guidance')payload=defaults?.guidance??{name:'Round guidance',kind:'skill',text:'Listen, reflect, and contribute your perspective.'};else if(slot.key==='document')payload=defaults?.document??{name:'Sensemaking document',kind:'markdown',text:''};else if(slot.key==='conversation')payload={title:'Round conversation'};else if(slot.key==='body')payload={body:data.body??''};else if(slot.key==='descriptor'){const {body:_body,text:_text,content:_content,...descriptor}=data;payload={...(old?await this.unpack(old):{}),...descriptor};}else if(slot.key==='private'||slot.key==='publication'){payload={text:data.text??(old?(await this.unpack(old)).text:undefined)??''};}
+  for(const slot of prepared.slots){const g=this.group(slot.context.groupId);const old=this.latest(slot.context.recordId);let payload:Payload={...(old?await this.unpack(old):{}),...data};let origin:Signed|undefined;if(slot.source){origin=this.cached(slot.source);payload=origin.payload;}else if(slot.key==='guidance')payload=defaults?.guidance??{name:'Round guidance',kind:'skill',text:firstPosition};else if(slot.key==='document')payload=defaults?.document??{name:'Sensemaking document',kind:'markdown',text:''};else if(slot.key==='conversation')payload={title:'Round conversation'};else if(slot.key==='body')payload={body:data.body??''};else if(slot.key==='descriptor'){const {body:_body,text:_text,content:_content,...descriptor}=data;payload={...(old?await this.unpack(old):{}),...descriptor};}else if(slot.key==='private'||slot.key==='publication'){payload={text:data.text??(old?(await this.unpack(old)).text:undefined)??''};}
    if(!slot.source)payload=await this.pack(journeyId,prepared.ticketId,slot.key,slot.context,payload);const p=await this.sign(g,slot.context,payload,origin),bytes=await g.mls.seal(json(p));envelopes[slot.key]=this.envelope(slot.context.groupId,g,bytes);pending.push(p);
   }
   // All groups were advanced locally; ambiguity blocks them all, never rolls back.
@@ -136,7 +153,7 @@ export class SealedClient {
   let result:Record<string,unknown>;
   try{result=await this.callRemote(action,{journeyId,ticketId:prepared.ticketId,devices,envelopes});}
   catch(error){
-   if(attempt<2&&error instanceof Error&&/Content revision changed|Prepared epoch is stale|Sealed epoch mismatch/.test(error.message)){
+   if(attempt<2&&error instanceof RemoteFailure&&error.code==='stale'){
     await this.callRemote('content_abandon',{journeyId,ticketId:prepared.ticketId});await this.recover();
     return this.write(action,journeyId,routing,data,defaults,attempt+1);
    }throw error;
@@ -240,7 +257,7 @@ export class SealedClient {
   }
   if(Object.hasOwn(sealedInputs,name)){
    const wire:Record<string,unknown>={journeyId};for(const field of Object.keys(sealedInputs[name]!.shape))if(parsed[field]!==undefined)wire[field]=parsed[field];
-   if(name==='interview_assign'&&wire.version===undefined){const item=await this.callRemote('library_get',{journeyId,itemId:parsed.itemId});wire.version=item.revision;}
+   if(name==='interview_assign'&&wire.version===undefined){const item=await this.callRemote('library_get',{journeyId,itemId:parsed.itemId});wire.version=item.version;}
    const result=await this.callRemote(name,wire),syncGroups=new Set<string>();const walk=(value:unknown)=>{if(!value||typeof value!=='object')return;if(Array.isArray(value)){value.forEach(walk);return;}const obj=value as Record<string,unknown>;if(obj.context){const c=contentContext.parse(obj.context);syncGroups.add(c.groupId);}Object.values(obj).forEach(walk);};walk(result);for(const groupId of syncGroups)if(this.groups.has(groupId))await this.sync(groupId);
    if(name==='round_read'&&result.more){const contributions=z.array(z.unknown()).parse(result.contributions);let cursor=nat.parse(result.cursor);for(;;){const next=await this.callRemote(name,{...wire,cursor});contributions.push(...z.array(z.unknown()).parse(next.contributions));cursor=nat.parse(next.cursor);if(!next.more)break;}result.contributions=contributions;result.more=false;result.cursor=cursor;}
    const rendered=await this.render(result);
@@ -254,6 +271,9 @@ export class SealedClient {
   return this.callRemote(name,parsed);
  }
  // A remote registration is not permission to forward plaintext. Unknown tools stay hidden.
- async tools(){const tools=(await this.remote.listTools()).tools;return tools.filter(t=>Object.hasOwn(localInputs,t.name)&&!t.name.startsWith('artifact_')&&!t.name.startsWith('mls_')&&!t.name.startsWith('sealed_')&&!t.name.startsWith('content_')).map(t=>({...t,inputSchema:z.toJSONSchema(localInputs[t.name as keyof typeof localInputs],{io:'input'})}));}
+ async tools(){
+  let tools;try{tools=(await this.remote.listTools()).tools;}catch{throw new RemoteFailure('unavailable');}
+  return tools.filter(t=>Object.hasOwn(localInputs,t.name)&&!t.name.startsWith('artifact_')&&!t.name.startsWith('mls_')&&!t.name.startsWith('sealed_')&&!t.name.startsWith('content_')).map(t=>({name:t.name,description:t.name==='whoami'?'Read your authenticated person and agent identity.':descriptions[t.name as ToolName]??'Operate on locally sealed content.',inputSchema:z.toJSONSchema(localInputs[t.name as keyof typeof localInputs],{io:'input'})}));
+ }
  async exportGroup(groupId:string){return encode(await this.group(await this.audienceId(groupId)).mls.exportState());}
 }

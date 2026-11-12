@@ -69,7 +69,7 @@ export class WriteAuthority {
     let scope = state.scopes.find(s => s.personId === account.personId);
     if (!scope) { scope = { personId: account.personId, fingerprint: fingerprint(account), epoch: 0 }; state.scopes.push(scope); }
     if (state.permits.some(p => p.permit.personId === account.personId && p.phase === 'redeemed' && p.permit.epoch !== scope.epoch)) throw new Refused('Revocation pending: write receipts must be recovered');
-    if (state.permits.filter(p => p.phase === 'issued' || p.phase === 'redeemed').length >= 128) throw new Refused('Write permit capacity reached');
+    if (state.permits.filter(p => p.permit.personId === account.personId && (p.phase === 'issued' || p.phase === 'redeemed')).length >= 128) throw new Refused('Write permit capacity reached');
     const audienceEpochs = [...new Set(request.audiencePersonIds ?? [])].map(personId=>{
       const a=accounts.find(a=>a.personId===personId&&a.live); if(!a)throw new Refused('Audience account is not live');
       let s=state.scopes.find(s=>s.personId===personId);if(!s){s={personId,fingerprint:fingerprint(a),epoch:0};state.scopes.push(s);}
@@ -114,7 +114,7 @@ export class WriteAuthority {
 
 /** Writes are evaluated in memory, then published with their terminal receipt in one transaction. */
 export class WriteStorage implements KeyValueStorage {
-  staged: Map<string, string> | undefined;
+  staged: Map<string, string | undefined> | undefined;
   private alarm: number | null | undefined;
   readonly base: KeyValueStorage;
   constructor(base: KeyValueStorage) { this.base = base; }
@@ -122,6 +122,7 @@ export class WriteStorage implements KeyValueStorage {
   end(): void { this.staged = undefined; this.alarm = undefined; }
   get(key: string): Promise<unknown> { return this.staged?.has(key) ? Promise.resolve(this.staged.get(key)) : this.base.get(key); }
   async put(key: string, value: string): Promise<void> { if (this.staged) this.staged.set(key, value); else await this.base.put(key, value); }
+  async delete(key: string): Promise<void> { if (this.staged) this.staged.set(key, undefined); else await this.base.delete(key); }
   async setAlarm(time: number): Promise<void> { if (this.staged) this.alarm = time; else await this.base.setAlarm(time); }
   async deleteAlarm(): Promise<void> { if (this.staged) this.alarm = null; else await this.base.deleteAlarm(); }
   async transaction<T>(operation: (tx: StorageTurn) => Promise<T>): Promise<T> {
@@ -130,7 +131,7 @@ export class WriteStorage implements KeyValueStorage {
     try { return await operation(this); } catch (error) { this.staged = before; this.alarm = alarm; throw error; }
   }
   async flush(tx: StorageTurn): Promise<void> {
-    for (const [key, value] of this.staged ?? []) await tx.put(key, value);
+    for (const [key, value] of this.staged ?? []) { if (value === undefined) await tx.delete(key); else await tx.put(key, value); }
     if (typeof this.alarm === 'number') await tx.setAlarm(this.alarm);
     else if (this.alarm === null) await tx.deleteAlarm();
   }

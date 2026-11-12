@@ -84,6 +84,7 @@ export function createConsole(config: ConsoleConfig) {
         const auth = await config.verifier.verifyAccessToken(result.access_token), subject = auth.extra?.['sub'];
         if (auth.clientId !== clientId || typeof subject !== 'string') throw new Refused('Only the console client may sign in');
         await config.backend.execute(subject, { tool: 'account_read', input: {} }, clientId);
+        await sessions.consumeLogin(request);
         return redirect(pending.returnTo ?? '/console', [await sessions.create(SESSION_COOKIE, { kind: 'session', subject, clientId, csrf: random(), signedInAt: now(), expiresAt: now() + 28_800_000 }), cookie(OAUTH_COOKIE, '', 0), cookie(SIGNED_OUT_COOKIE, '', 0)]);
       }
       // A page visit without a valid session goes to sign-in; POSTs stay refused.

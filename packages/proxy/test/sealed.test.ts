@@ -8,8 +8,8 @@ import {WayfindingProxy} from '../src/proxy.ts';
 import {parseCommand} from '../../mcp/src/commands.ts';
 import * as z from 'zod';
 
-async function fixture(t:TestContext){
- const backend=new MemoryBackend({async get(s){return {name:s,email:`${s}@example.test`};}},Date.now,testPasskeys,true),signer=await keyPair('sealed');
+async function fixture(t:TestContext,now:()=>number=Date.now){
+ const backend=new MemoryBackend({async get(s){return {name:s,email:`${s}@example.test`};}},now,testPasskeys,true),signer=await keyPair('sealed');
  const connect=async(subject:string)=>{const remote=new Client({name:'sealed-test',version:'1'});await remote.connect(new StreamableHTTPClientTransport(RESOURCE,{fetch:bridge(app(signer,backend)),requestInit:{headers:{authorization:`Bearer ${await token(signer,{sub:subject})}`}}}));t.after(()=>remote.close());const files=new Map<string,string>(),store={async read(k:string){return files.get(k)},async write(k:string,v:string){files.set(k,v)}};return {client:await SealedClient.open(remote,store,z.object({personId:z.string()}).parse((await remote.callTool({name:'account_read',arguments:{}})).structuredContent).personId),remote,files,store};};
  return {backend,connect,a:await connect('alice')};
 }
@@ -49,7 +49,7 @@ test('sealed proxy unhandled tools stay hidden and cannot forward plaintext',asy
   'apps_journey_invite','apps_project_update','apps_artifact_rename',
  ];
  const listed=await a.remote.listTools(),remoteNames=new Set(listed.tools.map(tool=>tool.name));
- for(const name of hidden)assert.ok(remoteNames.has(name),`${name} is registered remotely`);
+ for(const name of hidden.filter(name=>!name.includes('view')&&!name.startsWith('apps_')))assert.ok(remoteNames.has(name),`${name} is registered remotely`);
  const forwarded:unknown[]=[];
  const remote:SealedRemote={
   async listTools(){return {...listed,tools:[...listed.tools,{name:'future_content_write',inputSchema:{type:'object',properties:{body:{type:'string'}}}}]};},
@@ -64,7 +64,7 @@ test('sealed proxy unhandled tools stay hidden and cannot forward plaintext',asy
  for(const tool of tools)assert.doesNotMatch(tool.name,/^(artifact_|mls_|sealed_|content_)/);
  await assert.rejects(client.call('whoami',{body:'NEVER-FORWARD-PLAINTEXT'}),z.ZodError);
  assert.deepEqual(forwarded,[]);
- await client.call('whoami');assert.deepEqual(forwarded,[{name:'whoami',arguments:{}}]);
+ await client.call('whoami');assert.deepEqual(forwarded,[{name:'account_read',arguments:{}},{name:'whoami',arguments:{}}]);
 });
 
 test('sealed proxy storage canary covers forum library versions projects rounds interviews and contributions',async t=>{
@@ -103,14 +103,14 @@ test('sealed proxy new readers get live retained journey history but never priva
  await a.client.call('interview_write',{roundId,text:'PRIVATE-I-CANARY'});
  const b=await connect('bob');await b.client.call('journey_join',{journeyId});const device=await b.client.prepareGroup(journeyId);await a.client.addMember(journeyId,b.client.personId,device.deviceId);await b.client.sync(journeyId);
  assert.equal((await b.client.call('library_get',{itemId})).text,'Retained body');
- await assert.rejects(b.client.call('interview_read',{roundId,personId:a.client.personId}),/private/);
+ await assert.rejects(b.client.call('interview_read',{roundId,personId:a.client.personId}),{code:'permission'});
  await a.client.call('interview_share',{roundId});assert.equal((await b.client.call('interview_read',{roundId,personId:a.client.personId})).text,'PRIVATE-I-CANARY');
  await a.client.call('round_participants',{roundId,add:[b.client.personId],remove:[]});
  await b.client.call('interview_write',{roundId,text:'BOB-PUBLISHED-PERSISTS'});await b.client.call('interview_share',{roundId});
  const c=await connect('carol');await c.client.call('journey_join',{journeyId});const third=await c.client.prepareGroup(journeyId);await a.client.addMember(journeyId,c.client.personId,third.deviceId);await c.client.sync(journeyId);assert.equal((await c.client.call('interview_read',{roundId,personId:a.client.personId})).text,'PRIVATE-I-CANARY');
  await a.client.call('journey_remove',{journeyId,memberId:b.client.personId});
  await a.client.call('library_version',{itemId,baseVersion:1,text:'After removal'});
- await assert.rejects(b.client.sync(journeyId),/refused|required|member|not found/i);
+ await assert.rejects(b.client.sync(journeyId),{code:'permission'});
  assert.equal((await c.client.call('library_get',{itemId})).text,'After removal');
  assert.equal((await c.client.call('interview_read',{roundId,personId:b.client.personId})).text,'BOB-PUBLISHED-PERSISTS');
 });
@@ -226,8 +226,8 @@ test('sealed board archive refuses posting and can reopen',async t=>{
  await a.client.call('board_update',{boardId,archived:true});
  const boards=records(await backend.sealedExecute('alice','forum_boards',{journeyId}));
  assert.equal(z.object({scalars:z.object({archived:z.number()})}).parse(boards.find(b=>b.recordId===boardId)!.rule).scalars.archived,1);
- await assert.rejects(a.client.call('post_create',{topicId,body:'Refused'}),/Open board/);
- await assert.rejects(a.client.call('topic_create',{boardId,title:'Refused',body:'Refused'}),/Open board/);
+ await assert.rejects(a.client.call('post_create',{topicId,body:'Refused'}),{code:'lifecycle'});
+ await assert.rejects(a.client.call('topic_create',{boardId,title:'Refused',body:'Refused'}),{code:'lifecycle'});
  await a.client.call('board_update',{boardId,archived:false});
  await a.client.call('post_create',{topicId,body:'Reopened'});
  assert.equal(z.array(z.object({body:z.string()})).parse((await a.client.call('topic_read',{topicId})).posts).at(-1)!.body,'Reopened');
@@ -302,4 +302,131 @@ test('sealed ciphertext and fetch receipts respect the 128 KiB DO value limit',a
  for(const raw of [...backend.accountStorage.data.values(),...[...backend.journeyStores.values()].flatMap(s=>[...s.data.values()]),...[...backend.blobs.data.values()].map(b=>new TextDecoder().decode(b))])assert.ok(!String(raw).includes(marker));
  for(const s of backend.journeyStores.values())for(const [key,raw] of s.data)if(key.startsWith('write:receipt:')){const receipt=JSON.parse(String(raw));assert.equal(receipt.result,undefined,'Sealed receipts retain no response bodies');}
  assert.ok(largest<=128*1024);
+});
+
+
+test('sealed device removals are same-person only, never guide power',async t=>{
+ const {a,backend,connect}=await fixture(t);
+ const journeyId=String((await a.client.call('journey_create',{name:'Removal',policy:'open',defaultRole:'read'})).journeyId);
+ const b=await connect('bob');await b.client.call('journey_join',{journeyId});
+ const device=await b.client.prepareGroup(journeyId);await a.client.addMember(journeyId,b.client.personId,device.deviceId);
+ const view=await backend.sealedExecute('alice','sealed_group',{journeyId,groupId:journeyId});
+ const devices=z.array(z.object({deviceId:z.string(),personId:z.string()})).parse(view.devices);
+ for(const [subject,sender,target] of [['alice',devices.find(d=>d.personId===a.client.personId)!,device],['bob',device,devices.find(d=>d.personId===a.client.personId)!]] as const){
+  await assert.rejects(backend.sealedExecute(subject,'sealed_group_commit',{journeyId,groupId:journeyId,deviceId:sender.deviceId,targetDeviceId:target.deviceId,action:'remove',expectedEpoch:view.epoch,expectedSequence:view.sequence,data:'e30='}),/own devices|ineligible/);
+ }
+});
+
+test('sealed eligible device admission is automatic between clients',async t=>{
+ const {a,connect}=await fixture(t);
+ const journeyId=String((await a.client.call('journey_create',{name:'Automatic',policy:'open',defaultRole:'read'})).journeyId);
+ const b=await connect('bob');await b.client.call('journey_join',{journeyId});
+ assert.equal((await b.client.enrollGroup(journeyId)).admitted,false);
+ await a.client.sync(journeyId);
+ assert.equal((await b.client.enrollGroup(journeyId)).admitted,true);
+});
+
+
+test('sealed member may remove an own second device without guide authority',async t=>{
+ const {a,backend,connect}=await fixture(t),journeyId=String((await a.client.call('journey_create',{name:'Own devices',policy:'open',defaultRole:'read'})).journeyId);
+ const b=await connect('bob');await b.client.call('journey_join',{journeyId});const first=await b.client.prepareGroup(journeyId);await a.client.sync(journeyId);
+ const second=await connect('bob');const next=await second.client.prepareGroup(journeyId);await a.client.sync(journeyId);
+ const view=await backend.sealedExecute('bob','sealed_group',{journeyId,groupId:journeyId});
+ await backend.sealedExecute('bob','sealed_group_commit',{journeyId,groupId:journeyId,deviceId:first.deviceId,targetDeviceId:next.deviceId,action:'remove',expectedEpoch:view.epoch,expectedSequence:view.sequence,data:'e30='});
+ const after=await backend.sealedExecute('bob','sealed_group',{journeyId,groupId:journeyId});assert.ok(!z.array(z.object({deviceId:z.string()})).parse(after.devices).some(d=>d.deviceId===next.deviceId));
+});
+
+test('sealed eligible reader bootstraps a new empty audience without a guide',async t=>{
+ const {backend,connect}=await fixture(t),journeyId=String((await backend.sealedExecute('alice','journey_create',{policy:'open',defaultRole:'read'})).journeyId);
+ const b=await connect('bob');await b.client.call('journey_join',{journeyId});assert.equal((await b.client.enrollGroup(journeyId)).admitted,true);
+});
+
+
+test('sealed rounds decrypted default guidance contains the first-position interview',async t=>{
+ const {a}=await fixture(t),journeyId=String((await a.client.call('journey_create',{name:'Guidance',policy:'open',defaultRole:'write'})).journeyId);
+ const roundId=recordId(await a.client.call('round_create',{journeyId,title:'First position',goal:'Locate ourselves'}),'round');
+ const round=await a.client.call('round_read',{roundId}),guidance=await a.client.call('library_get',{itemId:round.guidanceItemId});
+ assert.equal(String(guidance.text).match(/^\d+\./gm)?.length,15);
+ assert.match(String(guidance.text),/Ask one question at a time/);
+ assert.doesNotMatch(String(guidance.text),/server can read/);
+});
+
+
+test('sealed direct clients do not advertise incompatible App tools but retain frozen resources',async t=>{
+ const {a}=await fixture(t),tools=(await a.remote.listTools()).tools;
+ const resources=(await a.remote.listResources()).resources;assert.ok(resources.some(r=>r.uri==='ui://wayfinding/v1/journey.html'));
+ for(const name of ['library_view','round_view','forum_view','apps_v2_reply','apps_v2_interview_write']){
+  assert.ok(!tools.some(tool=>tool.name===name),name);
+  await assert.rejects(a.remote.callTool({name,arguments:{}}),/Unknown tool|not found/i);
+ }
+});
+
+
+test('sealed handshakes have a separate budget and a per-person quota',async t=>{
+ const {a,backend}=await fixture(t),journeyId=String((await a.client.call('journey_create',{name:'Budget',policy:'open',defaultRole:'write'})).journeyId);
+ const store=backend.journeyStores.get(journeyId)!,key=JSON.stringify(['sealed-v1','group',journeyId]);
+ const original=JSON.parse(String(await store.get(key))),deviceId=original.devices[0].deviceId;
+ const data=Buffer.alloc(1024*1024).toString('base64');let refused=false;
+ for(let i=0;i<8;i++){
+  const view=await backend.sealedExecute('alice','sealed_group',{journeyId,groupId:journeyId});
+  try{await backend.sealedExecute('alice','sealed_group_commit',{journeyId,groupId:journeyId,deviceId,expectedSequence:view.sequence,expectedEpoch:view.epoch,action:'update',data});}
+  catch(error){assert.match(String(error),/person.*quota/i);refused=true;break;}
+ }
+ const after=JSON.parse(String(await store.get(key)));
+ assert.equal(after.bytes,original.bytes,'Handshake bytes never consume application content budget');assert.ok(refused,'One person cannot fill the whole retained handshake log');
+});
+
+test('sealed abandoned uploads refund their journey reservation and delete unreferenced bytes',async t=>{
+ const {a,backend}=await fixture(t),journeyId=String((await a.client.call('journey_create',{name:'Uploads',policy:'open',defaultRole:'write'})).journeyId);
+ const state=JSON.parse(a.files.get('sealed-state')!),deviceId=state.groups[journeyId].deviceId;
+ const prepared=await backend.sealedExecute('alice','content_prepare',{journeyId,action:'library_add',routing:{visibility:'members'}});
+ const upload=await backend.sealedExecute('alice','sealed_blob_put',{journeyId,ticketId:prepared.ticketId,slot:'content',deviceId,data:'eA=='});
+ await backend.sealedExecute('alice','content_abandon',{journeyId,ticketId:prepared.ticketId});
+ const index=JSON.parse(String(await backend.journeyStores.get(journeyId)!.get(JSON.stringify(['sealed-v1','index']))));
+ assert.equal(index.uploadBytes,0);assert.equal(backend.blobs.data.has(String(upload.blob)),false);
+ await backend.sealedExecute('alice','content_abandon',{journeyId,ticketId:prepared.ticketId});
+ assert.equal(JSON.parse(String(await backend.journeyStores.get(journeyId)!.get(JSON.stringify(['sealed-v1','index'])))).uploadBytes,0);
+});
+
+
+test('sealed expired uploads refund on the next request and retries do not double charge',async t=>{
+ let now=Date.now();const {a,backend}=await fixture(t,()=>now),journeyId=String((await a.client.call('journey_create',{name:'Expiry',policy:'open',defaultRole:'write'})).journeyId);
+ const deviceId=JSON.parse(a.files.get('sealed-state')!).groups[journeyId].deviceId;
+ const prepared=await backend.sealedExecute('alice','content_prepare',{journeyId,action:'library_add',routing:{visibility:'members'}});
+ const args={journeyId,ticketId:prepared.ticketId,slot:'content',deviceId,data:'eA=='};
+ const upload=await backend.sealedExecute('alice','sealed_blob_put',args);assert.deepEqual(await backend.sealedExecute('alice','sealed_blob_put',args),upload);
+ const storage=backend.journeyStores.get(journeyId)!,quota=JSON.stringify(['sealed-v1','upload-quota',a.client.personId]);assert.equal(JSON.parse(String(await storage.get(quota))),1);
+ now+=600001;await backend.sealedExecute('alice','sealed_catalog',{journeyId});
+ assert.equal(JSON.parse(String(await storage.get(quota))),0);assert.equal(backend.blobs.data.has(String(upload.blob)),false);
+ await assert.rejects(backend.sealedExecute('alice','sealed_blob_put',args),/ticket required/);
+});
+
+test('sealed per-person upload quotas cannot be charged to another member',async t=>{
+ const {a,backend,connect}=await fixture(t),journeyId=String((await a.client.call('journey_create',{name:'Quota',policy:'open',defaultRole:'write'})).journeyId);
+ const b=await connect('bob');await b.client.call('journey_join',{journeyId});const device=await b.client.prepareGroup(journeyId);await a.client.sync(journeyId);
+ const prepared=await backend.sealedExecute('alice','content_prepare',{journeyId,action:'library_add',routing:{visibility:'members'}});
+ await assert.rejects(backend.sealedExecute('alice','sealed_blob_put',{journeyId,ticketId:prepared.ticketId,slot:'content',deviceId:device.deviceId,data:'eA=='}),/Authenticated upload device/);
+ const own=JSON.parse(a.files.get('sealed-state')!).groups[journeyId].deviceId,storage=backend.journeyStores.get(journeyId)!;
+ await storage.put(JSON.stringify(['sealed-v1','upload-quota',a.client.personId]),JSON.stringify(16*1024*1024));
+ await assert.rejects(backend.sealedExecute('alice','sealed_blob_put',{journeyId,ticketId:prepared.ticketId,slot:'content',deviceId:own,data:'eA=='}),/person upload quota/);
+});
+
+
+test('sealed move refuses non-owner deletion before creating any destination copy',async t=>{
+ const {a,connect}=await fixture(t),journeyId=String((await a.client.call('journey_create',{name:'Shared source',policy:'open',defaultRole:'write'})).journeyId),b=await connect('bob');
+ await b.client.call('journey_join',{journeyId});await b.client.prepareGroup(journeyId);await a.client.sync(journeyId);await b.client.sync(journeyId);
+ const itemId=recordId(await a.client.call('library_add',{journeyId,name:'Owned by Alice',text:'Body'}),'library'),destination=String((await b.client.call('journey_create',{name:'Bob destination',policy:'open',defaultRole:'write'})).journeyId),proxy=await WayfindingProxy.open(b.remote,b.store);
+ await assert.rejects(proxy.copyArtifact(journeyId,itemId,destination,true));assert.deepEqual(await proxy.listArtifacts(destination),[]);assert.equal((await proxy.readArtifact(journeyId,itemId)).content,'Body');
+ const copy=await proxy.copyArtifact(journeyId,itemId,destination,false);assert.equal((await proxy.readArtifact(destination,copy.artifactId)).content,'Body');
+});
+
+test('sealed move returns an explicit partial receipt when source deletion is unconfirmed',async t=>{
+ const {a}=await fixture(t),journeyId=String((await a.client.call('journey_create',{name:'Source',policy:'open',defaultRole:'write'})).journeyId),itemId=recordId(await a.client.call('library_add',{journeyId,name:'Original',text:'Body'}),'library'),destination=String((await a.client.call('journey_create',{name:'Destination',policy:'open',defaultRole:'write'})).journeyId);
+ let deleteAccepted=false;const remote:SealedRemote={listTools:()=>a.remote.listTools(),callTool:async r=>{if(r.name==='library_delete'){if(deleteAccepted)await a.remote.callTool(r);throw new Error('UNTRUSTED deletion transport detail');}return a.remote.callTool(r);}},proxy=await WayfindingProxy.open(remote,a.store);
+ const {buildProxyServer}=await import('../src/server.ts'),{InMemoryTransport}=await import('@modelcontextprotocol/server'),server=await buildProxyServer(proxy),client=new Client({name:'partial-move',version:'1'}),[left,right]=InMemoryTransport.createLinkedPair();await Promise.all([server.connect(left),client.connect(right)]);t.after(()=>client.close());
+ const result=await client.callTool({name:'artifact_move',arguments:{sourceGroupId:journeyId,artifactId:itemId,destinationGroupId:destination}});assert.equal(result.isError,true);assert.doesNotMatch(JSON.stringify(result),/UNTRUSTED/);
+ const receipt=z.object({status:z.literal('partial'),sourceArtifactId:z.literal(itemId),destinationArtifactId:z.string(),sourceState:z.literal('unknown'),destinationState:z.literal('created')}).parse(result.structuredContent);
+ assert.equal((await proxy.readArtifact(destination,receipt.destinationArtifactId)).content,'Body');assert.equal((await proxy.listArtifacts(destination)).length,1);
+ deleteAccepted=true;const lostReply=await client.callTool({name:'artifact_move',arguments:{sourceGroupId:journeyId,artifactId:itemId,destinationGroupId:destination}});assert.equal(lostReply.isError,true);
+ const accepted=z.object({status:z.literal('partial'),sourceState:z.literal('unknown'),destinationArtifactId:z.string()}).parse(lostReply.structuredContent);assert.equal((await proxy.readArtifact(destination,accepted.destinationArtifactId)).content,'Body');await assert.rejects(proxy.readArtifact(journeyId,itemId));
 });

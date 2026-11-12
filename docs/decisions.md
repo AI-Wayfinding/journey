@@ -260,7 +260,7 @@ Dan's brief for v2 was to write the spec, build what seems best, and refine late
   - Browser devices now reuse the proxy's MLS/decrypt/schema/search pipeline in a reproducible ES-module bundle. The console supports private forum/library/round/task/card/profile/offer reads, local search and sealed post/library/profile/card/offer/decision writes. Locked pages retain ids/status only. Fresh UV passkey enrollment binds the exact person/browser/device/public package and admission remains explicit. A listed browser is revocable through the existing multi-leaf revocation fence.
   - Browser private state and caches use an encrypted IndexedDB vault, a nonextractable random AES-GCM data key and PRF-derived HKDF wrapping bound to origin/person/browser id/format. Passkey registration requests PRF. An independent, high-entropy recovery code wraps the same key with PBKDF2-SHA-256 (210,000 iterations); show it once and require saved-code confirmation even when PRF works. Unsupported PRF uses the code. Recovery opens existing local storage, not a missing vault or a new browser; there is no server backup, escrow or ratchet import. A lost browser needs fresh live-member admission. Losing all devices and recovery material loses the content; account recovery is not key recovery. A lost wrapping passkey cannot authorize a new audience package; use a new device admitted by a surviving member. A live browser's wrapping credential cannot be deleted until its leaves are revoked.
   - The whole unlocked session holds an origin/person Web Lock; writes commit the encrypted state before I/O. Lock/logout/pagehide clears in-memory access and decrypted DOM, and pending commits retain the writer fence until drained. Strict CSP and bundle SRI forbid inline/eval and external code. They do not protect against the hosting Worker replacing both page and policy. Reset/deletion, deployment and data migration remain unauthorised.
-  - Envelope v1 accepts only its fixed content type, canonical base64 and the current audience/epoch. Limits: 1 MiB envelope, 64 KiB device package, 9 MiB local payload, 10 MiB encrypted upload, 100 records/4 MiB per listing page, 1,024 content records, 128 groups and 128 active preparation tickets per journey, 128 devices per group. A separate 32 MiB journey upload budget includes expired, uncollected uploads; no cleanup or deletion is performed.
+  - Envelope v1 accepts only its fixed content type, canonical base64 and the current audience/epoch. Limits: 1 MiB envelope, 64 KiB device package, 9 MiB local payload, 10 MiB encrypted upload, 100 records/4 MiB per listing page, 1,024 content records, 128 groups and 128 active preparation tickets per journey, 128 devices per group. A separate 32 MiB journey upload budget retains committed uploads; abandoning or expiring an uncommitted ticket refunds its reservation and deletes its uploads.
   - Current source seals forum/library/sensemaking and journey/project names and purposes, with J, owner-only P and interview I audiences. Large bodies use fresh revision keys. Assigned interviews materialize client-side from a pinned source; contributions remain immutable attributed records and clients compose the synthesis. Each item edit advances its content revision, including metadata-only edits.
   - Final-write recovery retains the advanced ratchets and exact pending ciphertext, checks the commit receipt and retries only that ciphertext. Ambiguous handshake/history delivery fails closed; it never restores a ratchet snapshot. A new device discovers the existing personal workspace through the authenticated profile descriptor and still needs admission from a surviving member. Browser storage reloads the latest committed vault under an origin/person Web Lock; leaving or locking retains the fence until pending writes drain.
   - Offer definitions have an immutable owner-private P source and explicit J copies at the same `contentRevision`. Discovery requires the matching publication, and queries/tags stay device-local. New sealed offer ids are opaque `offer-<UUIDv4>` values; omitting the id lets the proxy generate one. Console metadata controls cannot encrypt a missing publication.
@@ -269,8 +269,98 @@ Dan's brief for v2 was to write the spec, build what seems best, and refine late
   - Account name/nickname/email and device/passkey labels use P, as do card name/client name. Each revision may explicitly publish nickname-only profile and name/client-name card copies to selected J audiences. Current alias selection uses authenticated pointers; withdrawal cannot erase old ciphertext. Descriptive edits never grant capabilities.
   - AuthKit profile fields are transient before device enrollment. Accounts stores opaque id labels and an HMAC of trimmed, lower-case authenticated email for invitations; its server-held key does not hide email from the live server. Editing encrypted profile email does not change authenticated routing. OAuth persists only the fixed `MCP client` label; console/passkey authority controls use ids and refuse raw descriptive edits. Unsealed account state is refused without migration or deletion. P uses the proxy's device-local personal-workspace journey; creating that workspace requires `journey.create` as well as normal action authority and read/device keys. No bootstrap grant or key admission is implicit; authenticated descriptor pointers provide cross-device workspace discovery.
 
+### 36. Clients admit eligible devices automatically; guides manage members, not devices
+
+- **Decided by:** Dan.
+- **What:** any eligible device may bootstrap an empty audience. Existing member clients automatically admit eligible pending devices and commit server-required removals. No founder role or guide admission step exists. A person's device may remove devices owned by that person or devices the server marks ineligible. An agent's device may remove only itself, not another device of the same agent or person. Guides remove journey members with `member.remove`; those members' devices then become ineligible.
+- **Recovery gap:** successor groups remain unimplemented. Recovery needs a fault marker, a new group generation and `supersedes` link, fresh packages, readable-history transfer, and atomic replacement of every affected audience reference. Implement those together; do not rewrite an old log or restore a consumed ratchet.
+- **Source:** F1 remediation; `.work/drafts/sealing.md`, group lifecycle.
+
+### 37. Share first-position guidance across sealed and legacy rounds
+
+- **Decided by:** F1–CQ-04 remediation applies the existing round design.
+- **What:** both paths use the same client-safe fifteen-question first-position interview. The sealed path encrypts this guidance before upload; its privacy wording describes sealing and visible routing metadata.
+- **Source:** `packages/shared/first-position.ts`; decrypted guidance regression in `packages/proxy/test/sealed.test.ts`.
+
+### 38. Retain released App resources without incompatible sealed tools
+
+- **Decided by:** CQ-02 remediation chooses the bounded compatibility path.
+- **What:** sealed-v1 retains every released `ui://` resource byte for byte, but does not advertise the older App tools. Their plaintext input and view contracts do not support sealed records. Clients use the local encryption proxy or browser for content and the ordinary coordination tools for metadata.
+- **Source:** `packages/mcp/src/apps.ts`; direct sealed-client invocation and frozen-resource hash tests.
+
+### 39. Bound each person and separate admission, updates and content
+
+- **Decided by:** F5 remediation applies bounded sealed retention.
+- **What:** quotas apply per person across their devices and agents. Per group, updates allow 4,096 messages/32 MiB, application content allows 4,096 messages/32 MiB, and admission/history allows 4,096 messages/256 MiB. The corresponding per-person limits are 128 updates/4 MiB, 2,048 application messages/16 MiB and 1,024 admission/history messages/64 MiB. Automatic admission, removal and history never consume update or application budgets. Uploads bind to an authenticated, admitted device and share a 16 MiB person budget within the 32 MiB journey budget. Retries charge once; abandoned and expired uncommitted uploads refund their reservations and delete unreferenced bytes. Committed uploads remain charged.
+- **Source:** `packages/mcp/src/sealed-content.ts`; quota, attribution, retry and expiry tests in `packages/proxy/test/sealed.test.ts`.
+
+### 40. Pin the local proxy to sealed-v1
+
+- **Decided by:** F3 remediation applies the sealed-only client boundary.
+- **What:** the shipped proxy has no plaintext relay fallback. Startup and remote operations require a live `sealed-v1` account report. Each store pins that mode and account; legacy local stores require an explicit migration. Historical relay tests run against a test-only harness, while sealed tests exercise the shipped client.
+- **Source:** `packages/proxy/src/mode.ts`; mode downgrade and real FileStore restart tests.
+
+### 41. Keep remote prose out of the local tool boundary
+
+- **Decided by:** F8 remediation applies the local-client trust boundary.
+- **What:** local tool descriptions and schemas come from the shipped catalogue. Remote titles, descriptions, annotations and metadata are discarded. Remote errors map to fixed local messages with typed `permission`, `lifecycle`, `quota` and `stale` codes; stale-write retry uses the code, not forwarded prose. Other tool exceptions also return fixed local messages. Successful unsealed remote tool results are not yet sanitized (known gap 10 below).
+- **Source:** `packages/proxy/src/errors.ts`; malicious-description and real local-MCP error tests.
+
+### 42. Use the generated content metadata rules in sealed-v1
+
+- **Decided by:** CQ-01 remediation restores the shared coordination policy.
+- **What:** sealed artifacts, topics and posts use the generated item, topic and post models. Writers may add versions and update metadata on shared artifacts; only the owner changes visibility. Delete still needs owner or guide authority. Content versions stay separate from ciphertext revisions. Topic authors may lock their topics, guides may moderate, and only post authors edit posts. Old sealed records without rule state require an explicit migration; the server does not infer authority for them.
+- **Source:** `packages/mcp/src/sealed-metadata.ts`; the same behavioural tests run against legacy and sealed backends in `packages/proxy/test/metadata.test.ts`.
+
+### 43. Preflight move deletion and report partial completion
+
+- **Decided by:** CQ-03 remediation applies the existing move policy.
+- **What:** a move checks live source delete authority through the same generated item transition before creating the destination. Delete checks again at execution. If the copy exists but deletion is unconfirmed, the local tool returns an error with a partial receipt naming both artifacts, `destinationState: created` and `sourceState: unknown`. Inspect both records before retrying; a network failure cannot prove whether the source remains.
+- **Source:** `packages/proxy/src/proxy.ts`; non-owner destination-empty and lost-delete-reply tests in `packages/proxy/test/sealed.test.ts`.
+
+### 44. Agents manage only their own cards
+
+- **Decided by:** hardening task, security finding F14.
+- **What:** a bound agent can list and read only its own card, and can narrow or withdraw only that card. The person can still manage every owned agent.
+
+### 45. Standing offer decisions apply to one journey
+
+- **Decided by:** hardening task, security finding F13.
+- **What:** standing decisions affect only the journey where the task was decided. Agent-created allows remain bounded by the owner’s admission ceiling, including later ceiling reductions. Manual approval still admits only the selected task.
+
+
+### 46. Invitations do not reveal account existence
+
+- Email invitations return the same acknowledgement for unknown emails, existing accounts and repeat invitations. Only guides may send them. Journey state responses hide invited people from every caller except the invitee, so a later read cannot reveal whether the email matched an account. Join requests remain visible. Joining still proves that the invitee has an account and a pending invitation.
+- Every journey RPC checks the account directory before allocating a Durable Object for its id. Device-binding lookup scope remains open because peer and historical signature verification need a shared client/server contract.
+
+### 47. Bound anonymous OAuth without blocking existing sessions
+
+- Pre-authentication login state and PKCE verifier live in the signed, expiring, HttpOnly cookie. Only a successful callback leaves a short-lived replay tombstone on the server.
+- Login, authorization and token routes use Cloudflare's 30-per-minute per-IP limiter. DCR has a separate 5-per-minute per-IP limiter. Production returns 503 if a limiter or trusted IP is unavailable. Anonymous clients and pending requests each have an 8,192-row cap, keyed lookups and bounded expiry indexes. Unused clients and requests expire within ten minutes; authorized clients remain available. Capacity exhaustion refuses only new registrations and authorization requests, not existing account reads, consent, verification or refresh.
+
+### 48. Consent identifies and binds the requesting client
+
+- Consent shows the full client id and redirect host, including when the client display name is sealed. The initiating browser's HttpOnly cookie must match the saved request on every consent and passkey operation.
+- OAuth authorization responses include the issuer. Replaying a correctly bound, already-used code revokes its token family. Client metadata is cached for five minutes; errors are not cached. HTTPS responses carry HSTS.
+
+### 49. Account storage is partitioned without deleting the old generation
+
+- `AccountsPartitionedV1` stores separate account, hashed-token, client, request and permit rows. Delta writes and the write-authority fence share one transaction. Anonymous client/request rows never join assembled account state. Access-token verification reads its token, account and rule metadata; successful use persists the agent's Last used timestamp at most hourly, including across eviction.
+- Token and unresolved write-permit budgets apply per account. Expired or revoked token rows are deleted, not replaced with null tombstones. Other account operations still assemble account and token tables; this is not per-account Durable Object sharding (known gap 8 below).
+- The new class uses a fresh namespace and starts an empty reachable account directory. The old account classes and their data remain. Switching bindings does not migrate or delete that data and requires the normal deployment gate.
+
+### 50. Refresh checks upstream account liveness
+
+- Refresh checks that the WorkOS user still exists before rotating credentials. A confirmed upstream 404 reversibly suspends the account and refuses access without deleting agents, cards or credentials. An outage returns `temporarily_unavailable` without consuming the refresh token. WorkOS network I/O runs outside the Accounts serial turn; credentials are checked again afterwards, so a concurrent revocation cannot be undone.
+- Retrying the same refresh token after upstream recovery clears suspension and rotates credentials normally. Prompt webhook offboarding is not implemented; signed, replay-safe user-deleted webhooks remain a known gap. A single profile 404 is not authority for irreversible account deletion.
+
 ## Open
 
 - **Remaining sealing work:** device trust hardening, independent security review, ts-mls audit and browser distribution assurance remain launch blockers. Forum, library, sensemaking, offers, tasks and identity descriptors use sealed-v1. The console now has an opt-in browser encryption device, with ids/placeholders while locked. Nothing in this change deploys, resets, migrates or erases old plaintext data.
 - **Stage 7, review:** not done. Dan's formal review of the rules and an independent security review must pass before real users or confidential data arrive.
+- **Known gap 3 — group recovery:** the server cannot verify encrypted MLS commits; garbage commits can strand clients. An all-ineligible roster also needs successor-group recovery (entry 36).
+- **Known gap 8 — account hot paths:** `knownJourney` still assembles Accounts on journey calls, and the proxy's `sealedRemoteCall` reads the account on each remote call. Keyed hot-path reads remain unfinished.
+- **Known gap 10 — successful remote results:** unsealed remote tool results can still carry server-controlled prose to the local agent. Error sanitization does not cover them.
+- **Known gap 12 — topic capacity:** a journey-wide bound for the topic registry has not been verified.
 - **Dates:** the rewrite plan dates some of Dan's decisions 2026-11-01, but the commits that record them are dated 2026-10-29. The commit dates are what Git records.

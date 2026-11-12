@@ -47,6 +47,8 @@ const viewTools: ViewTool[] = [
 ];
 export function registerApps(server: McpServer, subject: string | undefined, backend?: CoordinationBackend, clientId?: string) {
   registerViewResources(server);
+  // Released resources stay readable; their plaintext tool contracts do not apply to sealed-v1.
+  if (backend?.sealedMode) return;
   registerForumApps(server, subject, backend, clientId);
   registerV2Apps(server, subject, backend, clientId);
   for (const tool of viewTools) {

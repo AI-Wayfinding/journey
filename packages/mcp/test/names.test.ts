@@ -99,13 +99,15 @@ test('names: every journey state response resolves current people names, preserv
   const personId = (await f.call(nameless, 'account_read')).personId as string;
   const invited = await f.call(f.alice, 'journey_invite', { journeyId, personId });
   assert.doesNotMatch(JSON.stringify(invited), /nameless@example.test/);
-  assert.equal((invited.pending as Pending[])[0]!.name, 'Wayfinding member');
+  assert.deepEqual(invited.pending, [], 'Invitations stay private until the person joins');
+  const joinedNameless = await f.call(nameless, 'journey_join', { journeyId });
+  assert.equal((joinedNameless.members as Member[]).find(m => m.memberId === personId)!.name, 'Wayfinding member');
 });
 
 test('names: email invites match exactly ignoring case and non-guides cannot trigger account lookup', async t => {
   const f = await fixture(t);
   const journeyId = (await f.call(f.alice, 'journey_create', { name: 'Invites', policy: 'invite' })).journeyId as string;
-  const missing = 'No Wayfinding account uses that email yet; ask them to sign in once, then invite again';
+  const accepted = { journeyId, accepted: true };
   await f.refused(f.eve, 'journey_invite', { journeyId, email: 'bob@example.test' }, 'Only guides may invite');
   await f.refused(f.eve, 'journey_invite', { journeyId, email: 'missing@example.test' }, 'Only guides may invite');
   assert.equal(f.emailLookups(), 0);
@@ -115,12 +117,16 @@ test('names: email invites match exactly ignoring case and non-guides cannot tri
   await f.refused(f.alice, 'journey_invite', { journeyId });
   await f.refused(f.alice, 'journey_invite', { journeyId, email: 'not-an-email' });
   assert.equal(f.emailLookups(), 0);
-  await f.refused(f.alice, 'journey_invite', { journeyId, email: 'ob@example.test' }, missing);
-  await f.refused(f.alice, 'journey_invite', { journeyId, email: 'missing@example.test' }, missing);
+  assert.deepEqual(await f.call(f.alice, 'journey_invite', { journeyId, email: 'ob@example.test' }), accepted);
+  assert.deepEqual(await f.call(f.alice, 'journey_invite', { journeyId, email: 'missing@example.test' }), accepted);
   const invited = await f.call(f.alice, 'journey_invite', { journeyId, email: 'BOB@EXAMPLE.TEST' });
-  assert.deepEqual(invited.pending, [{ personId: f.b, name: 'BOB', status: 'invited' }]);
-  assert.equal(f.emailLookups(), 3, 'The lookup counter must observe successful and unsuccessful guide lookups');
-  await f.refused(f.alice, 'journey_invite', { journeyId, email: 'bob@example.test' });
+  assert.deepEqual(invited, accepted);
+  const afterKnown = await f.call(f.alice, 'journey_read', { journeyId });
+  assert.deepEqual(afterKnown.pending, [], 'A pending email invitation must not expose the existing account');
+  await f.call(f.alice, 'journey_invite', { journeyId, email: 'another-missing@example.test' });
+  assert.deepEqual(await f.call(f.alice, 'journey_read', { journeyId }), afterKnown);
+  assert.equal(f.emailLookups(), 4, 'The lookup counter must observe successful and unsuccessful guide lookups');
+  assert.deepEqual(await f.call(f.alice, 'journey_invite', { journeyId, email: 'bob@example.test' }), accepted);
   const joined = await f.call(f.bob, 'journey_join', { journeyId });
   assert.deepEqual((joined.members as Member[]).map(m => m.memberId), [f.a, f.b]);
   const lookups = f.emailLookups();

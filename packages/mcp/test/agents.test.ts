@@ -41,6 +41,18 @@ async function fixture(t: TestContext) {
   return { backend, person, bound, agentId, journeyId, call, refused, identity, assertion, authorize, connect };
 }
 
+test('agents: an empty-card agent can only read and narrow its own card', async t => {
+  const f = await fixture(t);
+  const sibling = String((await f.call(f.person, 'agent_create', { name: 'Sibling' })).agentId);
+  for (const tool of ['agent_capabilities', 'agent_narrow', 'agent_card']) {
+    await f.refused(f.bound, tool, { agentId: sibling, ...(tool === 'agent_narrow' ? { remove: ['read'] } : tool === 'agent_card' ? { action: 'withdraw' } : {}) });
+  }
+  const listed = (await f.call(f.bound, 'agent_list')).agents as Data[];
+  assert.deepEqual(listed.map(a => a.agentId), [f.agentId]);
+  await f.call(f.bound, 'agent_capabilities', { agentId: f.agentId });
+  await f.call(f.bound, 'agent_narrow', { agentId: f.agentId, remove: ['read'] });
+});
+
 test('agents: token client_id is distinct from the authenticated subject and required', async () => {
   const v = createVerifier({ issuer: ISSUER, resource: RESOURCE, getKey: createLocalJWKSet(signer.jwks) });
   const auth = await v.verifyAccessToken(await token(signer, { sub: 'alice', client_id: 'app-a' }));

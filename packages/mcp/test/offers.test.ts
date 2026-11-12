@@ -30,6 +30,26 @@ async function fixture() {
   return { backend, call, alice, bob, journeyId, agentId, requesterId, define, publish, request, tasks, advance: (ms: number) => { now += ms; } };
 }
 
+test('offers: standing allows stay in their journey and agent decisions obey the owner ceiling', async () => {
+  const f = await fixture();
+  await f.define({ preset: 'Ask me' }); await f.publish();
+  const other = String((await f.call('alice', 'journey_create', { name: 'Other', policy: 'open', defaultRole: 'write' })).journeyId);
+  await f.call('bob', 'journey_join', { journeyId: other });
+  await f.call('alice', 'agent_add', { journeyId: other, agentId: f.agentId });
+  const row = ((await f.call('alice', 'offer_list', { agentId: f.agentId })).offers as {version:number}[])[0]!;
+  await f.call('alice', 'offer_journey_set', { agentId: f.agentId, offerId: 'review', journeyId: other, expectedVersion: row.version, enabled: true });
+  await f.request();
+  await f.call('alice', 'task_step', { journeyId: f.journeyId, taskId: String((await f.tasks())[0]!.taskId), action: 'approve', standing: 'always_allow' });
+  await f.call('bob', 'task_create', { journeyId: other, name: 'Other request', agentId: f.agentId, offerId: 'review', input: { question: 'Hi' }, maxRounds: 1, deadline: 1_800_003_600_000 });
+  const otherTasks = (await f.call('alice', 'journey_read', { journeyId: other })).tasks as Record<string,unknown>[];
+  assert.equal(otherTasks[0]!.status, 'requested');
+  await setAgentCard(f.backend, 'alice', f.agentId, ['read', 'task.manage', 'offer.manage', 'offer.decide']);
+  await f.call('alice', 'task_step', { journeyId: other, taskId: String(otherTasks[0]!.taskId), action: 'approve', standing: 'always_allow', actingAgent: f.agentId });
+  await f.call('bob', 'task_create', { journeyId: other, name: 'Still held', agentId: f.agentId, offerId: 'review', input: { question: 'Hi again' }, maxRounds: 1, deadline: 1_800_003_600_000 });
+  const held = (await f.call('alice', 'journey_read', { journeyId: other })).tasks as Record<string,unknown>[];
+  assert.equal(held[1]!.status, 'requested');
+});
+
 test('offers: schema rejection leaves persisted state unchanged', async () => {
   const f = await fixture();
   await f.define(); await f.publish();

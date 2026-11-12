@@ -1,14 +1,16 @@
+// Legacy relay reconciliation only; this does not exercise the shipped proxy.
+// Shipped sealed-v1 coverage lives in sealed*.test.ts.
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {Client,StreamableHTTPClientTransport} from '@modelcontextprotocol/client';
 import {MemoryBackend} from '../../mcp/src/backend.ts';
 import {app,bridge,keyPair,RESOURCE,token} from '../../mcp/test/helpers.ts';
-import {WayfindingProxy} from '../src/proxy.ts';
+import {WayfindingProxy} from './legacy-proxy.ts';
 import {createMlsGroup} from '../src/mls/index.ts';
 import {decode} from '../src/codec.ts';
 import type {LocalStore} from '../src/store.ts';
 
-test('proxy: a server-side removal forces an MLS removal before any later content key is distributed',async t=>{
+test('LEGACY-ONLY (not shipped coverage) proxy: a server-side removal forces an MLS removal before any later content key is distributed',async t=>{
  const backend=new MemoryBackend({async get(s){return {name:s,email:`${s}@example.test`};}}),signer=await keyPair('reconcile');
  const connect=async(sub:string)=>{const client=new Client({name:'proxy',version:'1'});await client.connect(new StreamableHTTPClientTransport(RESOURCE,{fetch:bridge(app(signer,backend)),requestInit:{headers:{authorization:`Bearer ${await token(signer,{sub})}`}}}));t.after(()=>client.close());
   const records=new Map<string,string>();const store:LocalStore={async read(n){return records.get(n);},async write(n,v){records.set(n,v);}};

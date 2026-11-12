@@ -14,7 +14,9 @@ An agent can do only what its person has **assigned** to it. Each assignment is 
 - give itself, or another agent, more capabilities;
 - keep acting after its person leaves, removes it or unticks a capability.
 
-The person can narrow a card in the console or through MCP. Widening it in the console needs the person's passkey. Reauthorising the client can also change the card, after a fresh sign-in.
+The person can narrow any owned card in the console or through MCP. An agent can read, narrow or withdraw only its own card. Widening it in the console needs the person's passkey. Reauthorising the client can also change the card, after a fresh sign-in.
+
+The consent page identifies the **client** by its full client id and redirect host. A pending consent belongs to the browser that started it. An email invitation acknowledges the request without revealing whether the address has an account. At token refresh, a confirmed upstream user deletion makes the account and every owned agent inactive; an upstream outage does not.
 
 ## Journeys
 
@@ -23,6 +25,7 @@ A **journey** is a group of people (and their agents) working out something toge
 Every person in a journey is a **member** with a role: **read** (can look and comment) or **write** (can also add and change work). Agents are members too, but they act with their person's role, narrowed by their card.
 
 People join a journey by asking (a guide admits them), by invitation, or freely if the guide made the journey open.
+Devices join an encrypted audience automatically when eligible. Any online member’s client can admit them; guides do not approve devices. A person may remove only their own devices directly. A guide removes a member from the journey, after which clients remove all that member’s ineligible devices before sharing new content.
 
 ## Work inside a journey
 
@@ -38,8 +41,7 @@ A journey holds four kinds of shared work. All four are visible to every member 
 An **offer** names a kind of work an agent can do. It describes the work, gives examples, and defines the input it accepts and any required output. Offers appear only in journeys where the agent is a live member and may manage tasks. An offer does not give the agent more capabilities.
 
 A **request** asks for work under an offer. Its input must match the offer's schema. The offer's admission rules decide whether to accept it, hold it for a decision, or refuse it without saving a task. Rules run from top to bottom; the first matching rule wins. A request over an allowance is held, not refused.
-
-A held request is visible only to its requester, the offering agent's owner and authorised deciders. The owner can approve or decline it. An agent can decide only with the `offer.decide` capability on its current card. A standing decision can always allow or always deny that requester on future requests.
+A held request is visible only to its requester, the offering agent's owner and authorised deciders. The owner can approve or decline it. An agent can decide only with the `offer.decide` capability on its current card. A standing decision applies only in that journey. Agent-created allows cannot exceed the owner's admission ceiling.
 
 Every accepted request records the offer version and ends at its deadline or round cap. Offers defined by agents start as drafts unless the owner permits publication without review. Request content is readable by the server in this stage; encrypted exchange comes later.
 
@@ -82,6 +84,8 @@ Wayfinding checks every change against written rules before it saves anything. T
 - a journey never loses its last guide;
 - removing a person removes their agents in the same step;
 - only an artifact's owner (or a guide) deletes it, and versions never overwrite each other;
+- writers may version shared artifacts and change their metadata; only the owner changes visibility;
+- content versions and encrypted-record revisions are separate: changing a label does not create a content version;
 - a post's author is never changed, and only its author edits it;
 - an interview stays private until its own participant shares it;
 - only participants contribute to a round, and only while it is open or synthesising;
@@ -89,4 +93,4 @@ Wayfinding checks every change against written rules before it saves anything. T
 
 ## What this proof of concept does not do yet
 
-In this proof of concept the server can read forum posts, interview notes and library text, so cloud agents such as Claude can use them. Real people's confidential material should not go in until end-to-end encryption covers these too and the review is done.
+Sealed-v1 keeps forum posts, interview notes and library text encrypted between eligible devices. The server stores ciphertext and coordination metadata. The PoC still needs independent security review and an audit of ts-mls before confidential material or real users arrive.

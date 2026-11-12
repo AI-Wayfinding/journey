@@ -11,9 +11,9 @@ export const clientMetadata = z.object({
   grant_types: z.array(z.enum(['authorization_code', 'refresh_token'])).default(['authorization_code', 'refresh_token']),
   response_types: z.array(z.literal('code')).default(['code']),
 });
-export type OAuthClient = z.infer<typeof clientMetadata> & { client_id: string };
+export type OAuthClient = z.infer<typeof clientMetadata> & { client_id: string; expiresAt?: number };
 export const authorizationRequest = z.object({ clientId: oauthId, clientName: z.string().max(60), redirectUri: oauthId,
-  challenge: z.string().regex(/^[A-Za-z0-9_-]{43}$/), state: z.string().max(2048).optional(), expiresAt: z.number() }).strict();
+  challenge: z.string().regex(/^[A-Za-z0-9_-]{43}$/), browserHash: z.string().optional(), state: z.string().max(2048).optional(), expiresAt: z.number() }).strict();
 export type AuthorizationRequest = z.infer<typeof authorizationRequest>;
 export const agentConsent = z.object({ name: z.string().trim().min(1).max(60), capabilities: z.array(capabilitySchema).max(capabilities.filter(c => c.name !== 'grant.issue').length), journeys: z.array(z.string().min(1).max(200)).max(128) }).strict();
 export type AgentConsent = z.infer<typeof agentConsent>;
@@ -41,7 +41,7 @@ export interface OAuthPort { oauth(operation: OAuthOperation): Promise<OAuthResu
 export interface StoredToken extends TokenIdentity { hash: string; expiresAt: number; family: string; used?: boolean }
 export interface OAuthState {
   clients: OAuthClient[]; requests: { id: string; request: AuthorizationRequest }[];
-  codes: (TokenIdentity & { hash: string; redirectUri: string; challenge: string; expiresAt: number })[];
+  codes: (TokenIdentity & { hash: string; redirectUri: string; challenge: string; expiresAt: number; family?: string; used?: boolean; retainUntil?: number })[];
   access: StoredToken[]; refresh: StoredToken[];
 }
 export interface OAuthAccounts { accounts: Account[]; oauth?: OAuthState }

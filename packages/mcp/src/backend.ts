@@ -287,9 +287,12 @@ export class Backend implements CoordinationBackend {
         if (command.input.email === undefined) return this.named(await journey.execute(account.personId, command, undefined, actor));
         await journey.requireGuide(account.personId, command, actor);
         const personId = await this.accounts.personIdByEmail(command.input.email);
-        if (!personId) throw new Refused('No Wayfinding account uses that email yet; ask them to sign in once, then invite again');
-        const resolved = parseCommand('journey_invite', { journeyId: command.input.journeyId, actingAgent: actor.agent?.id, personId });
-        return this.named(await journey.execute(account.personId, resolved, undefined, actor));
+        if (personId) {
+          const resolved = parseCommand('journey_invite', { journeyId: command.input.journeyId, actingAgent: actor.agent?.id, personId });
+          try { await journey.execute(account.personId, resolved, undefined, actor); }
+          catch (error) { if (!(error instanceof Refused)) throw error; /* Already invited/member: same acknowledgement. */ }
+        }
+        return { journeyId: command.input.journeyId, accepted: true };
       }
       default:
         if (!('journeyId' in command.input)) throw new Refused('Journey id required');

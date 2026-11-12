@@ -1,3 +1,5 @@
+// Legacy relay regressions against test/legacy-proxy.ts, not the shipped proxy.
+// Shipped sealed-v1 coverage lives in sealed*.test.ts and boundary.test.ts.
 import {test,type TestContext} from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtemp,rm,readdir,stat,readFile} from 'node:fs/promises';
@@ -6,7 +8,7 @@ import {join} from 'node:path';
 import {Client,StreamableHTTPClientTransport,InMemoryTransport} from '@modelcontextprotocol/client';
 import {MemoryBackend} from '../../mcp/src/backend.ts';
 import {app,bridge,keyPair,RESOURCE,token} from '../../mcp/test/helpers.ts';
-import {WayfindingProxy} from '../src/proxy.ts';
+import {WayfindingProxy} from './legacy-proxy.ts';
 import {FileStore} from '../src/file-store.ts';
 import {buildProxyServer} from '../src/server.ts';
 import {decode} from '../src/codec.ts';
@@ -39,7 +41,7 @@ async function fixture(t:TestContext) {
  return {backend,connect,a,b,c};
 }
 
-test('proxy: three local agents share encrypted artifacts, later history, removal, personal copy/move and restart',async t=>{
+test('LEGACY-ONLY (not shipped coverage) proxy: three local agents share encrypted artifacts, later history, removal, personal copy/move and restart',async t=>{
  const {a,b,c,backend,connect}=await fixture(t);
  const journey=await a.proxy.call('journey_create',{name:'Synthetic',policy:'open',defaultRole:'write'});
  const groupId=journey.journeyId as string;
@@ -110,7 +112,7 @@ test('proxy: three local agents share encrypted artifacts, later history, remova
   for(const key of finalKeys){assert.equal(bytes.includes(Buffer.from(decode(String(key)))),false);assert.equal(bytes.includes(Buffer.from(String(key))),false);}
  }
 });
-test('proxy: removed member cannot decrypt a new version of an old artifact with a cached key',async t=>{
+test('LEGACY-ONLY (not shipped coverage) proxy: removed member cannot decrypt a new version of an old artifact with a cached key',async t=>{
  const {a,b,c,backend}=await fixture(t);
  const groupId=String((await a.proxy.call('journey_create',{name:'Key rotation',policy:'open',defaultRole:'write'})).journeyId);
  await b.proxy.call('journey_join',{journeyId:groupId});await c.proxy.call('journey_join',{journeyId:groupId});
@@ -131,7 +133,7 @@ test('proxy: removed member cannot decrypt a new version of an old artifact with
  const currentKey=JSON.parse((await a.store.read('state'))!).groups[groupId].keys[artifact.artifactId];
  assert.notEqual(currentKey,oldKey);
 });
-test('proxy: authenticated MLS artifact ids cannot write through the revision cache prototype',async t=>{
+test('LEGACY-ONLY (not shipped coverage) proxy: authenticated MLS artifact ids cannot write through the revision cache prototype',async t=>{
  const {a,b}=await fixture(t);
  assert.equal(Object.hasOwn(Object.prototype,'1'),false);
  t.after(()=>{Reflect.deleteProperty(Object.prototype,'1');});
@@ -148,7 +150,7 @@ test('proxy: authenticated MLS artifact ids cannot write through the revision ca
  assert.equal(Object.hasOwn(Object.prototype,'1'),false,'an authenticated artifact id must not modify Object.prototype');
  assert.equal(syncResult!.status,'fulfilled');
 });
-test('proxy: every personal artifact revision rotates its key and an aborted upload preserves the old readable revision',async t=>{
+test('LEGACY-ONLY (not shipped coverage) proxy: every personal artifact revision rotates its key and an aborted upload preserves the old readable revision',async t=>{
  const {a,backend,connect}=await fixture(t),groupId=a.proxy.personalGroupId;
  await a.proxy.createGroup(groupId);
  const artifact=await a.proxy.createArtifact({groupId,name:'Personal revisions',type:'text/plain',content:'SYNTHETIC-V1'});
@@ -171,7 +173,7 @@ test('proxy: every personal artifact revision rotates its key and an aborted upl
  assert.equal((await resumed.proxy.readArtifact(groupId,artifact.artifactId)).content,'SYNTHETIC-V3');
 });
 // This guards the existing artifact body path only, not the still-plaintext forum/library/round paths.
-test('proxy: artifact body canary never reaches DO values side keys or blob bytes',async t=>{
+test('LEGACY-ONLY (not shipped coverage) proxy: artifact body canary never reaches DO values side keys or blob bytes',async t=>{
  const {a,backend}=await fixture(t),groupId=a.proxy.personalGroupId,marker='SYNTHETIC-STORAGE-SCAN-CANARY-ROTATION';
  await a.proxy.createGroup(groupId);
  const artifact=await a.proxy.createArtifact({groupId,name:'Storage scan',type:'text/plain',content:marker});
@@ -183,13 +185,13 @@ test('proxy: artifact body canary never reaches DO values side keys or blob byte
  for(const value of bytes)assert.equal(value.includes(Buffer.from(marker)),false,'artifact plaintext marker found in server storage');
  assert.equal((await a.proxy.readArtifact(groupId,artifact.artifactId)).content,marker);
 });
-test('proxy: malformed local JSON refuses without exposing stored content in errors',async t=>{
+test('LEGACY-ONLY (not shipped coverage) proxy: malformed local JSON refuses without exposing stored content in errors',async t=>{
  const {a}=await fixture(t);
  const store={async read(){return '{"SYNTHETIC-LOCAL-SECRET":';},async write(){throw new Error('Unexpected write');}};
  await assert.rejects(WayfindingProxy.open(a.remote,store),{message:'Invalid local or MLS JSON'});
 });
 
-test('proxy: stdio-facing MCP exposes artifact lifecycle, MLS controls and coordination but no raw blob bypass',async t=>{
+test('LEGACY-ONLY (not shipped coverage) proxy: stdio-facing MCP exposes artifact lifecycle, MLS controls and coordination but no raw blob bypass',async t=>{
  const {a}=await fixture(t);
  const server=await buildProxyServer(a.proxy);
  const [left,right]=InMemoryTransport.createLinkedPair();
@@ -209,7 +211,7 @@ test('proxy: stdio-facing MCP exposes artifact lifecycle, MLS controls and coord
 });
 
 
-test('proxy: personal groups admit only owned devices and synchronize private history and deletion',async t=>{
+test('LEGACY-ONLY (not shipped coverage) proxy: personal groups admit only owned devices and synchronize private history and deletion',async t=>{
  const {a,b,connect}=await fixture(t);
  const groupId=a.proxy.personalGroupId;
  await a.proxy.createGroup(groupId);
@@ -227,7 +229,7 @@ test('proxy: personal groups admit only owned devices and synchronize private hi
 });
 
 
-test('proxy: ambiguous MLS delivery fails closed in memory and after a file-store restart',async t=>{
+test('LEGACY-ONLY (not shipped coverage) proxy: ambiguous MLS delivery fails closed in memory and after a file-store restart',async t=>{
  const {connect,backend}=await fixture(t);
  const fault={loseNextPost:false},a=await connect('ambiguous',undefined,fault);
  const groupId=a.proxy.personalGroupId;await a.proxy.createGroup(groupId);

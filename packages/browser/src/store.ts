@@ -41,7 +41,7 @@ export class BrowserStore implements LocalStore{
  }
  async read(name:string){if(!this.key)throw new Error('Device locked');return this.values[name];}
  async write(name:string,value:string){
-  if(!this.key)throw new Error('Device locked');if(name!=='sealed-state')throw new Error('Unknown browser storage record');
+  if(!this.key)throw new Error('Device locked');if(!['sealed-state','content-mode'].includes(name))throw new Error('Unknown browser storage record');
   const commit=this.pending.then(async()=>{
    if(!this.key)throw new Error('Device locked');
    const values={...this.values,[name]:value},record={...this.record,state:await wrap(JSON.stringify(values),this.key,this.record.context)};

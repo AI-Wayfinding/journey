@@ -22,11 +22,17 @@ This stage is not live verification of the public endpoint. Run its tests locall
 
 ### Bounds and recovery
 
-A group retains at most 4,096 messages and 32 MiB of ciphertext, without silent eviction. Envelopes are at most 1 MiB, device packages 64 KiB, local payloads 9 MiB and encrypted uploads 10 MiB. Listings are paged at 100 records and 4 MiB. A journey allows 1,024 content records, 128 groups and 128 active preparation tickets; each group allows 128 devices. A separate 32 MiB journey upload budget counts even expired, uncollected ciphertext. Exhausted budgets refuse writes; this stage performs no deletion or cleanup.
+A group retains at most 4,096 application messages and 32 MiB of content ciphertext, without silent eviction. Updates have a separate 4,096-message/32 MiB budget; admission, removal and history share a separate 4,096-message/256 MiB budget. Per person and group, across all their devices and agents, the limits are 128 updates/4 MiB, 2,048 application messages/16 MiB and 1,024 admission/history messages/64 MiB. Envelopes are at most 1 MiB, device packages 64 KiB, local payloads 9 MiB and encrypted uploads 10 MiB. Listings are paged at 100 records and 4 MiB. A journey allows 1,024 content records, 128 groups and 128 active preparation tickets; each group allows 128 devices. Retained uploads have a separate 32 MiB journey limit and 16 MiB per-person limit. Abandoning or expiring an uncommitted ticket refunds both upload reservations and deletes its unreferenced bytes on the next request. Exhausted budgets refuse writes.
 
 Preparation tickets and pending uploads expire after ten minutes. Device checkpoints expire after thirty days without a successful fetch. Large-body uploads become readable only through a committed, entitled record/version reference. Item metadata edits also advance the content revision.
 
+Shared artifact writers may add content versions and edit metadata, but only the owner changes visibility. Check that metadata edits advance the ciphertext revision without consuming a content version. Topic authors may lock their topics; guides may moderate them; only post authors edit their posts. `packages/proxy/test/metadata.test.ts` runs these checks against both backends.
+
+A move must refuse predictable source-delete denial before creating a destination copy. After a copy succeeds, an unconfirmed delete returns a partial receipt with both artifact ids. Check `sourceState: unknown` even when the server accepted deletion but its reply was lost. Inspect both records before retrying; do not treat this as a completed move or retry it blindly.
+
 Before final publication, the proxy saves its advanced ratchets and exact pending ciphertext. After a lost reply, it checks the server receipt and either completes locally or retries that same ciphertext. A proved uncommitted, expired ticket can be abandoned without rolling a ratchet back. Unresolved handshake/history delivery fails closed; do not restore an old MLS snapshot.
+
+The current proxy requires the server to report `sealed-v1` before startup and each remote operation. It saves a local mode pin and refuses a missing mode, a downgrade or a legacy store without an explicit migration. The old relay tests use a test-only harness; there is no plaintext fallback in the shipped proxy.
 
 ### Offers, task exchange and private names
 
@@ -40,6 +46,7 @@ Run these checks with synthetic fixtures and enrolled local devices, not the bro
 6. Provision an account before enrolling a device: storage must contain neither the fetched AuthKit name nor email. Invitations match trimmed, lower-case authenticated email through HMAC. Editing private profile email must not change routing. Raw nickname/card/passkey rename routes must refuse; OAuth/console controls use ids or the fixed `MCP client` label. Missing `read` or `device.keys` must produce an actionable refusal, never an added grant.
 
 The console can still change authority and admission metadata while locked. Private content uses the browser device below or the local proxy; neither changes the server's ids/status-only view.
+Released MCP App resources remain available unchanged. Their older tool wrappers are not advertised in sealed-v1; use the browser device or local proxy for content.
 
 ### Browser device: unlock, admission and recovery
 
@@ -47,8 +54,8 @@ Use synthetic data only. This is source functionality, not a claim that the publ
 
 1. Sign in to `/console`. Add a passkey on **Passkeys**, then return to the page. New registrations request the WebAuthn PRF extension. Older passkeys or unsupported authenticators may need the recovery-code path. Web Locks, IndexedDB, Web Crypto and a secure browser context are required; unavailable storage or locks must refuse rather than fall back to plaintext.
 2. In **Private browser device**, choose the wrapping passkey and select **Create browser device**. Save the random recovery code outside the browser. Retype it and select **I saved the code — create device**. It is displayed only before confirmation, even when PRF works. A cancelled passkey prompt must not enroll a device. With no PRF result, the recovery code is the unlock method. No code or PRF output is sent to the server.
-3. Confirm each fresh passkey prompt for an audience package. The initial personal audience is prepared automatically. First use may create a private workspace, which still needs `journey.create`; enrollment never adds a missing capability. If that audience already exists, its returned `deviceId` needs admission from a surviving member. On the existing device, use `mls_group_add` with the audience, authenticated person id and device id, or fill **Audience id**, **Device id to admit (from its authenticated package)** and **Person id to admit**, then select **Admit device to audience**. On the new browser select **Prepare or synchronize audience** again. Account membership alone does not grant keys.
-4. Open a journey page and select **Prepare journey audience**. Use the same explicit admission path. Read forum/topics/rounds, library items, cards and offers in the private browser panel. It renders validated decrypted values as text, never HTML. **Search library** and **Search offers** decrypt and search locally; results cover only the retained content this device can read. A held/private task may require **Prepare private task audience** and admission to its task group before its content is available.
+3. Confirm each fresh passkey prompt for an audience package. The personal audience is prepared automatically. First use may create a private workspace and still needs `journey.create`. A new eligible device waits for an existing online member's client to synchronize; that client admits it and shares retained history automatically. Select **Synchronize audience** on the new browser to receive its keys. Guides do not approve or manage device admission.
+4. Open a journey page and select **Prepare journey audience**. Admission follows the same automatic flow. Read forum/topics/rounds, library items, cards and offers in the private browser panel. Decrypted values render as text, never HTML. **Search library** and **Search offers** run locally over retained readable content. A private task may require **Prepare private task audience** before its content is available.
 5. Try **Seal post**, **Seal library item**, **Seal profile**, **Seal card**, **Seal offer edit**, **Approve sealed** and **Decline sealed**. The post, text, profile/card descriptions, offer definition and decision reason must be absent from outgoing request bodies and server storage. IDs, lifecycle/admission settings and encrypted envelopes remain visible. Legacy authority forms cannot submit descriptive plaintext.
 6. Select **Lock device**. Decrypted output and key access must disappear. **Unlock with passkey** uses PRF locally; **Unlock with recovery code** must refuse a wrong code and open with the saved code. Reload and unlock again to read the committed state. Another tab must refuse concurrent unlock. Lock/logout/pagehide retains the writer fence through pending IndexedDB commits, then releases it. No plaintext cache is stored.
 7. While locked, expand **Listed browser devices**. Revoke one browser. Its linked leaves use the same removal fence as other devices. Keep another admitted device alive, synchronize it and write new content: the removed browser must neither fetch nor decrypt it, even with its old local state. Deleting a wrapping passkey is refused while it has live browser leaves. Previously decrypted content cannot be recalled.
@@ -241,13 +248,23 @@ In pi, Claude Code or another remote MCP client, add `https://poc.wayfinding.sup
 
 The remote connection offers coordination, metadata and encrypted relay tools. It does **not** decrypt content. Remote `artifact_create` is a metadata tool, unlike the local proxy's content tool with the same name. Use the local proxy for plaintext artifact creation, reading, copying and moving. This guide does not establish that any particular hosted client's connector or Apps UI works.
 
+### Check accounts and OAuth hardening
+
+Use synthetic identities and a server built from this revision. These checks do not imply that the live Worker has been updated.
+
+- Start authorization in one browser. Check that consent shows the full client id and redirect host. Copy its consent URL into another signed-in browser; it must be refused. Complete it in the first browser and check the redirect's `iss` parameter.
+- Inspect an HTTPS response for `Strict-Transport-Security`. DCR allows five registrations per minute per IP; the sixth must return 429 without blocking another IP or consuming the separate login/authorization/token limit of 30 per minute. Production without either limiter must return 503. Unused DCR clients expire after ten minutes; reaching the anonymous table cap must not block existing-account operations.
+- Create two agents for one person. An agent may list, read and narrow only itself, not its sibling. A journey-specific always-allow must not allow the same requester in another journey or exceed the owner's ceiling.
+- With a fake upstream in the automated suite, return 503 at refresh: retrying the same refresh token after recovery must succeed. Return 404 instead: access and refresh must be refused without deleting the account, agents or cards. Restore the upstream profile and retry the same refresh token; it must succeed and clear suspension. A real WorkOS webhook is not wired yet, so upstream deletion is currently detected at refresh, not immediately.
+- Confirm the new `AccountsPartitionedV1` binding only in a reviewed dry-run. It starts a fresh account directory; old classes and data remain. Do not deploy or delete data as part of this test.
+
 ### Check nicknames and email invitations
 
 These checks cover newer source changes, not the live run recorded above. Use a server built from this revision.
 
-After B has called `account_read` once, A can invite B with `journey_invite` using `journeyId` and B's synthetic WorkOS `email` instead of `personId`. Supply exactly one of the two; email matching ignores case. B then calls `journey_join`. Only guides may invite. An unknown email must return `No Wayfinding account uses that email yet; ask them to sign in once, then invite again`. Admission, refusal, role and guide changes still require `personId`.
+After B has called `account_read` once, A can invite B with `journey_invite` using `journeyId` and B's synthetic WorkOS `email` instead of `personId`. Supply exactly one of the two; email matching ignores case. B then calls `journey_join`. Only guides may invite. Repeat with an unknown email and an already-invited email: each must return the same `{ journeyId, accepted: true }` acknowledgement. Admission, refusal, role and guide changes still require `personId`.
 
-Change B's nickname again and check that A's next `journey_read` shows it without rejoining. Other people's emails must not appear in journey results; a profile with only an email uses `Wayfinding member` until a nickname is set. Account existence lookup is a PoC privacy tradeoff restricted to guides, not a general email search.
+Change B's nickname again and check that A's next `journey_read` shows it without rejoining. Other people's emails must not appear in journey results; a profile with only an email uses `Wayfinding member` until a nickname is set. Neither the invitation response nor a later `journey_read` may disclose whether an invited email has an account. Pending invitations are visible only to the invitee; join requests remain visible.
 
 ## Walk through with A and B
 

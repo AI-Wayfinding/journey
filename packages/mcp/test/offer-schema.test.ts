@@ -18,3 +18,10 @@ test('offers: unsupported schema constraints are refused rather than silently ig
   }
   assert.equal(offerDefinitionSchema.safeParse({ id: 'unsafe', name: 'Unsafe', description: '', inputSchema: { type: 'object', properties: { question: { type: ['string'] } } } }).success, false);
 });
+
+
+test('offers: strict admission rules accept only boolean ceilingBound', async () => {
+  const { admissionRuleSchema } = await import('../src/offers.ts');
+  for (const ceilingBound of [true, false]) assert.deepEqual(admissionRuleSchema.parse({ who: 'people', decision: 'allow', ceilingBound }), { who: 'people', decision: 'allow', ceilingBound });
+  for (const extra of [{ ceilingBound: 'true' }, { ceilingBound: 1 }, { ceilingBounds: true }]) assert.equal(admissionRuleSchema.safeParse({ who: 'people', decision: 'allow', ...extra }).success, false);
+});
