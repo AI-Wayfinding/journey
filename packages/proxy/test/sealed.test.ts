@@ -49,7 +49,7 @@ test('sealed proxy unhandled tools stay hidden and cannot forward plaintext',asy
   'apps_journey_invite','apps_project_update','apps_artifact_rename',
  ];
  const listed=await a.remote.listTools(),remoteNames=new Set(listed.tools.map(tool=>tool.name));
- for(const name of hidden)assert.ok(remoteNames.has(name),`${name} is registered remotely`);
+ for(const name of hidden.filter(name=>!name.includes('view')&&!name.startsWith('apps_')))assert.ok(remoteNames.has(name),`${name} is registered remotely`);
  const forwarded:unknown[]=[];
  const remote:SealedRemote={
   async listTools(){return {...listed,tools:[...listed.tools,{name:'future_content_write',inputSchema:{type:'object',properties:{body:{type:'string'}}}}]};},
@@ -349,4 +349,14 @@ test('sealed rounds decrypted default guidance contains the first-position inter
  assert.equal(String(guidance.text).match(/^\d+\./gm)?.length,15);
  assert.match(String(guidance.text),/Ask one question at a time/);
  assert.doesNotMatch(String(guidance.text),/server can read/);
+});
+
+
+test('sealed direct clients do not advertise incompatible App tools but retain frozen resources',async t=>{
+ const {a}=await fixture(t),tools=(await a.remote.listTools()).tools;
+ const resources=(await a.remote.listResources()).resources;assert.ok(resources.some(r=>r.uri==='ui://wayfinding/v1/journey.html'));
+ for(const name of ['library_view','round_view','forum_view','apps_v2_reply','apps_v2_interview_write']){
+  assert.ok(!tools.some(tool=>tool.name===name),name);
+  await assert.rejects(a.remote.callTool({name,arguments:{}}),/Unknown tool|not found/i);
+ }
 });

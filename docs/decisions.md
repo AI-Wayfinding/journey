@@ -282,6 +282,12 @@ Dan's brief for v2 was to write the spec, build what seems best, and refine late
 - **What:** both paths use the same client-safe fifteen-question first-position interview. The sealed path encrypts this guidance before upload; its privacy wording describes sealing and visible routing metadata.
 - **Source:** `packages/shared/first-position.ts`; decrypted guidance regression in `packages/proxy/test/sealed.test.ts`.
 
+### 38. Retain released App resources without incompatible sealed tools
+
+- **Decided by:** CQ-02 remediation chooses the bounded compatibility path.
+- **What:** sealed-v1 retains every released `ui://` resource byte for byte, but does not advertise the older App tools. Their plaintext input and view contracts do not support sealed records. Clients use the local encryption proxy or browser for content and the ordinary coordination tools for metadata.
+- **Source:** `packages/mcp/src/apps.ts`; direct sealed-client invocation and frozen-resource hash tests.
+
 ## Open
 
 - **Remaining sealing work:** device trust hardening, independent security review, ts-mls audit and browser distribution assurance remain launch blockers. Forum, library, sensemaking, offers, tasks and identity descriptors use sealed-v1. The console now has an opt-in browser encryption device, with ids/placeholders while locked. Nothing in this change deploys, resets, migrates or erases old plaintext data.

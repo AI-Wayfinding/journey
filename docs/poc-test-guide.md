@@ -40,6 +40,7 @@ Run these checks with synthetic fixtures and enrolled local devices, not the bro
 6. Provision an account before enrolling a device: storage must contain neither the fetched AuthKit name nor email. Invitations match trimmed, lower-case authenticated email through HMAC. Editing private profile email must not change routing. Raw nickname/card/passkey rename routes must refuse; OAuth/console controls use ids or the fixed `MCP client` label. Missing `read` or `device.keys` must produce an actionable refusal, never an added grant.
 
 The console can still change authority and admission metadata while locked. Private content uses the browser device below or the local proxy; neither changes the server's ids/status-only view.
+Released MCP App resources remain available unchanged. Their older tool wrappers are not advertised in sealed-v1; use the browser device or local proxy for content.
 
 ### Browser device: unlock, admission and recovery
 
