@@ -8,14 +8,47 @@ import {WayfindingProxy} from '../src/proxy.ts';
 import {openTestSealed,testAccount} from './account-fixture.ts';
 import {parseCommand} from '../../mcp/src/commands.ts';
 import * as z from 'zod';
+import {installTestAccountIdentity} from '../../mcp/test/account-fixture.ts';
 
 async function fixture(t:TestContext,now:()=>number=Date.now){
  const backend=new MemoryBackend({async get(s){return {name:s,email:`${s}@example.test`};}},now,testPasskeys,true),signer=await keyPair('sealed');
- const connect=async(subject:string)=>{const remote=new Client({name:'sealed-test',version:'1'});await remote.connect(new StreamableHTTPClientTransport(RESOURCE,{fetch:bridge(app(signer,backend)),requestInit:{headers:{authorization:`Bearer ${await token(signer,{sub:subject})}`}}}));t.after(()=>remote.close());const files=new Map<string,string>(),store={async read(k:string){return files.get(k)},async write(k:string,v:string){files.set(k,v)}};const opened=await openTestSealed(backend,remote,store,subject);return {...opened,files,store};};
+ const connect=async(subject:string,clientId='test-client')=>{const remote=new Client({name:'sealed-test',version:'1'});await remote.connect(new StreamableHTTPClientTransport(RESOURCE,{fetch:bridge(app(signer,backend)),requestInit:{headers:{authorization:`Bearer ${await token(signer,{sub:subject,client_id:clientId})}`}}}));t.after(()=>remote.close());const files=new Map<string,string>(),store={async read(k:string){return files.get(k)},async write(k:string,v:string){files.set(k,v)}};const opened=await openTestSealed(backend,remote,store,subject);return {...opened,files,store};};
  return {backend,connect,a:await connect('alice')};
 }
 const records=(value:Record<string,unknown>)=>z.array(z.record(z.string(),z.unknown())).parse(value.records);
 const recordId=(value:Record<string,unknown>,type:string)=>String(records(value).find(r=>r.type===type)!.recordId);
+
+test('D1: after B recovery an A agent removes only revoked leaves and retains content and offer discovery',async t=>{
+ let now=Date.now();const {a,backend,connect}=await fixture(t,()=>now);
+ const journeyId=String((await a.client.call('journey_create',{name:'D1 recovery',policy:'open',defaultRole:'write'})).journeyId);
+ const agentId=String((await a.client.call('agent_create',{name:'Surviving A agent'})).agentId);
+ await setAgentCard(backend,'alice',agentId,['read','task.manage','device.keys']);await a.client.call('agent_add',{journeyId,agentId});
+ const identity={subject:'alice',clientId:'test-console'},change={kind:'bind' as const,clientId:'recovery-agent',agentId};
+ const {challenge}=await backend.beginAuthorization(identity,change);
+ await backend.completeAuthorization(identity,change,{id:'synthetic',rawId:'synthetic',type:'public-key',clientExtensionResults:{},response:{clientDataJSON:challenge,authenticatorData:'',signature:'test-valid'}});
+ const agent=await connect('alice','recovery-agent'),device=await agent.client.prepareGroup(journeyId);
+ await a.client.addMember(journeyId,a.client.personId,device.deviceId);await agent.client.sync(journeyId);
+ assert.equal(z.object({id:z.string()}).parse((await agent.client.call('whoami')).agent).id,agentId);
+ const b=await connect('bob');await b.client.call('journey_join',{journeyId});const bd=await b.client.prepareGroup(journeyId);
+ await a.client.addMember(journeyId,b.client.personId,bd.deviceId);await b.client.sync(journeyId);
+ const itemId=recordId(await b.client.call('library_add',{journeyId,name:'Before B recovery',kind:'markdown',text:'Still readable after recovery'}),'library');
+ const offer=await a.client.call('offer_set',{agentId,offer:{name:'Recovery offer',description:'Survives B recovery',tags:[],examples:[],inputSchema:{type:'object'},outputSchema:{type:'object'},instructions:'Help',resource:'resource',journeySettings:{[journeyId]:{enabled:true}}}});
+ const offerId=z.object({id:z.string()}).parse(offer.offer).id;await a.client.call('offer_publish',{agentId,offerId});
+ assert.equal((await agent.client.call('library_get',{itemId})).text,'Still readable after recovery');
+ await backend.passkey({subject:'bob',clientId:'test-console',signedInAt:now},{op:'recovery_start'});now+=259200001;
+ await installTestAccountIdentity(backend,'bob','test-console',now);
+ const view=await agent.client.call('journey_read',{journeyId});
+ const trust=z.record(z.string(),z.object({publicKey:z.string(),safetyNumber:z.string(),accountTrust:z.string()})).parse(view.identities)[b.client.personId]!;
+ assert.equal(trust.accountTrust,'changed');await agent.client.trustAccountKey(b.client.personId,trust.publicKey,trust.safetyNumber);
+ const before=z.object({remove:z.array(z.string())}).parse((await agent.remote.callTool({name:'sealed_group',arguments:{journeyId,groupId:journeyId}})).structuredContent);
+ assert.deepEqual(before.remove,[bd.deviceId]);await agent.client.sync(journeyId);
+ const after=z.object({remove:z.array(z.string()),devices:z.array(z.object({deviceId:z.string()}))}).parse((await agent.remote.callTool({name:'sealed_group',arguments:{journeyId,groupId:journeyId}})).structuredContent);
+ assert.deepEqual(after.remove,[]);assert.ok(after.devices.some(d=>d.deviceId===device.deviceId));assert.ok(!after.devices.some(d=>d.deviceId===bd.deviceId));
+ const reopened=await SealedClient.open(agent.remote,agent.store,agent.client.personId);
+ assert.equal((await reopened.call('library_get',{itemId})).text,'Still readable after recovery');
+ const offers=z.array(z.object({id:z.string(),name:z.string()})).parse((await reopened.call('offer_search',{journeyId,query:'Recovery offer'})).offers);
+ assert.deepEqual(offers.map(o=>({id:o.id,name:o.name})),[{id:offerId,name:'Recovery offer'}]);
+});
 
 test('sealed proxy whoami reports the authenticated person and acting agent',async t=>{
  const {a}=await fixture(t);

@@ -61,3 +61,52 @@ test('a failure inside inbound packet accept never blocks or advances the durabl
  f.badBinding=false;await alice.client.sync(journeyId);
  const reopened=await SealedClient.open(alice.remote,alice.store,alice.client.personId);await reopened.sync(journeyId);
 });
+
+
+for(const action of ['add','remove','bootstrap'] as const)test(`refused MLS ${action} commits retain the old durable epoch and can retry after reopen`,async()=>{
+ const f=await fixture(),{alice,bob,journeyId}=f;
+ const item=await alice.client.call('library_add',{journeyId,name:'Retained',kind:'markdown',text:'Readable after refusal'});
+ const itemId=String((item.records as {type:string;recordId:string}[]).find(r=>r.type==='library')!.recordId);
+ await alice.client.sync(journeyId);
+ let groupId=journeyId;
+ if(action==='add'){const carol=await f.connect('carol');await carol.client.call('journey_join',{journeyId});await carol.client.prepareGroup(journeyId);}
+ if(action==='remove')await alice.client.call('journey_remove',{journeyId,memberId:bob.client.personId});
+ if(action==='bootstrap')groupId=String((await f.backend.sealedExecute('alice','journey_create',{policy:'open',defaultRole:'write'})).journeyId);
+ let refuse=true,during:Record<string,unknown>|undefined;
+ const remote:SealedRemote={listTools:()=>alice.remote.listTools(),callTool:async r=>{
+  if(r.name==='sealed_group_commit'&&r.arguments?.action===action&&refuse){during=JSON.parse(alice.store.files.get('sealed-state')!).groups[groupId];return {isError:true,content:[{type:'text',text:'Explicit commit refusal'}]};}
+  return alice.remote.callTool(r);
+ }};
+ const client=await SealedClient.open(remote,alice.store,alice.client.personId);
+ const before=action==='bootstrap'?undefined:JSON.parse(alice.store.files.get('sealed-state')!).groups[groupId];
+ await assert.rejects(action==='bootstrap'?client.enrollGroup(groupId):client.sync(groupId),/Remote operation refused/);
+ const after=JSON.parse(alice.store.files.get('sealed-state')!).groups[groupId];
+ assert.equal(after.blocked,false,'a definitive refusal is not an ambiguous delivery');
+ assert.equal(during!.mls,after.mls,'no epoch advance may be persisted while awaiting acceptance');
+ assert.deepEqual(after.roster,before?.roster??[]);
+ if(before){assert.equal(after.mls,before.mls);assert.equal(await client.exportGroup(groupId),before.mls);}
+ refuse=false;
+ const reopened=await SealedClient.open(remote,alice.store,alice.client.personId);
+ if(action==='bootstrap'){assert.equal((await reopened.enrollGroup(groupId)).admitted,true);}
+ else await reopened.sync(groupId);
+ assert.equal((await reopened.call('library_get',{itemId})).text,'Readable after refusal');
+});
+
+
+for(const receipt of ['lost','malformed'] as const)test(`an MLS commit with a ${receipt} receipt keeps the old epoch fenced, including after reopen`,async()=>{
+ const f=await fixture(),{alice,journeyId}=f;
+ const dave=await f.connect('dave');await dave.client.call('journey_join',{journeyId});await dave.client.prepareGroup(journeyId);
+ const before=JSON.parse(alice.store.files.get('sealed-state')!).groups[journeyId];let commits=0;
+ const remote:SealedRemote={listTools:()=>alice.remote.listTools(),callTool:async r=>{
+  const result=await alice.remote.callTool(r);
+  if(r.name==='sealed_group_commit'){commits++;if(receipt==='lost')throw new Error('Lost acceptance receipt');return {content:[],structuredContent:{sequence:'invalid'}};}
+  return result;
+ }};
+ const client=await SealedClient.open(remote,alice.store,alice.client.personId);
+ await assert.rejects(client.sync(journeyId),receipt==='lost'?/Remote service unavailable/:(error:unknown)=>error instanceof Error&&error.name==='ZodError');
+ const after=JSON.parse(alice.store.files.get('sealed-state')!).groups[journeyId];
+ assert.equal(after.blocked,true);assert.equal(after.mls,before.mls);assert.deepEqual(after.roster,before.roster);
+ await assert.rejects(client.sync(journeyId),/Ambiguous MLS delivery/);
+ const reopened=await SealedClient.open(remote,alice.store,alice.client.personId);
+ await assert.rejects(reopened.sync(journeyId),/Ambiguous MLS delivery/);assert.equal(commits,1,'unknown delivery must never resend');
+});
