@@ -5,6 +5,11 @@ import {testPasskeys} from './helpers.ts';
 import {generateSigningKey,signIdentityEvent,signConnection,connectionClaim,signValue,signPackage} from '../../shared/account-identity.ts';
 import {browserPost} from '../src/console/browser-api.ts';
 
+test('legacy unsigned device bindings return an explicit connection refusal',async()=>{
+ const {backend,account}=await fixture(),deviceId=`device_${crypto.randomUUID()}`,root=await generateSigningKey();
+ await backend.accountStorage.put(`sealed:device:${deviceId}`,JSON.stringify({deviceId,personId:account.personId,verificationKey:root.publicKey,data:btoa('legacy package'),hash:'legacy',createdAt:1}));
+ await assert.rejects(backend.accountsHost.deviceBinding(deviceId),{message:'Unsigned connection refused'});
+});
 async function fixture(){
  const backend=new MemoryBackend({async get(){return {name:'Alice',email:'alice@example.test'}}},Date.now,testPasskeys,true),account=await backend.accountsHost.provision('alice');
  const state=JSON.parse(String(await backend.accountStorage.get('accounts')));state.accounts[0].passkeys=[{id:'test',publicKey:'AA==',counter:0,transports:[]}];await backend.accountStorage.put('accounts',JSON.stringify(state));

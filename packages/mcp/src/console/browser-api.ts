@@ -10,7 +10,7 @@ const enrollment=z.object({csrf:z.string(),browserId,credentialId:z.string().max
 const metadata=new Set(['account_read','agent_list','agent_capabilities','offer_list','offer_settings','offer_journey_set','offer_publish','offer_retire','journey_list','journey_read','personal_group_read','personal_group_remove','tasks_list']);
 // SealedClient.open, enrollGroup(personal), account_update and resumed profile reads.
 // Personal workspace bootstrap also prepares its General board and private audience.
-const setupTools=new Set(['whoami','account_read','account_update','personal_group_read',
+const setupTools=new Set(['whoami','account_read','account_update','personal_group_read','journey_read',
  'journey_create','journey_descriptor','board_create','identity_descriptor',
  'content_prepare','content_status','content_abandon','sealed_blob_put','sealed_blob_get',
  'sealed_record_read','sealed_group','sealed_group_commit','sealed_group_fetch',

@@ -1,8 +1,8 @@
 import * as z from 'zod';
-import {SealedClient} from '../../proxy/src/sealed-client.ts';
+import {SealedClient,ConnectionPendingError} from '../../proxy/src/sealed-client.ts';
 import {BrowserStore,readVault,singleWriter,forgetRevokedVault} from './store.ts';
 import {BrowserAccountKey} from './account-key.ts';
-import {connectionClaimSchema,requestFingerprint,safetyNumber,verifyIdentityEvent} from '../../shared/account-identity.ts';
+import {connectionClaimSchema,requestFingerprint,safetyNumber} from '../../shared/account-identity.ts';
 import {recoveryCode,recoveryAuthorization} from './vault.ts';
 import {decode} from '../../proxy/src/codec.ts';
 import {evaluatePrf,assertion,registerPasskey} from './webauthn.ts';
@@ -27,31 +27,45 @@ function stamp(browserId:string,unlocked:boolean){for(const row of document.quer
 function lock(){if(store)stamp(store.browserId,false);client=undefined;store?.lock();store=undefined;release?.();release=undefined;work.replaceChildren();controls.replaceChildren();status.textContent='Locked. Private keys and decrypted content were removed from this page.';const profile=document.getElementById('profile-editor');if(profile)profile.replaceChildren(el('h2','Your name'),el('p','Unlock this connection to read or change your private name.'));}
 async function renderWorkspace(){const current=client;if(current)await renderPrivateWorkspace(current,work,button,()=>client===current);}
 window.addEventListener('pagehide',lock);document.querySelector('form[action="/console/logout"]')?.addEventListener('submit',lock);
-async function open(info:Record<string,unknown>,render=true,code?:string){
+async function open(info:Record<string,unknown>,render=true,code?:string,onReady:()=>Promise<void>=async()=>{},pendingCode?:string){
  const current=store!;
  const accountKey=await BrowserAccountKey.open(current,post,String(info.personId),location.origin,code);
  const remote=consoleRemote(async(path,body)=>{if(store!==current)throw new Error('Connection locked');
-  if(path==='/console/device/call'&&body.tool==='sealed_connection_request'){const input=object.parse(body.input);if(input.certificate)body={...body,input:{...input,event:await accountKey.event('connection-added',String(connectionClaimSchema.parse(input.claim).connectionId))}};}
+  if(path==='/console/device/call'&&body.tool==='sealed_connection_request'){const input=object.parse(body.input);if(input.certificate&&accountKey.canSign)body={...body,input:{...input,event:await accountKey.event('connection-added',String(connectionClaimSchema.parse(input.claim).connectionId))}};}
   return post(path,body);},current.browserId,async device=>{
   const body={browserId:current.browserId,credentialId:current.credentialId,device},options=await post('/console/device/enroll/options',body);
   return post('/console/device/enroll/finish',{...body,assertion:(await assertion(options)).assertion});
  });
- client=await SealedClient.open(remote,current,z.string().parse(info.personId),accountKey.canSign?{endorse:claim=>accountKey.endorse(claim)}:{});
+ try{client=await SealedClient.open(remote,current,z.string().parse(info.personId),accountKey.canSign?{endorse:claim=>accountKey.endorse(claim)}:{});}
+ catch(error){
+  if(!(error instanceof ConnectionPendingError))throw error;
+  controls.replaceChildren(el('p','Waiting for a trusted browser to sign this connection. Compare this request code there.'),el('code',error.fingerprint));
+  if(pendingCode)controls.append(el('p','Save this connection unlock code before leaving this page.'),el('code',pendingCode));
+  status.textContent='Connection signature required. Your connection identity is saved in this browser.';
+  const accountCode=field(controls,'Account recovery code (optional)',true);button(controls,'Use account recovery code to sign this connection',async()=>{const code=accountCode.value;accountCode.value='';await open(info,render,code,onReady,pendingCode);});
+  button(controls,'Check for approval',async()=>{try{await open(info,render,undefined,onReady,pendingCode);}catch(e){lock();await connectionControls();throw e;}});
+  button(controls,'Lock this connection',async()=>{lock();await connectionControls();});return;
+ }
  const admission=await client.enrollGroup(String(info.personalGroupId));stamp(current.browserId,true);
  status.textContent=admission.admitted?'Unlocked in this tab. Private content is encrypted before sending.':'Connection trusted. Waiting for another online connection to share private history.';
  controls.replaceChildren();button(controls,'Lock this connection',async()=>{lock();await connectionControls();});
  await renderIdentityControls(accountKey);
- if(render)await renderWorkspace();
+ if(render)await renderWorkspace();await onReady();
 }
 async function renderIdentityControls(key:BrowserAccountKey){
  const panel=el('section');controls.append(panel);panel.append(el('h3','Your safety number'),el('code',await safetyNumber(key.publicKey)),el('p','Compare this number with other members outside Wayfinding. A changed number needs a fresh comparison.'));
- const refresh=async()=>{const info=await post('/console/device/identity',{op:'identity_read'}),list=el('section');panel.replaceChildren(el('h3','Your safety number'),el('code',await safetyNumber(key.publicKey)),el('p',key.canSign?'This browser can sign new connections. Compare each request code on the new connection before signing.':'Use an already trusted browser or unlock with the account recovery code to sign new connections.'),list);
+ const refresh=async()=>{
+ panel.replaceChildren(el('p','Verifying the connection log against this browser’s pinned account keys.'));
+ const info=await post('/console/device/identity',{op:'identity_read'});let events;
+ try{events=await client!.verifyAccountLog(key.personId,info.events??[]);}catch(error){panel.replaceChildren(el('p','Connection log verification failed. No entries are trusted.'));button(panel,'Refresh connection requests',refresh);throw error;}
+ const list=el('section');panel.replaceChildren(el('h3','Your safety number'),el('code',await safetyNumber(key.publicKey)),el('p',key.canSign?'This browser can sign new connections. Compare each request code on the new connection before signing.':'Use an already trusted browser or unlock with the account recovery code to sign new connections.'),list);
+ if(!key.canSign){const accountCode=field(panel,'Account recovery code (not this connection’s unlock code)',true);button(panel,'Recover account signing key',async()=>{const code=accountCode.value;accountCode.value='';const current=store;if(!current)throw new Error('Connection locked');key=await BrowserAccountKey.open(current,post,key.personId,location.origin,code);if(store!==current)throw new Error('Connection locked');await refresh();});}
  for(const entry of objects(info.connections)){
   const claim=connectionClaimSchema.parse(entry.claim),row=el('article');list.append(row);row.append(el('p',`${claim.agentId?'Agent':'Browser'} connection ${claim.connectionId} · ${entry.revokedAt?'Removed':entry.certificate?'Signed':'Awaiting signature'}`));
-  if(!entry.revokedAt&&!entry.certificate){row.append(el('code',await requestFingerprint(claim)));if(key.canSign){const compared=field(row,'Request code shown on the new connection');button(row,'Sign this compared connection',async()=>{if(compared.value.trim()!==await requestFingerprint(claim))throw new Error('Compare the exact request code on the new connection');await post('/console/device/identity',{op:'connection_approve',certificate:await key.endorse(claim),event:await key.event('connection-added',claim.connectionId)});await refresh();});}}
+  if(!entry.revokedAt&&!entry.certificate&&key.canSign){const compared=field(row,'Request code shown on the new connection');button(row,'Sign this compared connection',async()=>{if(compared.value.trim()!==await requestFingerprint(claim))throw new Error('Compare the exact request code on the new connection');await post('/console/device/identity',{op:'connection_approve',certificate:await key.endorse(claim),event:await key.event('connection-added',claim.connectionId)});await refresh();});}
   if(!entry.revokedAt&&entry.certificate&&key.canSign)button(row,'Remove this connection',async()=>{await post('/console/device/identity',{op:'connection_remove',connectionId:claim.connectionId,event:await key.event('connection-removed',claim.connectionId)});await refresh();});
  }
- const log=el('details');log.append(el('summary','Your connection and safety-number log'));for(const event of objects(info.events))log.append(el('p',`${new Date(Number(event.at)).toISOString()} · ${String(event.action)} · ${String(event.connectionId??'Safety number')} · ${await verifyIdentityEvent(event)?'Signature verified':'Server report — unsigned'}`));panel.append(log);
+ const log=el('details');log.append(el('summary','Your connection and safety-number log'));for(const event of events)log.append(el('p',`${new Date(event.at).toISOString()} · ${event.action} · ${event.connectionId??'Safety number'} · ${event.verified?'Signature verified':'Server report — unsigned'}`));panel.append(log);
  button(panel,'Refresh connection requests',refresh);};await refresh();
 }
 async function connectionControls(){
@@ -61,11 +75,11 @@ async function connectionControls(){
  if(record){
   stamp(record.context.deviceId,false);
   // A vault can be written just before its first enrollment; keep it while setup is pending.
-  const revoked=!keys.some(k=>k.id===record.credentialId)||browsers.some(b=>b.id===record.context.deviceId&&!b.live)||(!setup&&!browsers.some(b=>b.id===record.context.deviceId&&b.live));
+  const revoked=!keys.some(k=>k.id===record.credentialId)||browsers.some(b=>b.id===record.context.deviceId&&!b.live);
   if(revoked){status.textContent='This browser connection was removed. Its old encrypted storage cannot be reused.';button(controls,'Discard removed connection from this browser',async()=>{await forgetRevokedVault(origin,personId);await connectionControls();});return;}
   const unlock=async(method:{code:string}|{prf:Uint8Array})=>{
    release=await singleWriter(origin,personId);
-   try{store=await BrowserStore.unlock(record,method,release);release=undefined;await open(info,!setup,'code'in method?method.code:undefined);if(setup)await resumeSetup(info);}catch(e){lock();throw e;}finally{if('prf'in method)method.prf.fill(0);}
+   try{store=await BrowserStore.unlock(record,method,release);release=undefined;await open(info,!setup,setup&&'code'in method?method.code:undefined,async()=>{if(setup)await resumeSetup(info);});}catch(e){lock();await connectionControls();throw e;}finally{if('prf'in method)method.prf.fill(0);}
   };
   button(controls,'Unlock with passkey',async()=>{const prf=await evaluatePrf(record.credentialId,decode(record.prfSalt));if(!prf)throw new Error('This passkey does not support private-key unlock. Use your recovery code.');await unlock({prf});});
   const saved=field(controls,'Recovery code',true);button(controls,'Unlock with recovery code',async()=>{const code=saved.value;saved.value='';await unlock({code});});
@@ -87,14 +101,15 @@ async function connectionControls(){
   try{
    const salt=crypto.getRandomValues(new Uint8Array(32)),prf=await evaluatePrf(credential.id,salt);
    store=await BrowserStore.create({origin,personId,deviceId:crypto.randomUUID()},credential.id,code,salt,prf,release);release=undefined;prf?.fill(0);
-   await open(info,false,proof.recoveryProof||needsName?code:undefined);
+   await open(info,false,proof.recoveryProof||needsName?code:undefined,async()=>{
    if(needsName){await client!.call('account_update',{name:displayName});await confirmSavedCode(code,info);}
    else if(codeInput&&!proof.recoveryProof){
     controls.replaceChildren(el('p','Save this connection unlock code. It unlocks only this browser; it does not replace your account recovery code.'),el('code',code));
     const confirmation=field(controls,'Retype your connection unlock code',true);
     button(controls,'I saved this connection unlock code',async()=>{if(confirmation.value.replaceAll('-','').replaceAll(' ','').toUpperCase()!==code.replaceAll('-',''))throw new Error('Retype the connection unlock code');confirmation.value='';controls.replaceChildren();button(controls,'Lock this connection',async()=>{lock();await connectionControls();});await renderWorkspace();});
    }else{status.textContent+=' Keep using your existing account recovery code.';await renderWorkspace();}
-  }catch(e){lock();controls.replaceChildren(el('p','Connection setup was interrupted. Save this code before reloading or trying again.'),el('code',code));throw e;}
+   },code);
+  }catch(e){lock();controls.replaceChildren(el('p','Connection setup was interrupted. Save this code before reloading or trying again.'),el('code',code));button(controls,'Retry saved connection',connectionControls);throw e;}
  });
 }
 async function confirmSavedCode(code:string,info:Record<string,unknown>){

@@ -366,7 +366,7 @@ export class AccountsHost {
   private async sealedBinding(state:AccountsState,deviceId:string):Promise<DeviceBinding>{
     const raw=await this.storage.get(`sealed:device:${deviceId}`);if(typeof raw!=='string')throw new Refused('Unknown authenticated device');
     const b=parseDevice(raw),account=state.accounts.find(a=>a.personId===b.personId&&a.live);if(!account)throw new Refused('Device owner is not live');
-    await verifyDeviceBinding(b);if(!b.credential)throw new Refused("Unsigned connection refused");await requireConnection(account,b.credential);this.requireIdentity(account,b.deviceId);const agent=b.agentId?account.agents.find(a=>a.id===b.agentId&&a.live):undefined;
+    if(!b.credential||!b.packageSignature)throw new Refused('Unsigned connection refused');await verifyDeviceBinding(b);await requireConnection(account,b.credential);this.requireIdentity(account,b.deviceId);const agent=b.agentId?account.agents.find(a=>a.id===b.agentId&&a.live):undefined;
     if(b.agentId&&(!agent||!cardCaps(agent.card).includes('read')||!cardCaps(agent.card).includes('device.keys')))throw new Refused('Device needs explicit read + device.keys');
     return b;
   }

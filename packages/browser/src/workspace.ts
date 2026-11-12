@@ -17,7 +17,7 @@ async function journeyIdentity(c:SealedClient,parent:HTMLElement,data:Record<str
  const identities=z.record(z.string(),z.record(z.string(),z.unknown())).parse(data.identities??{});
  for(const [personId,identity]of Object.entries(identities)){
   const member=rows(data.members).find(m=>String(m.personId??m.memberId)===personId),row=el('article'),number=String(identity.safetyNumber);panel.append(row);
-  row.append(el('h4',String(member?.name??personId)),el('code',number),el('p',identity.accountTrust==='changed'?'Safety number changed — compare outside Wayfinding before trusting.':identity.accountTrust==='trusted'?'Matches this browser’s saved account key.':'Not compared in this browser. Compare outside Wayfinding.'));
+  row.append(el('h4',String(member?.name??personId)),el('code',number),el('p',identity.accountTrust==='changed'?'Safety number changed — compare outside Wayfinding before trusting.':identity.accountCompared===true?'Matches this browser’s compared account key.':'First seen or not compared in this browser. Compare outside Wayfinding.'));
   const compared=input(row,'Safety number compared outside Wayfinding');button(row,'Trust compared safety number',async()=>{if(compared.value.trim()!==number)throw new Error('Compare the exact safety number outside Wayfinding');await c.trustAccountKey(personId,String(identity.publicKey),compared.value.trim());await refresh();});
  }
  const log=el('details');log.append(el('summary','Journey connection and safety-number log'));

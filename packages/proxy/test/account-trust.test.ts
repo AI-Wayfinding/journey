@@ -92,3 +92,30 @@ test('journey display shows changed safety numbers, labels unsigned events, and 
  f.journey={journeyId,members:[],identities:{'person-bob':{publicKey:nextKey.publicKey,generation:1,safetyNumber:await safetyNumber(nextKey.publicKey)}},identityLog:[{...signed,signature:signed.signature!.slice(0,-2)+'AA'}],descriptors:{}};
  await assert.rejects(client.call('journey_read',{journeyId}),/signed identity log/i);
 });
+
+test('pinned account log verifies predecessor generations but refuses unrelated roots and broken historical signatures',async()=>{
+ const {pinnedIdentityLog}=await import('../../shared/account-trust.ts');
+ const old=await generateSigningKey(),current=await generateSigningKey(),forged=await generateSigningKey(),personId='person-history';
+ const oldEvent=await signIdentityEvent(old.privateKey,{personId,generation:0,accountPublicKey:old.publicKey,action:'connection-added',connectionId:'old',at:1});
+ const transition=await signIdentityEvent(current.privateKey,{personId,generation:1,accountPublicKey:current.publicKey,previousPublicKey:old.publicKey,action:'account-key-set',at:2});
+ const pin={publicKey:current.publicKey,generation:1,compared:true,history:[]};
+ const checked=await pinnedIdentityLog(pin,personId,[oldEvent,transition]);
+ assert.deepEqual(checked.entries.map(e=>e.verified),[true,true]);assert.deepEqual(checked.pin.history,[{publicKey:old.publicKey,generation:0}]);
+ await assert.rejects(pinnedIdentityLog(pin,personId,[oldEvent]),{message:'Identity log key is not pinned'});
+ await assert.rejects(pinnedIdentityLog(pin,personId,[{...oldEvent,signature:'A'.repeat(88)},transition]),{message:'Invalid signed identity log entry'});
+ const forgedTransition=await signIdentityEvent(forged.privateKey,{personId,generation:2,accountPublicKey:forged.publicKey,previousPublicKey:current.publicKey,action:'account-key-set',at:3});
+ await assert.rejects(pinnedIdentityLog(pin,personId,[forgedTransition]),{message:'Identity log key is not pinned'});
+ const unsigned={...oldEvent};delete unsigned.signature;
+ assert.equal((await pinnedIdentityLog(checked.pin,personId,[unsigned])).entries[0]!.verified,false);
+ // History is authenticated, not a new current pin.
+ assert.equal(checked.pin.publicKey,current.publicKey);assert.equal(checked.pin.generation,1);
+});
+
+test('first-seen journey roots are distinct from an explicit safety-number comparison',async()=>{
+ const f=await fixture(),local=memoryStore();f.approve=true;
+ const client=await SealedClient.open(f.remote,local.store,'person-alice'),bob=await generateSigningKey(),number=await safetyNumber(bob.publicKey);
+ f.journey={journeyId,members:[],identities:{'person-bob':{publicKey:bob.publicKey,generation:0,safetyNumber:number}},identityLog:[],descriptors:{}};
+ const first=await client.call('journey_read',{journeyId});assert.equal((first.identities as Record<string,{accountCompared:boolean}>)['person-bob']!.accountCompared,false);
+ await client.trustAccountKey('person-bob',bob.publicKey,number);
+ const second=await client.call('journey_read',{journeyId});assert.equal((second.identities as Record<string,{accountCompared:boolean}>)['person-bob']!.accountCompared,true);
+});
