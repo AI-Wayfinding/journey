@@ -272,7 +272,7 @@ Dan's brief for v2 was to write the spec, build what seems best, and refine late
 ### 36. Clients admit eligible devices automatically; guides manage members, not devices
 
 - **Decided by:** Dan.
-- **What:** any eligible device may bootstrap an empty audience. Existing member clients automatically admit eligible pending devices and commit server-required removals. No founder role or guide admission step exists. A member may directly remove only devices bound to their own person. Guides remove journey members with `member.remove`; those members' devices then become ineligible.
+- **What:** any eligible device may bootstrap an empty audience. Existing member clients automatically admit eligible pending devices and commit server-required removals. No founder role or guide admission step exists. A person's device may remove devices owned by that person or devices the server marks ineligible. An agent's device may remove only itself, not another device of the same agent or person. Guides remove journey members with `member.remove`; those members' devices then become ineligible.
 - **Recovery gap:** successor groups remain unimplemented. Recovery needs a fault marker, a new group generation and `supersedes` link, fresh packages, readable-history transfer, and atomic replacement of every affected audience reference. Implement those together; do not rewrite an old log or restore a consumed ratchet.
 - **Source:** F1 remediation; `.work/drafts/sealing.md`, group lifecycle.
 
@@ -288,10 +288,10 @@ Dan's brief for v2 was to write the spec, build what seems best, and refine late
 - **What:** sealed-v1 retains every released `ui://` resource byte for byte, but does not advertise the older App tools. Their plaintext input and view contracts do not support sealed records. Clients use the local encryption proxy or browser for content and the ordinary coordination tools for metadata.
 - **Source:** `packages/mcp/src/apps.ts`; direct sealed-client invocation and frozen-resource hash tests.
 
-### 39. Bound each device and separate handshake retention from content
+### 39. Bound each person and separate admission, updates and content
 
 - **Decided by:** F5 remediation applies bounded sealed retention.
-- **What:** each device has separate handshake, application and upload quotas. Handshake traffic never consumes the application budget. Uploads bind to an authenticated, admitted device. Retries charge once; abandoned and expired uncommitted uploads refund their reservations and delete unreferenced bytes. Committed uploads remain charged.
+- **What:** quotas apply per person across their devices and agents. Per group, updates allow 4,096 messages/32 MiB, application content allows 4,096 messages/32 MiB, and admission/history allows 4,096 messages/256 MiB. The corresponding per-person limits are 128 updates/4 MiB, 2,048 application messages/16 MiB and 1,024 admission/history messages/64 MiB. Automatic admission, removal and history never consume update or application budgets. Uploads bind to an authenticated, admitted device and share a 16 MiB person budget within the 32 MiB journey budget. Retries charge once; abandoned and expired uncommitted uploads refund their reservations and delete unreferenced bytes. Committed uploads remain charged.
 - **Source:** `packages/mcp/src/sealed-content.ts`; quota, attribution, retry and expiry tests in `packages/proxy/test/sealed.test.ts`.
 
 ### 40. Pin the local proxy to sealed-v1
@@ -303,7 +303,7 @@ Dan's brief for v2 was to write the spec, build what seems best, and refine late
 ### 41. Keep remote prose out of the local tool boundary
 
 - **Decided by:** F8 remediation applies the local-client trust boundary.
-- **What:** local tool descriptions and schemas come from the shipped catalogue. Remote titles, descriptions, annotations and metadata are discarded. Remote errors map to a fixed vocabulary; stale-write retry uses a typed code rather than forwarded error prose. Other tool exceptions also return fixed local messages.
+- **What:** local tool descriptions and schemas come from the shipped catalogue. Remote titles, descriptions, annotations and metadata are discarded. Remote errors map to fixed local messages with typed `permission`, `lifecycle`, `quota` and `stale` codes; stale-write retry uses the code, not forwarded prose. Other tool exceptions also return fixed local messages. Successful unsealed remote tool results are not yet sanitized (known gap 10 below).
 - **Source:** `packages/proxy/src/errors.ts`; malicious-description and real local-MCP error tests.
 
 ### 42. Use the generated content metadata rules in sealed-v1
@@ -331,13 +331,13 @@ Dan's brief for v2 was to write the spec, build what seems best, and refine late
 
 ### 46. Invitations do not reveal account existence
 
-- Email invitations return the same acknowledgement for unknown emails, existing accounts and repeat invitations. Only guides may send them. Joining still proves that the invitee has an account and a pending invitation.
+- Email invitations return the same acknowledgement for unknown emails, existing accounts and repeat invitations. Only guides may send them. Journey state responses hide invited people from every caller except the invitee, so a later read cannot reveal whether the email matched an account. Join requests remain visible. Joining still proves that the invitee has an account and a pending invitation.
 - Every journey RPC checks the account directory before allocating a Durable Object for its id. Device-binding lookup scope remains open because peer and historical signature verification need a shared client/server contract.
 
-### 47. Anonymous sign-in cannot consume a global login budget
+### 47. Bound anonymous OAuth without blocking existing sessions
 
 - Pre-authentication login state and PKCE verifier live in the signed, expiring, HttpOnly cookie. Only a successful callback leaves a short-lived replay tombstone on the server.
-- Login, client registration, authorization and token routes use Cloudflare's per-IP limiter. Production refuses these routes if the limiter or trusted IP is unavailable. There is no shared anonymous client or pending-request count cap. Unused DCR clients expire after one day.
+- Login, authorization and token routes use Cloudflare's 30-per-minute per-IP limiter. DCR has a separate 5-per-minute per-IP limiter. Production returns 503 if a limiter or trusted IP is unavailable. Anonymous clients and pending requests each have an 8,192-row cap, keyed lookups and bounded expiry indexes. Unused clients and requests expire within ten minutes; authorized clients remain available. Capacity exhaustion refuses only new registrations and authorization requests, not existing account reads, consent, verification or refresh.
 
 ### 48. Consent identifies and binds the requesting client
 
@@ -346,17 +346,21 @@ Dan's brief for v2 was to write the spec, build what seems best, and refine late
 
 ### 49. Account storage is partitioned without deleting the old generation
 
-- `AccountsPartitionedV1` stores separate account, hashed-token, client, request and permit rows. Delta writes and the write-authority fence share one transaction. Access-token verification reads its token, account and rule metadata without rewriting them.
-- Token and unresolved write-permit budgets apply per account. Other account operations still assemble the tables; this is not per-account Durable Object sharding.
-- The new class uses a fresh namespace. The old account classes and their data remain. Switching bindings is not a data migration or deletion, and requires the normal deployment gate.
+- `AccountsPartitionedV1` stores separate account, hashed-token, client, request and permit rows. Delta writes and the write-authority fence share one transaction. Anonymous client/request rows never join assembled account state. Access-token verification reads its token, account and rule metadata; successful use persists the agent's Last used timestamp at most hourly, including across eviction.
+- Token and unresolved write-permit budgets apply per account. Expired or revoked token rows are deleted, not replaced with null tombstones. Other account operations still assemble account and token tables; this is not per-account Durable Object sharding (known gap 8 below).
+- The new class uses a fresh namespace and starts an empty reachable account directory. The old account classes and their data remain. Switching bindings does not migrate or delete that data and requires the normal deployment gate.
 
 ### 50. Refresh checks upstream account liveness
 
-- Refresh verifies that the WorkOS user still exists before rotating credentials. Only a confirmed upstream 404 tombstones the account; an outage returns `temporarily_unavailable` without consuming the refresh token.
-- Tombstoning withdraws every owned agent and prevents account resurrection. Prompt webhook offboarding is not implemented yet; a signed user-deleted webhook is still required before this finding is complete.
+- Refresh checks that the WorkOS user still exists before rotating credentials. A confirmed upstream 404 reversibly suspends the account and refuses access without deleting agents, cards or credentials. An outage returns `temporarily_unavailable` without consuming the refresh token. WorkOS network I/O runs outside the Accounts serial turn; credentials are checked again afterwards, so a concurrent revocation cannot be undone.
+- Retrying the same refresh token after upstream recovery clears suspension and rotates credentials normally. Prompt webhook offboarding is not implemented; signed, replay-safe user-deleted webhooks remain a known gap. A single profile 404 is not authority for irreversible account deletion.
 
 ## Open
 
 - **Remaining sealing work:** device trust hardening, independent security review, ts-mls audit and browser distribution assurance remain launch blockers. Forum, library, sensemaking, offers, tasks and identity descriptors use sealed-v1. The console now has an opt-in browser encryption device, with ids/placeholders while locked. Nothing in this change deploys, resets, migrates or erases old plaintext data.
 - **Stage 7, review:** not done. Dan's formal review of the rules and an independent security review must pass before real users or confidential data arrive.
+- **Known gap 3 — group recovery:** the server cannot verify encrypted MLS commits; garbage commits can strand clients. An all-ineligible roster also needs successor-group recovery (entry 36).
+- **Known gap 8 — account hot paths:** `knownJourney` still assembles Accounts on journey calls, and the proxy's `sealedRemoteCall` reads the account on each remote call. Keyed hot-path reads remain unfinished.
+- **Known gap 10 — successful remote results:** unsealed remote tool results can still carry server-controlled prose to the local agent. Error sanitization does not cover them.
+- **Known gap 12 — topic capacity:** a journey-wide bound for the topic registry has not been verified.
 - **Dates:** the rewrite plan dates some of Dan's decisions 2026-11-01, but the commits that record them are dated 2026-10-29. The commit dates are what Git records.

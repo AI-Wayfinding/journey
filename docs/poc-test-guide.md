@@ -22,7 +22,7 @@ This stage is not live verification of the public endpoint. Run its tests locall
 
 ### Bounds and recovery
 
-A group retains at most 4,096 application messages and 32 MiB of content ciphertext, without silent eviction. Handshakes have a separate 4,096-message/32 MiB budget. Per device and group, the limits are 128 handshakes/4 MiB and 2,048 application messages/16 MiB. Envelopes are at most 1 MiB, device packages 64 KiB, local payloads 9 MiB and encrypted uploads 10 MiB. Listings are paged at 100 records and 4 MiB. A journey allows 1,024 content records, 128 groups and 128 active preparation tickets; each group allows 128 devices. Retained uploads have a separate 32 MiB journey limit and 16 MiB per-device limit. Abandoning or expiring an uncommitted ticket refunds both upload reservations and deletes its unreferenced bytes on the next request. Exhausted budgets refuse writes.
+A group retains at most 4,096 application messages and 32 MiB of content ciphertext, without silent eviction. Updates have a separate 4,096-message/32 MiB budget; admission, removal and history share a separate 4,096-message/256 MiB budget. Per person and group, across all their devices and agents, the limits are 128 updates/4 MiB, 2,048 application messages/16 MiB and 1,024 admission/history messages/64 MiB. Envelopes are at most 1 MiB, device packages 64 KiB, local payloads 9 MiB and encrypted uploads 10 MiB. Listings are paged at 100 records and 4 MiB. A journey allows 1,024 content records, 128 groups and 128 active preparation tickets; each group allows 128 devices. Retained uploads have a separate 32 MiB journey limit and 16 MiB per-person limit. Abandoning or expiring an uncommitted ticket refunds both upload reservations and deletes its unreferenced bytes on the next request. Exhausted budgets refuse writes.
 
 Preparation tickets and pending uploads expire after ten minutes. Device checkpoints expire after thirty days without a successful fetch. Large-body uploads become readable only through a committed, entitled record/version reference. Item metadata edits also advance the content revision.
 
@@ -253,9 +253,9 @@ The remote connection offers coordination, metadata and encrypted relay tools. I
 Use synthetic identities and a server built from this revision. These checks do not imply that the live Worker has been updated.
 
 - Start authorization in one browser. Check that consent shows the full client id and redirect host. Copy its consent URL into another signed-in browser; it must be refused. Complete it in the first browser and check the redirect's `iss` parameter.
-- Inspect an HTTPS response for `Strict-Transport-Security`. Repeated registration from one IP must reach 429 without blocking a different IP. Production without its limiter must fail closed.
+- Inspect an HTTPS response for `Strict-Transport-Security`. DCR allows five registrations per minute per IP; the sixth must return 429 without blocking another IP or consuming the separate login/authorization/token limit of 30 per minute. Production without either limiter must return 503. Unused DCR clients expire after ten minutes; reaching the anonymous table cap must not block existing-account operations.
 - Create two agents for one person. An agent may list, read and narrow only itself, not its sibling. A journey-specific always-allow must not allow the same requester in another journey or exceed the owner's ceiling.
-- With a fake upstream in the automated suite, return 503 at refresh: retrying the same refresh token after recovery must succeed. Return 404 instead: access and refresh must stop working. A real WorkOS webhook is not wired yet, so upstream deletion is currently detected at refresh, not immediately.
+- With a fake upstream in the automated suite, return 503 at refresh: retrying the same refresh token after recovery must succeed. Return 404 instead: access and refresh must be refused without deleting the account, agents or cards. Restore the upstream profile and retry the same refresh token; it must succeed and clear suspension. A real WorkOS webhook is not wired yet, so upstream deletion is currently detected at refresh, not immediately.
 - Confirm the new `AccountsPartitionedV1` binding only in a reviewed dry-run. It starts a fresh account directory; old classes and data remain. Do not deploy or delete data as part of this test.
 
 ### Check nicknames and email invitations
@@ -264,7 +264,7 @@ These checks cover newer source changes, not the live run recorded above. Use a 
 
 After B has called `account_read` once, A can invite B with `journey_invite` using `journeyId` and B's synthetic WorkOS `email` instead of `personId`. Supply exactly one of the two; email matching ignores case. B then calls `journey_join`. Only guides may invite. Repeat with an unknown email and an already-invited email: each must return the same `{ journeyId, accepted: true }` acknowledgement. Admission, refusal, role and guide changes still require `personId`.
 
-Change B's nickname again and check that A's next `journey_read` shows it without rejoining. Other people's emails must not appear in journey results; a profile with only an email uses `Wayfinding member` until a nickname is set. The invitation response must not disclose whether an email has an account.
+Change B's nickname again and check that A's next `journey_read` shows it without rejoining. Other people's emails must not appear in journey results; a profile with only an email uses `Wayfinding member` until a nickname is set. Neither the invitation response nor a later `journey_read` may disclose whether an invited email has an account. Pending invitations are visible only to the invitee; join requests remain visible.
 
 ## Walk through with A and B
 
