@@ -137,14 +137,30 @@ export class SealedClient {
   // Only the old epoch is durable until acceptance. The marker still fences an
   // unknown delivery (or a crash while sending); it is not permission to retry.
   g.saved.blocked=true;await this.persist();
-  let r:Record<string,unknown>;
-  try{r=await this.callRemote('sealed_group_commit',{journeyId:journeyFor(groupId),groupId,deviceId:staged.saved.deviceId,expectedSequence:v.sequence,expectedEpoch:v.epoch,action,data:encode(data),...(targetDeviceId?{targetDeviceId}:{})});}
-  catch(error){
-   if(error instanceof RemoteFailure&&['refused','lifecycle','stale','permission','quota'].includes(error.code)){g.saved.blocked=false;await this.persist();}
-   throw error;
+  const ciphertext=encode(data);let sequence:number;
+  try{
+   const r=await this.callRemote('sealed_group_commit',{journeyId:journeyFor(groupId),groupId,deviceId:staged.saved.deviceId,expectedSequence:v.sequence,expectedEpoch:v.epoch,action,data:ciphertext,...(targetDeviceId?{targetDeviceId}:{})});
+   sequence=nat.parse(r.sequence);if(sequence!==v.sequence+1)throw new RemoteFailure('response');
+  }catch(error){
+   // Error prose (even a Refused/409) cannot prove the write did not land.
+   const outcome=await this.settleCommit(groupId,staged,v,action,ciphertext).catch(()=>'unknown' as const);
+   if(outcome==='rejected'){g.saved.blocked=false;await this.persist();throw error;}
+   if(outcome==='unknown')throw error;
+   sequence=outcome.sequence;
   }
-  staged.saved.own.push(nat.parse(r.sequence));staged.saved.blocked=false;
+  staged.saved.own.push(sequence);staged.saved.blocked=false;
   g.mls=staged.mls;g.saved=staged.saved;await this.persist();
+ }
+ private async settleCommit(groupId:string,staged:Group,v:z.infer<typeof groupView>,action:string,ciphertext:string):Promise<{sequence:number}|'rejected'|'unknown'>{
+  const journeyId=journeyFor(groupId),view=groupView.parse(await this.callRemote('sealed_group',{journeyId,groupId}));
+  if(view.groupId!==groupId||view.sequence<v.sequence)return 'unknown';
+  if(view.sequence===v.sequence)return view.epoch===v.epoch?'rejected':'unknown';
+  const page=await this.callRemote('sealed_group_fetch',{journeyId,groupId,deviceId:staged.saved.deviceId,since:v.sequence,limit:1});
+  const message=z.array(messageSchema).parse(page.messages)[0];
+  if(!message||message.sequence!==v.sequence+1)return 'unknown';
+  if(message.deviceId!==staged.saved.deviceId)return 'rejected';
+  if(message.data!==ciphertext||message.kind!==action||message.epoch!==staged.mls.epoch)return 'unknown';
+  return {sequence:message.sequence};
  }
  private assertRoster(g:Group){if(!g.mls.matchesRoster(g.saved.roster.map(d=>decode(d.data))))throw new Error('MLS roster differs from authenticated device bindings');}
  async addMember(groupId:string,personId:string,deviceId:string){

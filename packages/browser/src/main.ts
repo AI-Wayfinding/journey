@@ -6,7 +6,7 @@ import {connectionClaimSchema,requestFingerprint,safetyNumber} from '../../share
 import {recoveryCode,recoveryAuthorization} from './vault.ts';
 import {decode} from '../../proxy/src/codec.ts';
 import {evaluatePrf,assertion,registerPasskey} from './webauthn.ts';
-import {consoleRemote,type BrowserPost} from './remote.ts';
+import {consolePost,consoleRemote} from './remote.ts';
 import {finishOnboarding} from './onboarding.ts';
 import {renderPrivateWorkspace} from './workspace.ts';
 z.config({jitless:true});
@@ -20,7 +20,7 @@ if(!root.parentNode&&main){root.append(el('h2','This browser connection'));main.
 const status=el('p','Locked. Unlock this connection to read private content.');status.role='status';
 const controls=el('div'),work=el('section');root.append(status,controls);main?.append(work);
 const csrf=document.querySelector<HTMLInputElement>('input[name="csrf"]')?.value;
-const post:BrowserPost=async(path,body)=>{const r=await fetch(path,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({csrf,...body})});if(!r.ok||r.redirected)throw new Error('Request refused. Check your passkey or recovery code, permissions and sign-in.');return object.parse(await r.json());};
+const post=consolePost(csrf);
 let busy=false,client:SealedClient|undefined,store:BrowserStore|undefined,release:(()=>void)|undefined;
 async function run(action:()=>Promise<void>){if(busy)return;busy=true;try{await action();}catch(e){status.textContent=e instanceof Error?e.message:'Connection refused';}finally{busy=false;}}
 function stamp(browserId:string,unlocked:boolean){for(const row of document.querySelectorAll<HTMLElement>('[data-browser-id]'))if(row.dataset.browserId===browserId){const label=row.querySelector('[data-connection-state]');if(label)label.textContent=`This browser · ${unlocked?'Unlocked':'Locked'}`;}}

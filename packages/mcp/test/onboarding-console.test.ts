@@ -26,7 +26,7 @@ for(const tool of ['agent_list','journey_list','sealed_catalog'])test(`onboardin
  const f=await fixture(),j=await f.backend.sealedExecute('alice','journey_create',{policy:'invite',defaultRole:'read'},identity.clientId);
  const input=tool==='sealed_catalog'?{journeyId:String(j.journeyId)}:{};
  const response=await f.send('/console/device/call',{browserId:crypto.randomUUID(),tool,input});
- assert.equal(response.status,403,tool);
+ assert.equal(response.status,409,tool);assert.deepEqual(await response.json(),{error:'Only setup tools are allowed before onboarding completes'});
 });
 test('recovery HTTP: all registration endpoints need a sign-in after the uncancellable deadline',async()=>{
  const f=await fixture();await f.backend.passkey({...identity,signedInAt:f.now()},{op:'recovery_start'});

@@ -40,6 +40,17 @@ async function fixture(){
  const ready=async(a:Awaited<ReturnType<typeof device>>)=>{await a.client.enrollGroup(a.personal);await a.client.call('account_update',{name:'Synthetic browser'});await complete(a.browserId,'b'.repeat(43));};
  return {backend,target,send,post,requests,device,signingAccount,complete,ready,csrf,identity,key,authorize,advance:(ms:number)=>{now+=ms;},signIn};
 }
+
+test('browser device call preserves a CAS refusal as JSON 409',async()=>{
+ const f=await fixture(),a=await f.device();await f.ready(a);
+ const journeyId=String((await a.client.call('journey_create',{name:'CAS refusal',policy:'invite',defaultRole:'write'})).journeyId);
+ const view=await f.post('/console/device/call',{browserId:a.browserId,tool:'sealed_group',input:{journeyId,groupId:journeyId}});
+ const deviceId=(view.devices as {deviceId:string}[])[0]!.deviceId;
+ const r=await f.send('/console/device/call',{csrf:f.csrf,browserId:a.browserId,tool:'sealed_group_commit',input:{journeyId,groupId:journeyId,deviceId,expectedSequence:0,expectedEpoch:0,action:'update',data:'e30='}});
+ assert.equal(r.status,409);assert.deepEqual(await r.json(),{error:'Sealed group CAS mismatch'});
+ await a.client.sync(journeyId);
+ assert.equal((await a.client.call('journey_read',{journeyId})).name,'CAS refusal');
+});
 test('console browser sealed writes never send plaintext; admission, local search and revocation fence',async()=>{
  const f=await fixture(),a=await f.device(),markers=['BROWSER-PROFILE-CANARY','BROWSER-CARD-CANARY','BROWSER-CLIENT-CANARY','BROWSER-POST-CANARY','BROWSER-LIBRARY-CANARY','BROWSER-OFFER-CANARY','BROWSER-NEW-CONTENT'];
  await f.ready(a);
@@ -58,10 +69,10 @@ test('console browser sealed writes never send plaintext; admission, local searc
  const stolen=await createMlsGroup(utf8.encode(bd.deviceId));await stolen.importState(decode(await b.client.exportGroup(j)));
  assert.deepEqual(await f.post('/console/device/revoke',{browserId:b.browserId}),{revoked:true,revocation:'complete'});
  await a.client.call('post_create',{topicId,body:markers[6]});await assert.rejects(b.client.call('topic_read',{topicId}),/Await authenticated device admission/);
- assert.equal((await f.send('/console/device/call',{csrf:f.csrf,browserId:b.browserId,tool:'sealed_group_fetch',input:{journeyId:j,groupId:j,deviceId:bd.deviceId,since:0,limit:100}})).status,403);
+ assert.equal((await f.send('/console/device/call',{csrf:f.csrf,browserId:b.browserId,tool:'sealed_group_fetch',input:{journeyId:j,groupId:j,deviceId:bd.deviceId,since:0,limit:100}})).status,409);
  const ad=await a.client.enrollGroup(j),wire=await f.post('/console/device/call',{browserId:a.browserId,tool:'sealed_group_fetch',input:{journeyId:j,groupId:j,deviceId:ad.deviceId,since:0,limit:100}}),messages=wire.messages as {kind:string,data:string}[];
  const latest=messages.filter(m=>m.kind==='application').at(-1)!;await assert.rejects(stolen.open(decode(latest.data)));
- assert.equal((await f.send('/console/device/call',{csrf:f.csrf,browserId:a.browserId,tool:'post_create',input:{journeyId:j,topicId,body:markers[3]}})).status,403);
+ const invalid=await f.send('/console/device/call',{csrf:f.csrf,browserId:a.browserId,tool:'post_create',input:{journeyId:j,topicId,body:markers[3]}});assert.equal(invalid.status,400);assert.deepEqual(await invalid.json(),{error:'Invalid browser tool input'});
  assert.equal((await f.send('/console/device/info',{csrf:'wrong'})).status,403);assert.equal((await f.send('/console/device/info',{csrf:f.csrf},{origin:'https://evil.test'})).status,403);
  for(const marker of markers){assert.equal(f.requests.join('\n').includes(marker),false,`request plaintext ${marker}`);assert.equal(f.backend.snapshot().includes(marker),false,`storage plaintext ${marker}`);for(const bytes of f.backend.blobs.data.values())assert.equal(Buffer.from(bytes).includes(Buffer.from(marker)),false,`blob plaintext ${marker}`);}
 });
@@ -146,7 +157,7 @@ test('onboarding and code recovery: private name, saved code, unified connection
  const after=await f.backend.execute('alice',{tool:'account_read',input:{}},clientId);assert.equal(after.personId,before.personId);assert.deepEqual(after.descriptor,before.descriptor,'code recovery preserves private identity descriptor');
  assert.equal((await f.send('/console/connections/remove',{csrf:f.csrf,browserId:crypto.randomUUID()})).status,403,'cannot remove another browser');
  assert.equal((await f.send('/console/connections/remove',{csrf:f.csrf,browserId:b.browserId})).status,303);
- assert.equal((await f.send('/console/device/call',{csrf:f.csrf,browserId:b.browserId,tool:'sealed_group_fetch',input:{journeyId:b.personal,groupId:b.personal,deviceId:enrolled.deviceId,since:0,limit:100}})).status,403);
+ assert.equal((await f.send('/console/device/call',{csrf:f.csrf,browserId:b.browserId,tool:'sealed_group_fetch',input:{journeyId:b.personal,groupId:b.personal,deviceId:enrolled.deviceId,since:0,limit:100}})).status,409);
  assert.equal(f.backend.snapshot().includes(code),false);assert.equal(f.backend.snapshot().includes('ONBOARDING-PRIVATE-NAME'),false);
 });
 
@@ -194,7 +205,7 @@ test('no-code recovery completes only after 72h and fresh sign-in; old browsers 
  const status=await f.backend.passkey(f.identity,{op:'setup_status'});assert.equal(status.complete,true);assert.equal(typeof status.recoveredAt,'number');assert.equal(status.readyAt,null);
  const html=await (await f.send('/console')).text();assert.ok(html.includes(fresh.browserId));assert.ok(!html.includes(old.browserId));assert.ok(!html.includes(String(agent.agentId)));
  assert.equal((await f.send('/console/passkeys/options',{csrf:f.csrf,recoveryProof})).status,403,'old recovery proof remains invalid');
- assert.equal((await f.send('/console/device/call',{csrf:f.csrf,browserId:old.browserId,tool:'sealed_group_fetch',input:{journeyId:old.personal,groupId:old.personal,deviceId:enrolled.deviceId,since:0,limit:100}})).status,403);
+ assert.equal((await f.send('/console/device/call',{csrf:f.csrf,browserId:old.browserId,tool:'sealed_group_fetch',input:{journeyId:old.personal,groupId:old.personal,deviceId:enrolled.deviceId,since:0,limit:100}})).status,409);
  await assert.rejects(f.backend.execute('alice',{tool:'agent_capabilities',input:{agentId:String(agent.agentId)}},clientId),/live agent/i);
 });
 
