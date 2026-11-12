@@ -1,7 +1,7 @@
 import { SignJWT, jwtVerify } from 'jose';
 import { base64url } from '../agents.ts';
 import { Refused } from '../commands.ts';
-import type { ConsoleBackend, ConsoleRecord } from './contract.ts';
+import { consoleRecord, type ConsoleBackend, type ConsoleRecord } from './contract.ts';
 
 export const SESSION_COOKIE = '__Host-wayfinding-console';
 export const OAUTH_COOKIE = '__Host-wayfinding-oauth';
@@ -17,8 +17,8 @@ export class ConsoleSessions {
   }
   async create(name: string, record: ConsoleRecord): Promise<string> {
     const id = random();
-    await this.backend.consoleRecord({ op: 'put', id, record });
-    const signed = await new SignJWT({ purpose: name }).setProtectedHeader({ alg: 'HS256' }).setIssuer(this.origin).setAudience('console')
+    if (record.kind !== 'oauth') await this.backend.consoleRecord({ op: 'put', id, record });
+    const signed = await new SignJWT({ purpose: name, ...(record.kind === 'oauth' ? { record } : {}) }).setProtectedHeader({ alg: 'HS256' }).setIssuer(this.origin).setAudience('console')
       .setJti(id).setIssuedAt(Math.floor(this.now() / 1000)).setExpirationTime(Math.floor(record.expiresAt / 1000)).sign(this.key);
     return cookie(name, signed, Math.floor((record.expiresAt - this.now()) / 1000));
   }
@@ -28,9 +28,20 @@ export class ConsoleSessions {
     try {
       const { payload } = await jwtVerify(values[0]!.slice(name.length + 1), this.key, { algorithms: ['HS256'], issuer: this.origin, audience: 'console', currentDate: new Date(this.now()), requiredClaims: ['exp', 'iat', 'jti'] });
       if (payload.purpose !== name || typeof payload.jti !== 'string') return undefined;
+      if (name === OAUTH_COOKIE) {
+        const record = consoleRecord.parse(payload.record);
+        if (record.kind !== 'oauth' || await this.backend.consoleRecord({ op: 'read', id: payload.jti })) return undefined;
+        return record;
+      }
       const record = await this.backend.consoleRecord({ op, id: payload.jti });
       return record && record.expiresAt > this.now() ? record : undefined;
     } catch { return undefined; }
+  }
+  async consumeLogin(request: Request): Promise<void> {
+    const value = (request.headers.get('cookie') ?? '').split(';').map(s => s.trim()).find(s => s.startsWith(OAUTH_COOKIE + '='));
+    if (!value) throw new Refused('Login cookie required');
+    const { payload } = await jwtVerify(value.slice(OAUTH_COOKIE.length + 1), this.key, { algorithms: ['HS256'], issuer: this.origin, audience: 'console', currentDate: new Date(this.now()) });
+    await this.backend.consoleRecord({ op: 'put', id: String(payload.jti), record: { kind: 'spent', expiresAt: Number(payload.exp) * 1000 } });
   }
   async require(request: Request) {
     const record = await this.read(request, SESSION_COOKIE);

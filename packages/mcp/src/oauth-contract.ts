@@ -11,7 +11,7 @@ export const clientMetadata = z.object({
   grant_types: z.array(z.enum(['authorization_code', 'refresh_token'])).default(['authorization_code', 'refresh_token']),
   response_types: z.array(z.literal('code')).default(['code']),
 });
-export type OAuthClient = z.infer<typeof clientMetadata> & { client_id: string };
+export type OAuthClient = z.infer<typeof clientMetadata> & { client_id: string; expiresAt?: number };
 export const authorizationRequest = z.object({ clientId: oauthId, clientName: z.string().max(60), redirectUri: oauthId,
   challenge: z.string().regex(/^[A-Za-z0-9_-]{43}$/), state: z.string().max(2048).optional(), expiresAt: z.number() }).strict();
 export type AuthorizationRequest = z.infer<typeof authorizationRequest>;

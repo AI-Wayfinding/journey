@@ -107,7 +107,7 @@ export class AccountsHost {
       const active = Object.fromEntries(Object.entries(records).filter(([, record]) => record.expiresAt > this.now()));
       const previous = active[operation.id];
       if (operation.op === 'put') {
-        if (previous || Object.keys(active).length >= 128) throw new Refused('Console session capacity reached');
+        if (previous) throw new Refused('Console record already exists');
         active[operation.id] = operation.record;
       } else if (operation.op !== 'read') delete active[operation.id];
       if (operation.op !== 'read' || Object.keys(active).length !== Object.keys(records).length) await this.storage.put('console:records', JSON.stringify(active));

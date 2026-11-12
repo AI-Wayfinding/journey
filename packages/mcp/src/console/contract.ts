@@ -24,6 +24,7 @@ const text = z.string().min(1).max(200);
 export const consoleRecord = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('oauth'), state: text, verifier: text, returnTo: z.string().max(300).optional(), expiresAt: z.number().int().nonnegative().safe() }).strict(),
   z.object({ kind: z.literal('session'), subject: text, clientId: text, csrf: text, signedInAt: z.number().int().nonnegative().safe().optional(), expiresAt: z.number().int().nonnegative().safe() }).strict(),
+  z.object({ kind: z.literal('spent'), expiresAt: z.number().int().nonnegative().safe() }).strict(),
 ]);
 export type ConsoleRecord = z.infer<typeof consoleRecord>;
 export const recordOperation = z.discriminatedUnion('op', [

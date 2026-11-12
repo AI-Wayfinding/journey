@@ -60,6 +60,37 @@ async function fixture() {
   return { backend, send, login, post, authorize, exchange, consent, client, upstream, advance: (ms: number) => { now += ms; }, document: (v: unknown) => { document = v; } };
 }
 
+test('oauth AS: anonymous throttling uses the trusted client IP, not a shared global key', async () => {
+  const f = await fixture(), keys = new Set<string>();
+  const app = createApp({resource:RESOURCE,issuer:ISSUER,allowedHosts:[RESOURCE.hostname],backend:f.backend,
+    verifier:createVerifier({issuer:ISSUER,resource:RESOURCE,getKey:createLocalJWKSet(signer.jwks)}),
+    authRateLimit:{async limit({key}: {key:string}) { const success=!keys.has(key);keys.add(key);return {success}; }} });
+  const register = (ip:string) => app.fetch(new Request(new URL('/oauth/register',origin),{method:'POST',headers:{host:RESOURCE.host,'cf-connecting-ip':ip,'content-type':'application/json'},body:JSON.stringify({redirect_uris:[callback]})}));
+  assert.equal((await register('192.0.2.1')).status,201);
+  assert.equal((await register('192.0.2.1')).status,429);
+  assert.equal((await register('192.0.2.2')).status,201);
+});
+
+test('oauth AS: unused DCR clients expire and anonymous registrations do not share a hard cap', async () => {
+  let now = 1_800_000_000_000;
+  const host = new AccountsHost(new MemoryStorage(), { get: async () => ({name:'test',email:'test@example.test'}) }, undefined, undefined, () => now);
+  let first = '';
+  for (let n = 0; n < 1030; n++) {
+    const result = await host.oauth({ op: 'register', client: { client_name: 'Synthetic', redirect_uris: [callback], token_endpoint_auth_method: 'none', grant_types: ['authorization_code'], response_types: ['code'] } });
+    assert.equal(result.kind, 'client');
+    if (result.kind === 'client' && !first) first = result.client!.client_id;
+  }
+  now += 86_400_001;
+  assert.deepEqual(await host.oauth({ op:'client', clientId:first }), {kind:'client',client:undefined});
+});
+
+test('oauth AS: pre-auth login does not write Accounts or lock out other browsers', async () => {
+  const f = await fixture(), before = f.backend.accountStorage.writes;
+  for (let n = 0; n < 140; n++) assert.equal((await f.send('/console/login')).status, 302);
+  assert.equal(f.backend.accountStorage.writes, before);
+  await f.login();
+});
+
 test('oauth AS: metadata, DCR and CIMD validate before redirect, S256 and resource are mandatory', async () => {
   const f = await fixture();
   const metadata = await (await f.send('/.well-known/oauth-authorization-server')).json() as Record<string, unknown>;
