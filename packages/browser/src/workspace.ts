@@ -23,6 +23,41 @@ async function journeyIdentity(c:SealedClient,parent:HTMLElement,data:Record<str
  const log=el('details');log.append(el('summary','Journey connection and safety-number log'));
  for(const entry of rows(data.identityLog))log.append(el('p',`${new Date(Number(entry.at)).toISOString()} · ${String(entry.personId)} · ${String(entry.action)} · ${String(entry.connectionId??'Safety number change')} · ${entry.verification==='self-signed'?`Signed · account key ${String(entry.accountTrust)}`:'Server report — unsigned'}`));panel.append(log);
 }
+async function renderTaskRequests(c:SealedClient,work:HTMLElement,agentId:string,button:Button,isActive:()=>boolean):Promise<void>{
+ const section=el('section');work.append(section);
+ const refresh=async()=>{
+  const journeys=await c.call('journey_list',{});if(!isActive())return;
+  const entries:HTMLElement[]=[];
+  for(const journey of rows(journeys.journeys).filter(j=>!j.pending)){
+   const journeyId=String(journey.journeyId),view=await c.call('journey_read',{journeyId});if(!isActive())return;
+   if(!rows(view.members).some(m=>m.memberId===agentId))continue;
+   const journeyAdmission=await c.enrollGroup(journeyId);if(!isActive())return;
+   for(const pending of rows(view.taskPreparations).filter(t=>t.agentId===agentId)){
+    const entry=el('article');entry.append(el('h3',String(pending.taskId)),el('p','This request needs your browser connection before its contents can be sent.'));
+    button(entry,'Prepare request connection',async()=>{
+     const result=await c.enrollGroup(String(pending.groupId));if(!isActive())return;
+     entry.append(el('p',result.admitted?'Connection ready. The requester can retry task creation.':'Connection prepared. The requesting client must synchronize this audience, then retry task creation.'));
+    });entries.push(entry);
+   }
+   for(const task of rows(view.tasks).filter(t=>t.status==='requested'&&t.agentId===agentId)){
+    const taskId=String(task.taskId),entry=el('article');entry.append(el('h3',taskId));
+    const admission=await c.enrollGroup(`taskgroup_${taskId}`);if(!isActive())return;
+    if(!admission.admitted||!journeyAdmission.admitted){entry.append(el('p','Waiting for an online task connection to share private history. Refresh after it synchronizes.'));entries.push(entry);continue;}
+    const detail=await c.call('task_read',{journeyId,taskId});if(!isActive())return;
+    describe(entry,detail);
+    const reason=input(entry,'Decision reason (optional)','',true);
+    for(const action of ['approve','decline'] as const)button(entry,action==='approve'?'Approve request':'Decline request',async()=>{
+     await c.call('task_step',{journeyId,taskId,action,reason:reason.value||undefined});
+     if(isActive())await refresh();
+    });entries.push(entry);
+   }
+  }
+  if(!isActive())return;
+  section.replaceChildren(el('h2','Task requests'),...(entries.length?entries:[el('p','No requests waiting for this connection.')]));
+  button(section,'Refresh requests',refresh);
+ };
+ await refresh();
+}
 export async function renderPrivateWorkspace(c:SealedClient,work:HTMLElement,button:Button,isActive:()=>boolean=()=>true):Promise<void>{
  work.replaceChildren();
  const profile=document.getElementById('profile-editor');
@@ -31,9 +66,11 @@ export async function renderPrivateWorkspace(c:SealedClient,work:HTMLElement,but
  if(!isActive())return;
  for(const a of rows(agents.agents)){const row=document.querySelector<HTMLElement>(`[data-agent-id="${CSS.escape(String(a.agentId))}"] a`);if(row)row.textContent=String(a.name??a.agentId);}
  const agentRoute=/^\/console\/agents\/([^/]+)$/.exec(location.pathname);
- if(agentRoute){const agentId=decodeURIComponent(agentRoute[1]!),own=rows(agents.agents).find(a=>a.agentId===agentId);if(own){work.append(el('h2','Private connection details'));const name=input(work,'Agent name',String(own.name??'')),app=input(work,'App name',String(own.clientName??''));button(work,'Save connection details',async()=>{await c.call('agent_descriptor_set',{agentId,name:name.value,clientName:app.value});});}return;}
+ if(agentRoute){const agentId=decodeURIComponent(agentRoute[1]!),own=rows(agents.agents).find(a=>a.agentId===agentId);if(own){work.append(el('h2','Private connection details'));const name=input(work,'Agent name',String(own.name??'')),app=input(work,'App name',String(own.clientName??''));button(work,'Save connection details',async()=>{await c.call('agent_descriptor_set',{agentId,name:name.value,clientName:app.value});});await renderTaskRequests(c,work,agentId,button,isActive);}return;}
  const route=/^\/console\/journeys\/([^/]+)(?:\/(\w+)(?:\/([^/]+))?)?$/.exec(location.pathname);if(!route)return;
  const journeyId=decodeURIComponent(route[1]!),kind=route[2],item=route[3]?decodeURIComponent(route[3]):undefined;
+ const admission=await c.enrollGroup(journeyId);if(!isActive())return;
+ if(!admission.admitted){work.append(el('p','Connection prepared. Waiting for an online journey connection to share private history. Unlock again after it synchronizes.'));return;}
  const result=el('section');work.append(el('h2','Private workspace'),result);
  const show=async(tool:string,params:Record<string,unknown>)=>{const data=await c.call(tool,params);if(!isActive())return data;result.replaceChildren();if(tool==='journey_read'){await journeyIdentity(c,result,data,button,()=>show(tool,params));const {identities:_identities,identityLog:_log,...rest}=data;describe(result,rest);}else describe(result,data);return data;};
  if(kind==='topics'&&item){await show('topic_read',{topicId:item});const text=input(work,'Reply','',true);button(work,'Post reply',async()=>{await c.call('post_create',{topicId:item,body:text.value});text.value='';await show('topic_read',{topicId:item});});return;}

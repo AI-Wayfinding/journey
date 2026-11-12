@@ -13,7 +13,7 @@ import { forum, isForumCommand, defaultBoard, type Board, type Topic, type Post 
 import { rounds, isRoundCommand, type SensemakingRound } from './rounds.ts';
 import { changeTask, type JourneyTask } from './tasks.ts';
 import { journeyEnabled, type AllowanceRelease, offerView, DEFAULT_SETTINGS, type OfferPort, type OfferAgent, type StandingDecision } from './offers.ts';
-import { sealedContent, type SealedAuthority } from './sealed-content.ts';
+import { sealedContent, taskPreparations, type SealedAuthority } from './sealed-content.ts';
 
 interface Identity { id: string; name: string }
 interface Project { id: string; name: string; purpose: string; rule: Snapshot }
@@ -183,7 +183,7 @@ export class JourneyHost {
       input: task.content?.input, output: task.content?.output, reason: task.content?.reason,
       roundsUsed: scalar(task.rule, 'roundsUsed'), maxRounds: scalar(task.rule, 'cap') };
   }
-  private view(state: JourneyState, personId: string, identity: Actor = { personId }): ToolData {
+  private async view(state: JourneyState, personId: string, identity: Actor = { personId }): Promise<ToolData> {
     return {
       journeyId: state.id, name: state.name, rulesHash: state.rulesHash,
       policy: decodeChoice(JOURNEY.policy, scalar(state.membership, 'policy'), 'policy'),
@@ -200,6 +200,7 @@ export class JourneyHost {
       grants: state.grants.map((g) => ({ grantId: g.id, need: g.need, resource: g.resource, expiresAt: g.expiresAt, status: ['unissued', 'live', 'revoked', 'ended'][scalar(g.rule, 'status')], usesLeft: scalar(g.rule, 'usesLeft') })),
       artifacts: state.artifacts.filter(a => !isLibraryArtifact(a) || visibleItem(a, this.slot(state, personId))).map((a) => ({ artifactId: a.id, name: a.name, type: a.type, size: a.size, version: scalar(a.rule, 'version'), deleted: scalar(a.rule, 'at') === 2 })),
       tasks: state.tasks.filter(t => this.taskVisible(state, t, identity)).map((t) => this.taskView(state, t)),
+      taskPreparations: await taskPreparations(this.storage, state.tasks.map(t => t.id), identity, this.offers),
     };
   }
   /** A read-free authority probe; final invitation still runs the unchanged rule. */
@@ -431,7 +432,7 @@ export class JourneyHost {
             const mapped: LibraryCommand = command.tool === 'artifact_version' ? { tool: 'library_version', input: { itemId: id, baseVersion: command.input.baseVersion, size: command.input.size } }
               : command.tool === 'artifact_rename' ? { tool: 'library_update', input: { itemId: id, name: command.input.name } } : { tool: 'library_delete', input: { itemId: id } };
             await this.executeLibrary(state, mapped, access);
-            return access.read ? this.view(state, personId) : { journeyId: state.id, accepted: true };
+            return access.read ? this.view(state, personId, identity) : { journeyId: state.id, accepted: true };
           }
           if (command.tool === 'artifact_delete') {
             const creator = artifact ? scalar(artifact.rule, 'creator') : 0;

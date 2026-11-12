@@ -12,6 +12,14 @@ Source only; no push, deployment or data migration.
 - Recovery with the code preserves the account key. Recovery without it replaces the key after the existing 72-hour wait and requires new agent connections.
 - Old unsigned connections require re-enrolment. Confidential data remains out of scope.
 
+## Unreleased: live-pass recovery and sealed requests
+
+- Fresh sign-ins reach the account recovery check through the Durable Object adapter. Starting recovery removes browser and agent connections immediately.
+- Owners can prepare a browser connection for pending task requests, then read and approve or decline them. Request contents and decision reasons stay encrypted; the old plaintext decision form is unavailable in sealed mode.
+- Journey overviews show routing metadata while locked. The browser connection loads private content after unlock and audience admission.
+
+Source only; not deployed.
+
 ## Unreleased: browser encryption device
 
 Source only; no deployment, reset or migration.
