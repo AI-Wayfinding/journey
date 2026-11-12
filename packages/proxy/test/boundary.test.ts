@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {Client} from '@modelcontextprotocol/client';
-import {InMemoryTransport} from '@modelcontextprotocol/sdk/inMemory.js';
+import {InMemoryTransport} from '@modelcontextprotocol/server';
 import {SealedClient,type SealedRemote} from '../src/sealed-client.ts';
 import {WayfindingProxy} from '../src/proxy.ts';
 import {buildProxyServer} from '../src/server.ts';
