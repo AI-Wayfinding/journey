@@ -128,7 +128,7 @@ export class SealedClient {
   let g=this.groups.get(groupId);
   const before=await this.readGroupView(await this.callRemote('sealed_group',{journeyId,groupId}));
   if(!g){if(before.sequence)await this.prepareGroup(groupId);else await this.createGroup(groupId);g=this.groups.get(groupId)!;}
-  else {this.group(groupId);await this.register(g);if(!before.sequence&&g.mls.epoch===null){await g.mls.create(utf8.encode(groupId));g.saved.roster=[await this.binding(await this.callRemote('sealed_device_binding',{deviceId:g.saved.deviceId}),g.saved.deviceId)];await this.commit(groupId,g,before,'bootstrap',json({}));}}
+  else {this.group(groupId);await this.register(g);if(!before.sequence&&g.mls.epoch===null){const staged=await this.stage(g);await staged.mls.create(utf8.encode(groupId));staged.saved.roster=[await this.binding(await this.callRemote('sealed_device_binding',{deviceId:g.saved.deviceId}),g.saved.deviceId)];await this.commit(groupId,staged,before,'bootstrap',json({}));}}
   const view=await this.readGroupView(await this.callRemote('sealed_group',{journeyId,groupId})),admitted=view.devices.some(d=>d.deviceId===g!.saved.deviceId);
   if(admitted)await this.sync(groupId);
   return {groupId,deviceId:g.saved.deviceId,admitted};
@@ -142,9 +142,39 @@ export class SealedClient {
  private async openDefinition(ref:z.infer<typeof definitionRef>){const raw=await this.callRemote('sealed_record_read',ref);await this.sync(ref.journeyId);return offerDefinitionSchema.parse((await this.render(raw)).definition);}
  async preflightDelete(itemId:string):Promise<void>{await this.callRemote('sealed_delete_check',{journeyId:journeyFor(itemId),itemId});}
  private async audienceId(groupId:string){if(!groupId.startsWith('personal_'))return groupId;const journey=await this.artifactJourney(groupId);return `private_${journey.slice(8)}_${this.personId}`;}
- async createGroup(groupId:string):Promise<void>{if(groupId.startsWith('personal_')){const journey=await this.artifactJourney(groupId);await this.callRemote('content_prepare',{journeyId:journey,action:'library_add',routing:{visibility:'private'}});const audience=`private_${journey.slice(8)}_${this.personId}`;if(this.groups.has(audience))return this.sync(audience);return this.createGroup(audience);}const journeyId=journeyFor(groupId),v=await this.readGroupView(await this.callRemote('sealed_group',{journeyId,groupId}));if(v.sequence)throw new Error('Audience exists; prepare and request admission');const g=await this.prepare(groupId);await g.mls.create(utf8.encode(groupId));g.saved.roster=[await this.binding(await this.callRemote('sealed_device_binding',{deviceId:g.saved.deviceId}),g.saved.deviceId)];await this.commit(groupId,g,v,'bootstrap',json({}));}
+ async createGroup(groupId:string):Promise<void>{if(groupId.startsWith('personal_')){const journey=await this.artifactJourney(groupId);await this.callRemote('content_prepare',{journeyId:journey,action:'library_add',routing:{visibility:'private'}});const audience=`private_${journey.slice(8)}_${this.personId}`;if(this.groups.has(audience))return this.sync(audience);return this.createGroup(audience);}const journeyId=journeyFor(groupId),v=await this.readGroupView(await this.callRemote('sealed_group',{journeyId,groupId}));if(v.sequence)throw new Error('Audience exists; prepare and request admission');const g=await this.stage(await this.prepare(groupId));await g.mls.create(utf8.encode(groupId));g.saved.roster=[await this.binding(await this.callRemote('sealed_device_binding',{deviceId:g.saved.deviceId}),g.saved.deviceId)];await this.commit(groupId,g,v,'bootstrap',json({}));}
  async prepareGroup(groupId:string){groupId=await this.audienceId(groupId);await this.callRemote('sealed_group',{journeyId:journeyFor(groupId),groupId});const g=await this.prepare(groupId);await this.callRemote('sealed_group',{journeyId:journeyFor(groupId),groupId,deviceId:g.saved.deviceId});return {deviceId:g.saved.deviceId};}
- private async commit(groupId:string,g:Group,v:z.infer<typeof groupView>,action:'bootstrap'|'add'|'remove'|'update',data:Uint8Array,targetDeviceId?:string){g.saved.blocked=true;await this.persist();const r=await this.callRemote('sealed_group_commit',{journeyId:journeyFor(groupId),groupId,deviceId:g.saved.deviceId,expectedSequence:v.sequence,expectedEpoch:v.epoch,action,data:encode(data),...(targetDeviceId?{targetDeviceId}:{})});g.saved.own.push(nat.parse(r.sequence));g.saved.blocked=false;await this.persist();}
+ private async stage(g:Group):Promise<Group>{const mls=await createMlsGroup(utf8.encode(g.saved.deviceId));await mls.importState(await g.mls.exportState());return {mls,saved:structuredClone(g.saved)};}
+ private async commit(groupId:string,staged:Group,v:z.infer<typeof groupView>,action:'bootstrap'|'add'|'remove'|'update',data:Uint8Array,targetDeviceId?:string){
+  const g=this.group(groupId);
+  // Only the old epoch is durable until acceptance. The marker still fences an
+  // unknown delivery (or a crash while sending); it is not permission to retry.
+  g.saved.blocked=true;await this.persist();
+  const ciphertext=encode(data);let sequence:number;
+  try{
+   const r=await this.callRemote('sealed_group_commit',{journeyId:journeyFor(groupId),groupId,deviceId:staged.saved.deviceId,expectedSequence:v.sequence,expectedEpoch:v.epoch,action,data:ciphertext,...(targetDeviceId?{targetDeviceId}:{})});
+   sequence=nat.parse(r.sequence);if(sequence!==v.sequence+1)throw new RemoteFailure('response');
+  }catch(error){
+   // Error prose (even a Refused/409) cannot prove the write did not land.
+   const outcome=await this.settleCommit(groupId,staged,v,action,ciphertext).catch(()=>'unknown' as const);
+   if(outcome==='rejected'){g.saved.blocked=false;await this.persist();throw error;}
+   if(outcome==='unknown')throw error;
+   sequence=outcome.sequence;
+  }
+  staged.saved.own.push(sequence);staged.saved.blocked=false;
+  g.mls=staged.mls;g.saved=staged.saved;await this.persist();
+ }
+ private async settleCommit(groupId:string,staged:Group,v:z.infer<typeof groupView>,action:string,ciphertext:string):Promise<{sequence:number}|'rejected'|'unknown'>{
+  const journeyId=journeyFor(groupId),view=groupView.parse(await this.callRemote('sealed_group',{journeyId,groupId}));
+  if(view.groupId!==groupId||view.sequence<v.sequence)return 'unknown';
+  if(view.sequence===v.sequence)return view.epoch===v.epoch?'rejected':'unknown';
+  const page=await this.callRemote('sealed_group_fetch',{journeyId,groupId,deviceId:staged.saved.deviceId,since:v.sequence,limit:1});
+  const message=z.array(messageSchema).parse(page.messages)[0];
+  if(!message||message.sequence!==v.sequence+1)return 'unknown';
+  if(message.deviceId!==staged.saved.deviceId)return 'rejected';
+  if(message.data!==ciphertext||message.kind!==action||message.epoch!==staged.mls.epoch)return 'unknown';
+  return {sequence:message.sequence};
+ }
  private assertRoster(g:Group){if(!g.mls.matchesRoster(g.saved.roster.map(d=>decode(d.data))))throw new Error('MLS roster differs from authenticated device bindings');}
  async addMember(groupId:string,personId:string,deviceId:string){
   groupId=await this.audienceId(groupId);await this.sync(groupId);
@@ -152,7 +182,7 @@ export class SealedClient {
   await this.admit(groupId,personId,deviceId);await this.sync(groupId);await this.shareHistory(groupId);
  }
  private async admit(groupId:string,personId:string,deviceId:string){
-  const g=this.group(groupId),v=await this.readGroupView(await this.callRemote('sealed_group',{journeyId:journeyFor(groupId),groupId}));
+  const g=await this.stage(this.group(groupId)),v=await this.readGroupView(await this.callRemote('sealed_group',{journeyId:journeyFor(groupId),groupId}));
   const target=await this.binding(await this.callRemote('sealed_package_reserve',{journeyId:journeyFor(groupId),groupId,deviceId}),deviceId);
   if(target.personId!==personId)throw new Error('Authenticated target owner mismatch');
   await this.checkAdmission(groupId,target,v.identities);
@@ -160,7 +190,7 @@ export class SealedClient {
   await this.commit(groupId,g,v,'add',json({commit:encode(c.commit),welcome:c.welcome?encode(c.welcome):undefined}),deviceId);
  }
  async removeMember(groupId:string,personId:string){if(personId!==this.personId)throw new Error('Only own devices may be removed directly; remove the journey member instead');groupId=await this.audienceId(groupId);await this.sync(groupId);const g=this.group(groupId);for(const d of [...g.saved.roster].filter(d=>d.personId===personId))await this.remove(groupId,g,d);}
- private async remove(groupId:string,g:Group,d:DeviceBinding){await this.binding(d);const v=await this.readGroupView(await this.callRemote('sealed_group',{journeyId:journeyFor(groupId),groupId}));const c=await g.mls.remove(decode(d.data));g.saved.roster=g.saved.roster.filter(b=>b.deviceId!==d.deviceId);this.assertRoster(g);await this.commit(groupId,g,v,'remove',json({commit:encode(c.commit)}),d.deviceId);}
+ private async remove(groupId:string,g:Group,d:DeviceBinding){await this.binding(d);const v=await this.readGroupView(await this.callRemote('sealed_group',{journeyId:journeyFor(groupId),groupId}));const staged=await this.stage(g),c=await staged.mls.remove(decode(d.data));staged.saved.roster=staged.saved.roster.filter(b=>b.deviceId!==d.deviceId);this.assertRoster(staged);await this.commit(groupId,staged,v,'remove',json({commit:encode(c.commit)}),d.deviceId);}
  private async verify(p:Signed,depth=0):Promise<void>{if(depth>1)throw new Error('Nested sealed origins refused');const b=await this.binding(await this.callRemote('sealed_device_binding',{deviceId:p.deviceId}),p.deviceId);const key=await crypto.subtle.importKey('raw',decode(b.verificationKey),'Ed25519',false,['verify']);if(!await crypto.subtle.verify('Ed25519',key,decode(p.signature),json(unsigned(p))))throw new Error('Sealed signature mismatch');if(p.context.authorId!==(b.agentId??b.personId))throw new Error('Sealed author binding mismatch');if(p.origin){const origin=parseJSON(signedSchema,p.origin);await this.verify(origin,depth+1);if(origin.context.recordId!==p.context.recordId||origin.context.recordType!==p.context.recordType||origin.context.parentId!==p.context.parentId||origin.context.revision!==p.context.revision||JSON.stringify(origin.payload)!==JSON.stringify(p.payload))throw new Error('Sealed rewrap origin mismatch');}}
  private async accept(g:Group,value:unknown,expected?:ContentContext){const p=signedSchema.parse(value);if(expected&&packetKey(p.context)!==packetKey(expected))throw new Error('Sealed context mismatch');await this.verify(p);g.saved.cache[packetKey(p.context)]=p;}
  async sync(groupId:string):Promise<void>{if(groupId.startsWith('personal_')){const journey=await this.artifactJourney(groupId);return this.sync(`private_${journey.slice(8)}_${this.personId}`);}let g=this.group(groupId);const journeyId=journeyFor(groupId);let v=await this.readGroupView(await this.callRemote('sealed_group',{journeyId,groupId}));await this.verifyRoster(g.saved.roster);if(!v.devices.some(d=>d.deviceId===g.saved.deviceId))throw new Error('Await authenticated device admission');
@@ -168,7 +198,7 @@ export class SealedClient {
    for(const m of messages){const target=m.target?await this.binding(m.target,m.kind==='bootstrap'?m.deviceId:undefined):undefined;if(m.sequence!==g.saved.cursor+1)throw new Error('MLS sequence gap');
     // Receive into an unused clone: validation may fail after MLS decryption. No
     // sends escape this clone; only a fully verified receive becomes durable.
-    const staged=await createMlsGroup(utf8.encode(g.saved.deviceId));await staged.importState(await g.mls.exportState());g={mls:staged,saved:structuredClone(g.saved)};
+    g=await this.stage(g);
     if(!g.saved.own.includes(m.sequence)){
     if(m.kind==='bootstrap'){if(target)g.saved.roster=[target];}
     else if(m.kind==='add'||m.kind==='remove'||m.kind==='update'){const h=parseJSON(handshake,text.decode(decode(m.data)));if(m.kind==='add'&&!target)throw new Error('Missing authenticated admission');if(g.mls.epoch===null){if(target?.deviceId===g.saved.deviceId){if(!h.welcome)throw new Error('Missing welcome');await g.mls.processHandshake(decode(h.welcome));}}else await g.mls.processHandshake(decode(h.commit));if(m.kind==='add'&&target)g.saved.roster.push(target);else if(m.kind==='remove'&&target)g.saved.roster=g.saved.roster.filter(d=>d.deviceId!==target.deviceId);if(g.mls.epoch!==null)this.assertRoster(g);}

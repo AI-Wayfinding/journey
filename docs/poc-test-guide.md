@@ -32,6 +32,10 @@ A move must refuse predictable source-delete denial before creating a destinatio
 
 Before final publication, the proxy saves its advanced ratchets and exact pending ciphertext. After a lost reply, it checks the server receipt and either completes locally or retries that same ciphertext. A proved uncommitted, expired ticket can be abandoned without rolling a ratchet back. Unresolved handshake/history delivery fails closed; do not restore an old MLS snapshot.
 
+MLS membership changes are staged separately. An explicit server refusal leaves the saved epoch unchanged and allows a retry. A lost or malformed reply leaves the old epoch fenced because the server may have accepted the change; reopening does not clear that fence.
+
+A device already stuck at **Ambiguous MLS delivery** has no safe automatic reset. Keep its local files and stop the affected client. Enroll a new connection with a fresh local store, then use a healthy audience member to admit it and share retained history. After account recovery, compare the new account safety number before trusting its key. Do not copy back an old ratchet snapshot or delete the blocked store to force a retry. If no healthy member retains the required keys and history, the server ciphertext alone cannot restore that content.
+
 The current proxy requires the server to report `sealed-v1` before startup and each remote operation. It saves a local mode pin and refuses a missing mode, a downgrade or a legacy store without an explicit migration. The old relay tests use a test-only harness; there is no plaintext fallback in the shipped proxy.
 
 ### Offers, task exchange and private names

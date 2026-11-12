@@ -117,6 +117,14 @@ export function createConsole(config: ConsoleConfig) {
           await browserPost(config.backend,identity,'/console/device/revoke',{csrf:session.csrf,browserId:body.browserId});return redirect('/console');
         }
         if(path==='/console/setup/options'||path==='/console/setup/complete')return Response.json(await config.backend.passkey(identity,{op:path.endsWith('/options')?'setup_options':'setup_complete',browserId:z.string().uuid().parse(body.browserId),recoveryProof:z.string().parse(body.recoveryProof),...(body.assertion?{assertion:body.assertion}:{})}),{headers});
+        if(config.backend.sealedMode&&path==='/console/device/call'){
+          try{return Response.json(await browserPost(config.backend,identity,path,body,now()),{headers});}
+          catch(error){
+            if(error instanceof Refused)return Response.json({error:error.message},{status:409,headers});
+            if(error instanceof z.ZodError)return Response.json({error:'Invalid browser tool input'},{status:400,headers});
+            return Response.json({error:'Coordination operation failed'},{status:500,headers});
+          }
+        }
         if(config.backend.sealedMode&&path.startsWith('/console/device/'))return Response.json(await browserPost(config.backend,identity,path,body,now()),{headers});
         if(path==='/console/passkeys/addition-options')return Response.json(await config.backend.passkey(identity,{op:'addition_options'}),{headers});
         if (path === '/console/passkeys/options') {

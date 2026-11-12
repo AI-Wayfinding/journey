@@ -255,7 +255,18 @@ export async function sealedContent(e:SealedEnvironment,tool:string,supplied:unk
       const binding=await e.authority.binding(String(input.deviceId));check(binding.personId===personId(e)&&binding.agentId===e.actor.agent?.id&&e.eligible(binding),'Authenticated device binding required');check(input.expectedEpoch===g.epoch&&input.expectedSequence===g.sequence,'Sealed group CAS mismatch');
       const action=String(input.action);let target:DeviceBinding|undefined;
       if(action==='bootstrap'){check(!g.devices.length&&!g.sequence,'Group already bootstrapped');target=await authorizedTarget(e,g,binding.deviceId);g.devices.push(binding);}
-      else {check(g.devices.some(d=>d.deviceId===binding.deviceId),'Current group device required');if(action==='add'){check(g.devices.length<128,'Audience device capacity reached');target=await authorizedTarget(e,g,String(input.targetDeviceId));check(!g.devices.some(d=>d.deviceId===target!.deviceId),'Device already admitted');g.devices.push(target);}else if(action==='remove'){const id=String(input.targetDeviceId);target=g.devices.find(d=>d.deviceId===id);check(target,'Unknown removed device');check(binding.agentId?target!.deviceId===binding.deviceId:target!.personId===binding.personId||!(await liveDevices(e,g)).some(d=>d.deviceId===id),'Only own devices or server-ineligible devices may be removed');g.devices=g.devices.filter(d=>d.deviceId!==id);}g.epoch++;}
+      else {
+        check(g.devices.some(d=>d.deviceId===binding.deviceId),'Current group device required');
+        if(action==='add'){check(g.devices.length<128,'Audience device capacity reached');target=await authorizedTarget(e,g,String(input.targetDeviceId));check(!g.devices.some(d=>d.deviceId===target!.deviceId),'Device already admitted');g.devices.push(target);}
+        else if(action==='remove'){
+          const id=String(input.targetDeviceId);target=g.devices.find(d=>d.deviceId===id);check(target,'Unknown removed device');
+          const own=binding.agentId?target!.deviceId===binding.deviceId:target!.personId===binding.personId;
+          // Any eligible audience caller may evict an ineligible leaf, never another member's eligible leaf.
+          check(own||!(await liveDevices(e,g)).some(d=>d.deviceId===id),'Only own devices or server-ineligible devices may be removed');
+          g.devices=g.devices.filter(d=>d.deviceId!==id);
+        }
+        g.epoch++;
+      }
       if(target&&(action==='bootstrap'||action==='add')){check(!g.usedDevices?.includes(target.deviceId),'Key package was already consumed; register a new device package');await e.authority.reserve(target,g.id);g.usedDevices=[...(g.usedDevices??[]),target.deviceId];}
       if(target&&action==='add'||action==='bootstrap')g.checkpoints[target!.deviceId]=e.now;const bytes=decodeBytes(String(input.data),SEALED_LIMITS.envelope);if(action!=='remove')await current(e,g);if(action==='add')g.pendingDevices=g.pendingDevices?.filter(id=>id!==target!.deviceId);const sequence=await appendCiphertext(e,g,{epoch:g.epoch,kind:action as Message['kind'],deviceId:binding.deviceId,target},bytes);await save(e.storage,key('index'),index);return {sequence,epoch:g.epoch};
     }
