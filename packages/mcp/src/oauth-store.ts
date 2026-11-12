@@ -44,7 +44,7 @@ export async function oauthStep(state: OAuthAccounts, op: OAuthOperation, now: n
     case 'request': {
       if (op.request) {
         if (db.requests.some(r => r.id === op.id)) throw new Refused('Authorization already exists');
-        db.requests.push({ id: op.id, request: {clientId:op.request.clientId,clientName:sealedMode?'MCP client':op.request.clientName,redirectUri:op.request.redirectUri,challenge:op.request.challenge,state:op.request.state,expiresAt:op.request.expiresAt} });
+        db.requests.push({ id: op.id, request: {clientId:op.request.clientId,clientName:sealedMode?'MCP client':op.request.clientName,redirectUri:op.request.redirectUri,challenge:op.request.challenge,browserHash:op.request.browserHash,state:op.request.state,expiresAt:op.request.expiresAt} });
       }
       return { kind: 'request', request: db.requests.find(r => r.id === op.id)?.request };
     }

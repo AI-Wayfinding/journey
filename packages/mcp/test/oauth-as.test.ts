@@ -29,7 +29,15 @@ async function fixture() {
   const app = createApp({ resource: RESOURCE, issuer: ISSUER, allowedHosts: [RESOURCE.hostname], backend,
     verifier: createVerifier({ issuer: ISSUER, resource: RESOURCE, getKey: createLocalJWKSet(signer.jwks) }),
     console: { backend, secret: 'synthetic-secret-with-at-least-32-bytes', now: () => now, send: async (url) => String(url).endsWith('/oauth2/token') ? Response.json({ access_token: upstream, token_type: 'Bearer' }) : Response.json(document) } });
-  const send = (p: string, init?: RequestInit) => bridge(app)(new URL(p, origin), init);
+  let browserCookie = '';
+  const send = async (p: string, init?: RequestInit) => {
+    const headers = new Headers(init?.headers);
+    if (browserCookie) headers.set('cookie', [headers.get('cookie'), browserCookie].filter(Boolean).join('; '));
+    const response = await bridge(app)(new URL(p, origin), { ...init, headers });
+    const value = response.headers.getSetCookie().find(c => c.startsWith('__Host-wayfinding-consent='));
+    if (value) browserCookie = value.split(';')[0]!;
+    return response;
+  };
   async function login(path = '/console/login') {
     const start = await send(path), dest = new URL(start.headers.get('location')!);
     const finish = await send(`/console/callback?code=synthetic&state=${dest.searchParams.get('state')}`, { headers: { cookie: start.headers.get('set-cookie')!.split(';')[0]! } });
@@ -89,6 +97,21 @@ test('oauth AS: pre-auth login does not write Accounts or lock out other browser
   for (let n = 0; n < 140; n++) assert.equal((await f.send('/console/login')).status, 302);
   assert.equal(f.backend.accountStorage.writes, before);
   await f.login();
+});
+
+test('oauth AS: consent identifies redirect and client and requires the initiating browser', async () => {
+  const f = await fixture(), cookie = await f.login(), start = await f.authorize();
+  const path = start.headers.get('location')!;
+  const html = await (await f.send(path, { headers: { cookie } })).text();
+  assert.ok(html.includes('127.0.0.1:32123'));
+  assert.ok(html.includes(f.client.client_id));
+  const other = await fixture(), otherCookie = await other.login();
+  // Reusing a real session from this server without the browser's authorization cookie must fail.
+  const app = createApp({ resource: RESOURCE, issuer: ISSUER, allowedHosts: [RESOURCE.hostname], backend: f.backend,
+    verifier: createVerifier({ issuer: ISSUER, resource: RESOURCE, getKey: createLocalJWKSet(signer.jwks) }),
+    console: { backend: f.backend, secret: 'synthetic-secret-with-at-least-32-bytes' } });
+  assert.equal((await app.fetch(new Request(new URL(path, origin), { headers: { cookie, host: RESOURCE.host } }))).status, 403);
+  void otherCookie;
 });
 
 test('oauth AS: metadata, DCR and CIMD validate before redirect, S256 and resource are mandatory', async () => {
