@@ -21,9 +21,9 @@ const origin = RESOURCE.origin, consoleClient = `${origin}/console/client.json`;
 const verifier = 'a'.repeat(43), challenge = Buffer.from(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))).toString('base64url');
 const callback = 'http://127.0.0.1:32123/callback';
 const csrfOf = (s: string) => /name="csrf" value="([^"]+)"/.exec(s)![1]!;
-async function fixture() {
+async function fixture(sealed=false) {
   let now = Date.now();
-  const backend = new MemoryBackend({ async get(s) { return { name: s, email: `${s}@example.test` }; } }, () => now);
+  const backend = new MemoryBackend({ async get(s) { return { name: s, email: `${s}@example.test` }; } }, () => now, undefined, sealed);
   const upstream = await token(signer, { sub: 'alice', client_id: consoleClient });
   let document: unknown = { client_id: 'https://pi.dev/oauth/client.json', client_name: 'Pi', redirect_uris: [callback] };
   const app = createApp({ resource: RESOURCE, issuer: ISSUER, allowedHosts: [RESOURCE.hostname], backend,
@@ -306,8 +306,8 @@ test('oauth AS: device.keys is unchecked and fresh login alone cannot grant it o
 });
 
 
-async function deviceConsentFixture() {
-  const f = await fixture(), cookie = await f.login(), key = await authenticator();
+async function deviceConsentFixture(sealed=false) {
+  const f = await fixture(sealed), cookie = await f.login(), key = await authenticator();
   const identity = { subject: 'alice', clientId: consoleClient };
   const options = await f.backend.passkey(identity, { op: 'begin' });
   await f.backend.passkey(identity, { op: 'finish', credential: key.register(String(options.challenge)) });
@@ -381,10 +381,10 @@ test('oauth AS: device.keys passkey is bound to the pending authorization, exact
 });
 
 test('oauth AS: device.keys agent token bootstraps real proxy and round-trips sealed content; removing capability refuses every private path unchanged', async t => {
-  const f = await deviceConsentFixture(), body = await f.pending();
+  const f = await deviceConsentFixture(true), body = { ...await f.pending(), name: 'MCP client', capabilities: capabilities.filter(c=>c.name!=='grant.issue').map(c=>c.name) };
   const options = await (await f.post('/oauth/consent/options', body, f.cookie)).json() as { challenge: string };
   const allowed = await f.post('/oauth/consent', { ...body, assertion: await f.key.assert(options.challenge) }, f.cookie);
-  assert.equal(allowed.status, 303);
+  assert.equal(allowed.status, 303, await allowed.clone().text());
   const tokens = await (await f.exchange(new URL(allowed.headers.get('location')!).searchParams.get('code')!)).json() as { access_token: string };
   const remote = new Client({ name: 'real-encryption-proxy', version: '1' });
   await remote.connect(new StreamableHTTPClientTransport(RESOURCE, { fetch: (url, init) => f.send(new URL(String(url)).pathname, init), requestInit: { headers: { authorization: `Bearer ${tokens.access_token}` } } }));
@@ -401,6 +401,7 @@ test('oauth AS: device.keys agent token bootstraps real proxy and round-trips se
   await proxy.addMember(proxy.personalGroupId, second.personId, prepared.deviceId);
   assert.equal((await second.readArtifact(proxy.personalGroupId, artifact.artifactId)).content, 'SEALED-DEVICE-KEYS-ROUNDTRIP');
   const account = (await f.backend.accountsHost.lookup('alice'))!;
+  const journeyId = JSON.parse(records.get('sealed-state')!).personalJourney as string;
   await f.backend.execute('alice', parseCommand('agent_narrow', { agentId: account.agents[0]!.id, remove: ['device.keys'] }), consoleClient);
   const calls: [string, Record<string, unknown>][] = [
     ['account_read', {}], ['personal_group_read', {}], ['personal_group_add', { name: 'No', kind: 'device' }], ['personal_group_remove', { memberId: prepared.deviceId }],
@@ -411,10 +412,21 @@ test('oauth AS: device.keys agent token bootstraps real proxy and round-trips se
   ];
   for (const [tool, input] of calls) {
     const before = f.backend.snapshot();
-    await assert.rejects(f.backend.execute('alice', parseCommand(tool, input), f.client.client_id), /device.keys/);
+    await assert.rejects(f.backend.execute('alice', parseCommand(tool, input), f.client.client_id), /^(artifact_|mls_)/.test(tool) ? /sealed.*contract/ : /device.keys/);
     assert.equal(f.backend.snapshot(), before, tool);
   }
-  await assert.rejects(WayfindingProxy.open(remote, store), /device.keys/);
+  for (const [tool, input] of [
+    ['sealed_group', {journeyId,groupId:journeyId,deviceId:prepared.deviceId}],
+    ['sealed_group_fetch', {journeyId,groupId:journeyId,deviceId:prepared.deviceId}],
+    ['sealed_group_commit', {journeyId,groupId:journeyId,deviceId:prepared.deviceId,expectedSequence:0,expectedEpoch:0,action:'update',data:'AQ=='}],
+    ['sealed_package_reserve', {journeyId,groupId:journeyId,deviceId:prepared.deviceId}],
+    ['content_prepare', {journeyId,action:'library_add',routing:{}}],
+  ] as const) {
+    const before=f.backend.snapshot();
+    await assert.rejects(f.backend.sealedExecute('alice',tool,input,f.client.client_id),/device.keys/);
+    assert.equal(f.backend.snapshot(),before,tool);
+  }
+  await assert.rejects(WayfindingProxy.open(remote, store), /^Error: Remote operation refused$/);
 });
 
 
