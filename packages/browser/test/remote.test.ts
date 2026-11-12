@@ -9,7 +9,7 @@ for(const reason of ['Sealed group CAS mismatch','Only own devices or server-ine
  const remote=consoleRemote(consolePost('csrf',async()=>Response.json({error:reason},{status:409})),'browser',async()=>({}));
  const result=await remote.callTool({name:'sealed_group_commit',arguments:{}});
  assert.equal(result.isError,true);assert.deepEqual(result.content,[{type:'text',text:reason}]);
- await assert.rejects(sealedRemoteCall(remote,'sealed_group_commit',{}),(error:unknown)=>error instanceof RemoteFailure&&error.code==='refused');
+ await assert.rejects(sealedRemoteCall(remote,'sealed_group_commit',{}),(error:unknown)=>error instanceof RemoteFailure&&error.code==='refused'&&error.message===`Remote operation refused: ${reason}`);
 });
 
 for(const status of [403,500,503])test(`browser remote keeps HTTP ${status} ambiguous`,async()=>{

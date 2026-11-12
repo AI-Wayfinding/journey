@@ -1,14 +1,29 @@
 import * as z from 'zod';
 const messages={refused:'Remote operation refused',lifecycle:'Remote lifecycle refused',stale:'Remote state changed; synchronize and retry',permission:'Remote permission denied',quota:'Remote capacity exhausted',unavailable:'Remote service unavailable',response:'Invalid remote response',mode:'Server must report sealed-v1; downgrade refused'} as const;
 export type RemoteCode=keyof typeof messages;
-/** Remote prose is used only for bounded classification, never delivered to the local agent. */
-export class RemoteFailure extends Error {readonly code:RemoteCode;constructor(code:RemoteCode){super(messages[code]);this.code=code;}}
+/** Only exact, fixed server diagnostics may cross the local-agent boundary.
+ * Never echo arbitrary remote prose, identifiers, tokens or appended instructions. */
+const publicReasons=[
+ 'Offer is not available','Target is not entitled to audience','Authenticated device binding required',
+ 'Current group device required','Current device required for retained history','Browser leaf binding required',
+ 'Offline checkpoint expired; rejoin through a live member','Sealed group CAS mismatch',
+ 'Content revision changed','Prepared epoch is stale','Sealed epoch mismatch',
+ 'Task is final','Task access refused','Task audience refused','Interview is private',
+ 'Sealed metadata refused by coordination rules','Sealed operation refused by coordination rules',
+ 'Only own devices or server-ineligible devices may be removed','Only own device may request automatic admission',
+ 'Complete onboarding before using browser controls','Fresh passkey enrollment required',
+ 'Registered wrapping passkey required','Browser device revoked',
+] as const;
+type PublicReason=typeof publicReasons[number];
+export class RemoteFailure extends Error {readonly code:RemoteCode;constructor(code:RemoteCode,reason?:PublicReason){super(reason?`${messages[code]}: ${reason}`:messages[code]);this.code=code;}}
 export function remoteFailure(text:string):RemoteFailure {
- if(/Content revision changed|Prepared epoch is stale|Sealed epoch mismatch/.test(text))return new RemoteFailure('stale');
- if(/Task is final|Sealed metadata refused by coordination rules|Sealed operation refused by coordination rules/.test(text))return new RemoteFailure('lifecycle');
- if(/quota|budget|capacity/i.test(text))return new RemoteFailure('quota');
- if(/forbidden|permission|authority|not eligible|Interview is private|Task access refused|Task audience refused|device.keys/i.test(text))return new RemoteFailure('permission');
- return new RemoteFailure('refused');
+ const reason=publicReasons.find(reason=>reason===text);
+ let code:RemoteCode='refused';
+ if(/Content revision changed|Prepared epoch is stale|Sealed epoch mismatch/.test(text))code='stale';
+ else if(/Task is final|Sealed metadata refused by coordination rules|Sealed operation refused by coordination rules/.test(text))code='lifecycle';
+ else if(/quota|budget|capacity/i.test(text))code='quota';
+ else if(/forbidden|permission|authority|not eligible|Interview is private|Task access refused|Task audience refused|device.keys/i.test(text))code='permission';
+ return new RemoteFailure(code,reason);
 }
 export class PartialMoveFailure extends Error {
  readonly receipt:{status:'partial';sourceArtifactId:string;destinationArtifactId:string;sourceState:'unknown';destinationState:'created'};

@@ -191,6 +191,7 @@ export function createConsole(config: ConsoleConfig) {
           return redirect(`/console/agents/${encodeURIComponent(agentId)}`);
         }
         if (path === '/console/offers/publish' || path === '/console/offers/retire') {
+          if(config.backend.sealedMode&&path.endsWith('/publish'))throw new Refused('Use your unlocked browser connection to publish sealed offers with their journey settings');
           const agentId = z.string().min(1).max(200).parse(body.agentId);
           await config.backend.execute(session.subject, parseCommand(path.endsWith('/publish') ? 'offer_publish' : 'offer_retire', { agentId, offerId: body.offerId }), session.clientId);
           return redirect(`/console/agents/${encodeURIComponent(agentId)}`);
