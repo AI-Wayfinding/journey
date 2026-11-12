@@ -1,5 +1,6 @@
 import * as z from 'zod';
 import { writeRequestSchema, writePermitSchema, writeReceiptSchema, type WritePermit, type WriteReceipt } from './write-permits.ts';
+import { PartitionedAccountsStorage } from './accounts-storage.ts';
 import { allowanceRequestSchema, permitRequestSchema, type OfferAgent, type StandingDecision } from './offers.ts';
 const standingSchema = z.object({ id: z.string().min(1).max(200), owner: z.string().min(1).max(200), agentId: z.string().min(1).max(200), offerId: z.string().min(1).max(200), journeyId: z.string().min(1).max(200), byAgent: z.boolean(), who: z.union([z.object({ person: z.string().min(1).max(200) }).strict(), z.object({ agent: z.string().min(1).max(200) }).strict()]), decision: z.enum(['allow', 'deny']) }).strict();
 import { sealedDescriptor } from './sealed-descriptors.ts';
@@ -133,6 +134,7 @@ export class Accounts {
 }
 
 export class AccountsSealedV1 extends Accounts {constructor(state:ObjectState,env:Pick<ObjectBindings,'WORKOS_API_KEY'>&Partial<Pick<ObjectBindings,'BLOBS'>>){super(state,env,undefined,true);}}
+export class AccountsPartitionedV1 extends Accounts { constructor(state: ObjectState, env: Pick<ObjectBindings, 'WORKOS_API_KEY'> & Partial<Pick<ObjectBindings, 'BLOBS'>>) { super({ storage: new PartitionedAccountsStorage(state.storage) }, env, undefined, true); } }
 
 async function call<T>(namespace: ObjectNamespace, name: string, body: Record<string, unknown>): Promise<T> {
   const stub = namespace.getByName(name);

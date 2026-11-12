@@ -69,7 +69,7 @@ export class WriteAuthority {
     let scope = state.scopes.find(s => s.personId === account.personId);
     if (!scope) { scope = { personId: account.personId, fingerprint: fingerprint(account), epoch: 0 }; state.scopes.push(scope); }
     if (state.permits.some(p => p.permit.personId === account.personId && p.phase === 'redeemed' && p.permit.epoch !== scope.epoch)) throw new Refused('Revocation pending: write receipts must be recovered');
-    if (state.permits.filter(p => p.phase === 'issued' || p.phase === 'redeemed').length >= 128) throw new Refused('Write permit capacity reached');
+    if (state.permits.filter(p => p.permit.personId === account.personId && (p.phase === 'issued' || p.phase === 'redeemed')).length >= 128) throw new Refused('Write permit capacity reached');
     const audienceEpochs = [...new Set(request.audiencePersonIds ?? [])].map(personId=>{
       const a=accounts.find(a=>a.personId===personId&&a.live); if(!a)throw new Refused('Audience account is not live');
       let s=state.scopes.find(s=>s.personId===personId);if(!s){s={personId,fingerprint:fingerprint(a),epoch:0};state.scopes.push(s);}

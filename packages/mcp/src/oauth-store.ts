@@ -26,7 +26,7 @@ export async function oauthStep(state: OAuthAccounts, op: OAuthOperation, now: n
     db.refresh = db.refresh.filter(t => t.family !== family);
   };
   const issue = async (t: Pick<StoredToken, 'subject' | 'personId' | 'clientId' | 'agentId'>, family = randomToken(), familyExpiry = now + 30 * 86400_000): Promise<OAuthResult> => {
-    if (db.access.length + db.refresh.length >= 10_000) throw new Refused('Token capacity reached');
+    if ([...db.access, ...db.refresh].filter(token => token.personId === t.personId).length >= 10_000) throw new Refused('Account token capacity reached');
     const access = randomToken(), refresh = randomToken();
     const identity = { subject: t.subject, personId: t.personId, clientId: t.clientId, agentId: t.agentId };
     db.access.push({ ...identity, hash: await tokenHash(access), expiresAt: now + 3_600_000, family });
@@ -107,8 +107,6 @@ export async function oauthStep(state: OAuthAccounts, op: OAuthOperation, now: n
     case 'verify': {
       const hash = await tokenHash(op.token), t = db.access.find(t => t.hash === hash);
       if (!t || !live(t)) return { kind: 'error', error: 'invalid_token' };
-      const account = state.accounts.find(a => a.personId === t.personId)!;
-      account.agents.find(a => a.id === t.agentId)!.lastUsedAt = now;
       return { kind: 'access', identity: { subject: t.subject, personId: t.personId, clientId: t.clientId, agentId: t.agentId }, expiresAt: t.expiresAt };
     }
     case 'revoke': {

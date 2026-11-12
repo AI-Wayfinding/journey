@@ -40,6 +40,15 @@ async function fixture() {
   };
 }
 
+test('write permits: unresolved permit caps are per account',async()=>{
+ const host=new AccountsHost(new MemoryStorage(),profiles,undefined,undefined,()=>1_800_000_000_000);
+ const alice=await host.provision('alice'),bob=await host.provision('bob');
+ const a=await host.resolveActor(alice.personId,'trusted-host'),b=await host.resolveActor(bob.personId,'trusted-host');
+ for(let n=0;n<128;n++) await host.issueWrite({actor:a,target:'journey_test',digest:`test-${n}`});
+ await assert.rejects(host.issueWrite({actor:a,target:'journey_test',digest:'excess'}),/capacity/);
+ assert.equal((await host.issueWrite({actor:b,target:'journey_test',digest:'other-account'})).personId,bob.personId);
+});
+
 // These tests force the check/use window at the actual host boundary, not a copied permit model.
 for (const kind of ['relay', 'artifact'] as const) test(`write permits: revoke between check and commit refuses ${kind}`, async () => {
   const f = await fixture(), issued = latch(), resume = latch();

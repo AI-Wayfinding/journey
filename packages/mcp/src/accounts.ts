@@ -1,4 +1,5 @@
 import * as z from 'zod';
+import { PartitionedAccountsStorage } from './accounts-storage.ts';
 import { WriteAuthority, WriteStorage, WriteBlobs, WriteReceiver, writeRequestSchema, type WriteRequest, type WritePermit, type WriteReceipt, type WriteDrain } from './write-permits.ts';
 import { accountOfferCommand } from './agent-offers.ts';
 import { DEFAULT_SETTINGS, offerView, allowanceRequestSchema, permitRequestSchema, journeyEnabled, matchingRule, clampAdmission, clampJourneyLimits, periodMs, type AllowanceRequest, type AllowanceReceipt, type OfferAgent, type StandingDecision, type PermitRequest, type AdmissionPermit, type Offer, type OwnerOfferSettings } from './offers.ts';
@@ -106,7 +107,14 @@ export class AccountsHost {
   }
   oauth(supplied: OAuthOperation): Promise<OAuthResult> {
     return this.serial.run(async () => {
-      const operation = oauthOperation.parse(supplied), state = await this.load();
+      const operation = oauthOperation.parse(supplied);
+      if (operation.op === 'verify' && this.storage.base instanceof PartitionedAccountsStorage) {
+        const stored = await this.storage.base.access(await tokenHash(operation.token));
+        if (!stored.token || !stored.account) return { kind: 'error', error: 'invalid_token' };
+        if (!stored.rulesHash || !sameRules(stored.rulesHash) || stored.rulesHash.card !== RULES.card) throw new Refused('Stored accounts use different rules');
+        return oauthStep({ accounts: [stored.account], oauth: { clients: [], requests: [], codes: [], access: [stored.token], refresh: [] } }, operation, this.now());
+      }
+      const state = await this.load();
       if(this.sealedMode&&(operation.op==='consent-options'||operation.op==='consent')){const request=state.oauth?.requests.find(r=>r.id===operation.id)?.request;if(!request||operation.consent.name!=='MCP client')throw new Refused('Names must be sealed by an enrolled proxy; consent uses client id only');}
       if(this.sealedMode&&operation.op==='manage'&&operation.name!==undefined&&operation.name!==operation.agentId)throw new Refused('Agent names must be sealed by an enrolled proxy');
       let deviceAsserted = false;
@@ -136,7 +144,7 @@ export class AccountsHost {
       }
       const result = await oauthStep(state, operation, this.now(), deviceAsserted, this.sealedMode);
       // Persist errors too: refresh reuse must revoke before the error is returned.
-      if (operation.op !== 'client' && !(operation.op === 'request' && !operation.request)) await this.save(state);
+      if (operation.op !== 'verify' && operation.op !== 'client' && !(operation.op === 'request' && !operation.request)) await this.save(state);
       return result;
     });
   }
