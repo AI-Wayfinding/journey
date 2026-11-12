@@ -108,7 +108,7 @@ export class Accounts {
       if (body['action'] === 'releaseAllowance') return this.host.releaseAllowance(field(body, 'taskId'), z.boolean().optional().parse(body['permitOnly']) ?? false);
       if (body['action'] === 'oauth') return this.host.oauth(oauthOperation.parse(body['operation']));
       if (body['action'] === 'consoleRecord') return this.host.consoleRecord(recordOperation.parse(body['operation']));
-      if (body['action'] === 'passkey') return this.host.passkey({ subject: field(body, 'subject'), clientId: field(body, 'clientId') }, passkeyOperation.parse(body['operation']));
+      if (body['action'] === 'passkey') return this.host.passkey({ subject: field(body, 'subject'), clientId: field(body, 'clientId'), signedInAt: z.number().int().nonnegative().safe().optional().parse(body['signedInAt']) }, passkeyOperation.parse(body['operation']));
       if (body['action'] === 'observeClient') return this.host.observeClient(field(body, 'personId'), field(body, 'clientId'));
       if (body['action'] === 'resolveActor') return this.host.resolveActor(field(body, 'personId'), field(body, 'clientId'), typeof body['actingAgent'] === 'string' ? field(body, 'actingAgent') : undefined);
       if (body['action'] === 'agentCommand') return this.host.agentCommand(field(body, 'personId'), field(body, 'clientId'), command(body));
@@ -163,7 +163,7 @@ export function durableBackend(env: ObjectBindings,sealedMode=false): Backend {
     standingDecision: decision => call<void>(env.ACCOUNTS, 'accounts', { action: 'standingDecision', decision }),
     oauth: operation => call(env.ACCOUNTS, 'accounts', { action: 'oauth', operation }),
     consoleRecord: (operation) => call<ConsoleRecord | undefined>(env.ACCOUNTS, 'accounts', { action: 'consoleRecord', operation }),
-    passkey: (identity, operation) => call(env.ACCOUNTS, 'accounts', { action: 'passkey', subject: identity.subject, clientId: identity.clientId, operation }),
+    passkey: (identity, operation) => call(env.ACCOUNTS, 'accounts', { action: 'passkey', subject: identity.subject, clientId: identity.clientId, signedInAt: identity.signedInAt, operation }),
     provision: (subject) => call<Account>(env.ACCOUNTS, 'accounts', { action: 'provision', subject }),
     lookup: (subject) => call<Account | undefined>(env.ACCOUNTS, 'accounts', { action: 'lookup', subject }),
     update: (personId, nickname) => call<Account>(env.ACCOUNTS, 'accounts', { action: 'update', personId, tool: 'account_update', input: { nickname } }),

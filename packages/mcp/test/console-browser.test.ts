@@ -12,6 +12,7 @@ import {authenticator} from './console-authenticator.ts';
 import {keyPair,ISSUER,RESOURCE} from './helpers.ts';
 import {SealedClient} from '../../proxy/src/sealed-client.ts';
 import {consoleRemote} from '../../browser/src/remote.ts';
+import {workspaceDom} from '../../browser/test/workspace-dom.ts';
 import {browserBundle,browserIntegrity,browserPath,webauthnIntegrity} from '../../browser/generated/bundle.ts';
 import {webauthn} from '../src/console/assets.ts';
 import {createMlsGroup} from '../../proxy/src/mls/index.ts';
@@ -61,6 +62,15 @@ test('console browser sealed writes never send plaintext; admission, local searc
  assert.equal((await f.send('/console/device/info',{csrf:'wrong'})).status,403);assert.equal((await f.send('/console/device/info',{csrf:f.csrf},{origin:'https://evil.test'})).status,403);
  for(const marker of markers){assert.equal(f.requests.join('\n').includes(marker),false,`request plaintext ${marker}`);assert.equal(f.backend.snapshot().includes(marker),false,`storage plaintext ${marker}`);for(const bytes of f.backend.blobs.data.values())assert.equal(Buffer.from(bytes).includes(Buffer.from(marker)),false,`blob plaintext ${marker}`);}
 });
+test('console sealed journey overview is metadata-only and accessible to a member',async()=>{
+ const f=await fixture(),a=await f.device();await f.ready(a);
+ const j=String((await a.client.call('journey_create',{name:'PRIVATE-OVERVIEW-NAME',policy:'invite',defaultRole:'write'})).journeyId);
+ const response=await f.send(`/console/journeys/${j}`);assert.equal(response.status,200);
+ const html=await response.text();assert.ok(html.includes(j));assert.doesNotMatch(html,/PRIVATE-OVERVIEW-NAME|Console request refused/);
+ assert.ok(html.includes(browserPath),'browser device loads the sealed content');
+ const ui=workspaceDom(`/console/journeys/${j}`);try{await ui.render(a.client);assert.match(ui.work.textContent,/PRIVATE-OVERVIEW-NAME/);}finally{ui.restore();}
+ assert.equal((await f.send('/console/journeys/journey_unknown')).status,403);
+});
 test('console browser approve and decline reasons are sealed; tasks and rounds decrypt through the shared client',async t=>{
  const f=await fixture(),a=await f.device();await f.ready(a);const j=String((await a.client.call('journey_create',{name:'Decision journey',policy:'invite',defaultRole:'write'})).journeyId);
  const agentId=String((await a.client.call('agent_create',{name:'Offering endpoint'})).agentId);
@@ -68,10 +78,39 @@ test('console browser approve and decline reasons are sealed; tasks and rounds d
  const signer=await keyPair('browser-offering'),remote=new Client({name:'browser-offering',version:'1'});await remote.connect(new StreamableHTTPClientTransport(RESOURCE,{fetch:bridge(app(signer,f.backend)),requestInit:{headers:{authorization:`Bearer ${await token(signer,{sub:'alice',client_id:'browser-test-endpoint'})}`}}}));t.after(()=>remote.close());
  const files=new Map<string,string>(),endpoint=await SealedClient.open(remote,{async read(k){return files.get(k)},async write(k,v){files.set(k,v)}},a.client.personId),jd=await endpoint.prepareGroup(j);await a.client.addMember(j,endpoint.personId,jd.deviceId);
  const offerId=`offer-${crypto.randomUUID()}`;await a.client.call('offer_set',{agentId,offer:{id:offerId,name:'Review',description:'Synthetic',inputSchema:{type:'object'},admission:{rules:[],default:'hold'},journeySettings:{[j]:{enabled:true}}}});await a.client.call('offer_publish',{agentId,offerId});
- for(const action of ['approve','decline']){
-  const p=await a.client.call('task_prepare',{journeyId:j,agentId,offerId}),taskId=String(p.taskId),groupId=String(p.groupId),ed=await endpoint.prepareGroup(groupId);await a.client.addMember(groupId,endpoint.personId,ed.deviceId);
-  await a.client.call('task_create',{journeyId:j,taskId,agentId,offerId,name:'BROWSER-TASK-NAME-CANARY',input:{text:'BROWSER-TASK-INPUT-CANARY'},deadline:Date.now()+300000,maxRounds:2});
-  await a.client.call('task_step',{journeyId:j,taskId,action,reason:`BROWSER-${action}-REASON-CANARY`});assert.match(JSON.stringify(await a.client.call('task_read',{journeyId:j,taskId})),new RegExp(`BROWSER-${action}-REASON-CANARY`));
+ const bob=await f.backend.execute('bob',{tool:'account_read',input:{}},clientId);
+ await f.backend.execute('alice',{tool:'journey_invite',input:{journeyId:j,personId:String(bob.personId)}},clientId);
+ await f.backend.execute('bob',{tool:'journey_join',input:{journeyId:j}},clientId);
+ const b=await f.device();await b.client.enrollGroup(b.personal);await a.client.sync(a.personal);await b.client.sync(b.personal);
+ for(const action of ['approve','decline'] as const){
+  const draft=await endpoint.call('task_create',{journeyId:j,agentId,offerId,name:'BROWSER-TASK-NAME-CANARY',input:{text:'BROWSER-TASK-INPUT-CANARY'},deadline:Date.now()+300000,maxRounds:2});
+  const taskId=String(draft.taskId),groupId=String(draft.groupId);
+  assert.equal(draft.admission,'pending');
+  const metadata=await f.backend.execute('alice',{tool:'journey_read',input:{journeyId:j}},clientId);
+  const pending=metadata.taskPreparations as {taskId:string;groupId:string;agentId:string}[];
+  assert.ok(pending.some(p=>p.taskId===taskId&&p.groupId===groupId&&p.agentId===agentId),'owner discovers the pending audience without content');
+  const other=await f.backend.execute('bob',{tool:'journey_read',input:{journeyId:j}},clientId);
+  assert.equal(JSON.stringify(other).includes(taskId),false,'unrelated journey members cannot discover private task preparations');
+  await assert.rejects(f.backend.sealedExecute('bob','sealed_group',{journeyId:j,groupId},clientId),/Task audience refused/);
+  await assert.rejects(f.backend.execute('alice',{tool:'task_step',input:{journeyId:j,taskId,action}},clientId),/sealed.*contract/);
+  const ui=workspaceDom(`/console/agents/${agentId}`);
+  try {
+   await ui.render(b.client);await ui.click('Prepare request connection');
+  }finally{ui.restore();}
+  await a.client.sync(j);
+  await endpoint.sync(groupId);assert.equal((await b.client.enrollGroup(groupId)).admitted,true);
+  await endpoint.call('task_create',{journeyId:j,taskId,agentId,offerId,name:'BROWSER-TASK-NAME-CANARY',input:{text:'BROWSER-TASK-INPUT-CANARY'},deadline:Date.now()+300000,maxRounds:2});
+  const agentHtml=await (await f.send(`/console/agents/${agentId}`)).text();assert.doesNotMatch(agentHtml,/action="\/console\/offers\/decide"/);
+  const decisionUi=workspaceDom(`/console/agents/${agentId}`);
+  try {
+   await decisionUi.render(b.client);assert.match(decisionUi.work.textContent,/BROWSER-TASK-NAME-CANARY/);assert.match(decisionUi.work.textContent,/BROWSER-TASK-INPUT-CANARY/);
+   decisionUi.input('Decision reason (optional)',`BROWSER-${action}-REASON-CANARY`);
+   await decisionUi.click(action==='approve'?'Approve request':'Decline request');
+  }finally{decisionUi.restore();}
+  const task=await b.client.call('task_read',{journeyId:j,taskId});
+  assert.equal(task.status,action==='approve'?2:8);assert.match(JSON.stringify(task),new RegExp(`BROWSER-${action}-REASON-CANARY`));
+  assert.equal((await f.send('/console/offers/decide',{csrf:f.csrf,agentId,journeyId:j,taskId,action,reason:'RAW-DECISION-REASON'})).status,403);
+  assert.equal(f.backend.snapshot().includes('RAW-DECISION-REASON'),false);
  }
  const round=await a.client.call('round_create',{journeyId:j,title:'BROWSER-ROUND-CANARY',goal:'BROWSER-ROUND-GOAL',format:'Synthetic'}),roundId=String((round.records as {recordId:string;type:string}[]).find(r=>r.type==='round')!.recordId);assert.match(JSON.stringify(await a.client.call('round_read',{roundId})),/BROWSER-ROUND-CANARY/);
  for(const marker of ['BROWSER-TASK-NAME-CANARY','BROWSER-TASK-INPUT-CANARY','BROWSER-approve-REASON-CANARY','BROWSER-decline-REASON-CANARY','BROWSER-ROUND-CANARY','BROWSER-ROUND-GOAL']){assert.equal(f.requests.join('\n').includes(marker),false,marker);assert.equal(f.backend.snapshot().includes(marker),false,marker);for(const bytes of f.backend.blobs.data.values())assert.equal(Buffer.from(bytes).includes(Buffer.from(marker)),false,marker);}
