@@ -29,9 +29,10 @@
     { "tag": "sealed-v1", "new_sqlite_classes": ["JourneySealedV1", "AccountsSealedV1"] },
     { "tag": "accounts-partitioned-v1", "new_sqlite_classes": ["AccountsPartitionedV1"] },
     {
-      "tag": "prototype-reset-v1",
+      "tag": "prototype-reset-phase1",
       "new_sqlite_classes": ["JourneyResetV1"],
-      "deleted_classes": ["Journey", "Accounts", "JourneyV2", "AccountsV2", "JourneySealedV1", "AccountsSealedV1"]
-    }
+      "deleted_classes": ["Journey", "Accounts", "JourneyV2", "AccountsV2", "AccountsSealedV1"]
+    },
+    { "tag": "prototype-reset-phase2", "deleted_classes": ["JourneySealedV1"] }
   ]
 }
