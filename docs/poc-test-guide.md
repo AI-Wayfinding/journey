@@ -113,7 +113,7 @@ Malformed/plaintext sealed inputs, incomplete multi-envelope manifests, oversize
 
 ## Historical v2 walkthrough (not sealed-v1)
 
-The Worker authorization server replaces AuthKit MCP tokens with its own tokens; existing MCP clients must sign in again after deployment. The `prototype-reset-v1` migration deletes every earlier storage class and its data. Journeys start empty in `JourneyResetV1`, and accounts in `AccountsPartitionedV1`. Everyone signs up again.
+The Worker authorization server replaces AuthKit MCP tokens with its own tokens; existing MCP clients must sign in again after deployment. The `prototype-reset-phase1` and `prototype-reset-phase2` migrations delete every earlier storage class and its data. Cloudflare refuses to delete a class that the live version still binds, so the reset runs as two deploys: phase 1 moves the journey binding to the new class, and phase 2 deletes the last old class. Journeys start empty in `JourneyResetV1`, and accounts in `AccountsPartitionedV1`. Everyone signs up again.
 
 ### Connect and name an agent
 
