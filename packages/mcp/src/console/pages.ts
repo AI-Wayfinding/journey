@@ -76,7 +76,7 @@ async function agentOffers(backend: ConsoleBackend, identity: ClientIdentity, ag
       + (offer.status === 'published' ? form('/console/offers/retire', csrf, fields, 'Retire offer') : '')
       + journeyRows(offer) + (standing ? `<ul>${standing}</ul>` : '');
   };
-  const decision = (journey: ToolData, task: ToolData, action: 'approve' | 'decline') => form('/console/offers/decide', csrf,
+  const decision = (journey: ToolData, task: ToolData, action: 'approve' | 'decline') => backend.sealedMode ? '<p>Unlock this browser connection to read and decide this request.</p>' : form('/console/offers/decide', csrf,
     hidden('agentId', agentId) + hidden('journeyId', journey.journeyId) + hidden('taskId', task.taskId) + hidden('action', action)
       + (action === 'decline' ? '<label>Reason (optional) <input name="reason" maxlength="1000"></label>' : '')
       + `<label><input type="checkbox" name="standing" value="${action === 'approve' ? 'always_allow' : 'always_deny'}"> Always ${action === 'approve' ? 'allow' : 'deny'} this requester</label>`,
@@ -116,6 +116,8 @@ export function journeyNav(journeyId: string): string {
 }
 export async function journeyPage(backend: ConsoleBackend, identity: ClientIdentity, journeyId: string, csrf: string): Promise<string> {
   const journey = await backend.execute(identity.subject, parseCommand('journey_read', { journeyId }), identity.clientId);
+  if (backend.sealedMode) return page('Journey overview', journeyNav(journeyId)
+    + `<p>${escape(journey.journeyId)} · ${escape(journey.policy)} · default role ${escape(journey.defaultRole)}</p><section><h2>Members</h2><ul>${rows(journey.members).map(m => `<li>${escape(m.memberId)} · ${escape(m.kind)} · ${escape(m.role)}${m.guide ? ' · guide' : ''}</li>`).join('')}</ul></section><section><h2>Tasks</h2><ul>${rows(journey.tasks).map(t => `<li>${escape(t.taskId)} · ${escape(t.status)}</li>`).join('')}</ul></section><p>Unlock this browser connection to read private journey content.</p>`, csrf);
   const forum = await backend.execute(identity.subject, parseCommand('topic_list', { journeyId }), identity.clientId);
   const rounds = await backend.execute(identity.subject, parseCommand('round_list', { journeyId }), identity.clientId);
   const list = (heading: string, value: unknown, render: (row: ToolData) => string) => `<section><h2>${heading}</h2><ul>${rows(value).map(row => `<li>${render(row)}</li>`).join('') || '<li>Nothing to show in this build.</li>'}</ul></section>`;

@@ -156,6 +156,16 @@ async function plan(e:SealedEnvironment,index:Index,action:string,input:Record<s
   check(index.ids.length+changed.filter(r=>!index.ids.includes(r.id)).length<=1024,'Sealed record capacity reached');return {records:changed,slots,topics};
 }
 
+/** Routing-only discovery, including audiences waiting for the owner's browser before task creation. */
+export async function taskPreparations(storage:KeyValueStorage,committed:string[],actor:Actor,offers?:OfferPort):Promise<ToolData[]> {
+ const index=await load<Index>(storage,key('index')),result:ToolData[]=[];
+ for(const id of index?.groups??[]) {
+  const g=await load<Group>(storage,key('group',id)),a=g?.task;
+  if(!g||!a||committed.includes(a.taskId)||!await taskDevice(a,{personId:actor.personId,agentId:actor.agent?.id} as DeviceBinding,offers))continue;
+  result.push({taskId:a.taskId,groupId:g.id,requester:a.requester,assignee:a.assignee,owner:a.owner,agentId:a.agentId,offerId:a.offerId});
+ }
+ return result;
+}
 /** The Journey host owns the serial turn and WriteReceiver. No write escapes its staged transaction. */
 export async function sealedContent(e:SealedEnvironment,tool:string,supplied:unknown):Promise<ToolData>{
   const schema=sealedInputs[tool];check(schema,'Unknown sealed operation');const input=schema!.parse(supplied) as Record<string,unknown>;

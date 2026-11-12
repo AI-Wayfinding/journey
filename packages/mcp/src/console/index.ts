@@ -206,6 +206,7 @@ export function createConsole(config: ConsoleConfig) {
           return redirect(`/console/agents/${encodeURIComponent(agentId)}`);
         }
         if (path === '/console/offers/decide') {
+          if (config.backend.sealedMode) throw new Refused('Use your unlocked browser connection to decide sealed requests');
           const agentId = z.string().min(1).max(200).parse(body.agentId);
           const action = z.enum(['approve', 'decline']).parse(body.action);
           await config.backend.execute(session.subject, parseCommand('task_step', {

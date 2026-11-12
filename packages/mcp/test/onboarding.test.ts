@@ -110,3 +110,27 @@ test('recovery verifier uses native constant-time verification; wrong proofs nev
   assert.equal(comparisons,3,'each verifier comparison uses Web Crypto, not string equality');
  }finally{crypto.subtle.verify=verify;}
 });
+
+
+test('recovery: real DO adapters preserve sign-in freshness and revoke connections immediately',async()=>{
+ const f=await fixture(),{Accounts,durableBackend}=await import('../src/objects.ts'),{MemoryBlobs}=await import('../src/relay.ts');
+ const blobs=new MemoryBlobs(),backend=durableBackend({WORKOS_API_KEY:'unused',BLOBS:blobs,
+  ACCOUNTS:{getByName(){return new Accounts({storage:f.storage},{WORKOS_API_KEY:'unused',BLOBS:blobs},undefined,true);}},
+  JOURNEYS:{getByName(){throw Error('No journey expected');}},
+ },true);
+ const agent=await backend.sealedExecute('alice','agent_create',{},identity.clientId);
+ const browserId=crypto.randomUUID(),device={deviceId:`device_${crypto.randomUUID()}`,verificationKey:Buffer.alloc(32,1).toString('base64'),data:Buffer.from('synthetic key package').toString('base64')};
+ const fields={browserId,credentialId:f.key.id,device},options=await backend.passkey(identity,{op:'browser_begin',...fields});
+ await backend.passkey(identity,{op:'browser_finish',...fields,assertion:await f.key.assert(String(options.challenge))});
+ assert.equal(((await backend.passkey(identity,{op:'browser_list'})).browsers as unknown[]).length,1);
+ for(const signedInAt of [undefined,Date.now()-600001,Date.now()+60000])await assert.rejects(backend.passkey({...identity,signedInAt},{op:'recovery_start'}),/fresh sign-in/);
+ const started=Date.now(),result=await backend.passkey({...identity,signedInAt:started},{op:'recovery_start'});
+ assert.ok(Number(result.readyAt)>=started+259200000);
+ assert.deepEqual((await backend.passkey(identity,{op:'list'})).passkeys,[]);
+ assert.deepEqual((await backend.passkey(identity,{op:'browser_list'})).browsers,[]);
+ const agents=(await backend.execute('alice',{tool:'agent_list',input:{}},identity.clientId)).agents as {agentId:string;live:boolean;capabilities:unknown[]}[];
+ assert.equal(agents.find(a=>a.agentId===agent.agentId)!.live,false);
+ assert.deepEqual(agents.find(a=>a.agentId===agent.agentId)!.capabilities,[]);
+ await assert.rejects(backend.passkey(identity,{op:'browser_check',browserId}));
+ await assert.rejects(backend.execute('alice',{tool:'agent_capabilities',input:{agentId:String(agent.agentId)}},identity.clientId));
+});

@@ -2,6 +2,14 @@
 
 What shipped in the Wayfinding rewrite, newest first. Each entry lists the commits, and the live deploy where there was one. The proof of concept runs at https://poc.wayfinding.support. The reasons behind these changes are in `docs/decisions.md`.
 
+## Unreleased: live-pass recovery and sealed requests
+
+- Fresh sign-ins reach the account recovery check through the Durable Object adapter. Starting recovery removes browser and agent connections immediately.
+- Owners can prepare a browser connection for pending task requests, then read and approve or decline them. Request contents and decision reasons stay encrypted; the old plaintext decision form is unavailable in sealed mode.
+- Journey overviews show routing metadata while locked. The browser connection loads private content after unlock and audience admission.
+
+Source only; not deployed.
+
 ## Unreleased: browser encryption device
 
 Source only; no deployment, reset or migration.
