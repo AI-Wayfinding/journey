@@ -4,6 +4,7 @@ import * as z from 'zod';
 import { MemoryBackend } from '../src/backend.ts';
 import { parseCommand } from '../src/commands.ts';
 import { testPasskeys, setAgentCard } from './helpers.ts';
+import { installTestAccountIdentity, resignDeviceRegistration } from './account-fixture.ts';
 import { Refused } from '../src/errors.ts';
 const refused = (message: string) => (error: unknown) => { assert.ok(error instanceof Refused); assert.equal(error.message, message); return true; };
 
@@ -11,9 +12,19 @@ const storageKey = (...parts: (string | number)[]) => JSON.stringify(['sealed-v1
 async function fixture() {
   const backend = new MemoryBackend({ async get(s) { return { name: s, email: `${s}@example.test` }; } }, Date.now, testPasskeys, true);
   const personId = String((await backend.execute('alice', parseCommand('account_read', {}))).personId);
+  const account = await installTestAccountIdentity(backend, 'alice');
+  const agents = new Map<string,string>();
+  const connections=new Map<string,Pick<Awaited<ReturnType<typeof account.device>>,'root'|'credential'>>();
   const journeyId = String((await backend.sealedExecute('alice', 'journey_create', { policy: 'open', defaultRole: 'write' })).journeyId);
   const call = (tool: string, input: Record<string, unknown>, clientId?: string, subject = 'alice') => backend.sealedExecute(subject, tool, { journeyId, ...input }, clientId);
-  const register = async (deviceId: string, clientId?: string, subject = 'alice') => { await backend.sealedExecute(subject, 'sealed_device_register', { deviceId, verificationKey: Buffer.alloc(32, 7).toString('base64'), data: 'e30=' }, clientId); };
+  const register = async (deviceId: string, clientId?: string) => {
+    const agentId=clientId?agents.get(clientId):undefined;
+    if(clientId&&!agentId)throw new Error('Fixture agent must be bound before registration');
+    const key=clientId??'person';let connection=connections.get(key),registration;
+    if(connection)registration=await resignDeviceRegistration(connection.root,{deviceId,verificationKey:connection.root.publicKey,data:'e30=',credential:connection.credential});
+    else {const signed=await account.device({deviceId,data:'e30=',...(clientId&&agentId?{clientId,agentId}:{})});connection=signed;connections.set(key,signed);registration=signed.registration;}
+    await backend.sealedExecute('alice', 'sealed_device_register', registration, clientId);
+  };
   const commit = async (deviceId: string, action: string, targetDeviceId?: string, clientId?: string, subject = 'alice') => {
     const view = await call('sealed_group', { groupId: journeyId }, clientId, subject);
     return call('sealed_group_commit', { groupId: journeyId, deviceId, action, targetDeviceId, expectedEpoch: view.epoch, expectedSequence: view.sequence, data: 'e30=' }, clientId, subject);
@@ -25,6 +36,7 @@ async function fixture() {
     const identity = { subject: 'alice', clientId: 'test-console' }, change = { kind: 'bind' as const, clientId, agentId };
     const { challenge } = await backend.beginAuthorization(identity, change);
     await backend.completeAuthorization(identity, change, { id: 'synthetic', rawId: 'synthetic', type: 'public-key', clientExtensionResults: {}, response: { clientDataJSON: challenge, authenticatorData: '', signature: 'test-valid' } });
+    agents.set(clientId,agentId);
     return agentId;
   };
   const publish = async (deviceId: string, clientId?: string) => {
@@ -50,6 +62,28 @@ test('sealed policy: agent device may remove only itself, never owner or peer de
   await f.commit('owner-second', 'remove', 'peer-agent');
   const view = await f.call('sealed_group', { groupId: f.journeyId });
   assert.deepEqual(z.array(z.object({ deviceId: z.string() })).parse(view.devices).map(d => d.deviceId).sort(), ['owner', 'owner-second', 'same-agent-second']);
+});
+
+test('sealed policy: audience members remove ineligible leaves but never another eligible member', async () => {
+  const f = await fixture();
+  await f.agent('agent'); await f.register('agent-device', 'agent'); await f.commit('owner', 'add', 'agent-device');
+  const bob = await installTestAccountIdentity(f.backend, 'bob');
+  await f.backend.execute('bob', parseCommand('journey_join', { journeyId: f.journeyId }));
+  const device = await bob.device({ deviceId: 'bob-device', data: 'e30=' });
+  await f.backend.sealedExecute('bob', 'sealed_device_register', device.registration);
+  await f.commit('owner', 'add', 'bob-device');
+  for (const [caller, client] of [['owner', undefined], ['agent-device', 'agent']] as const) {
+    const before = await f.call('sealed_group', { groupId: f.journeyId });
+    await assert.rejects(f.commit(caller, 'remove', 'bob-device', client), refused('Only own devices or server-ineligible devices may be removed'));
+    assert.deepEqual(await f.call('sealed_group', { groupId: f.journeyId }), before);
+  }
+  await f.backend.execute('alice', parseCommand('journey_remove', { journeyId: f.journeyId, memberId: bob.account.personId }));
+  const view = await f.call('sealed_group', { groupId: f.journeyId });
+  assert.deepEqual(view.remove, ['bob-device']);
+  await f.commit('agent-device', 'remove', 'bob-device', 'agent');
+  const after = await f.call('sealed_group', { groupId: f.journeyId });
+  assert.deepEqual(after.remove, []);
+  assert.deepEqual(z.array(z.object({ deviceId: z.string() })).parse(after.devices).map(d => d.deviceId).sort(), ['agent-device', 'owner']);
 });
 
 test('sealed policy: person devices and agents share one update budget below the group cap', async () => {

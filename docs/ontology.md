@@ -32,6 +32,11 @@ Every person in a journey is a **member** with a role: **read** (can look and co
 
 People join a journey by asking (a guide admits them), by invitation, or freely if the guide made the journey open.
 Trusted connections join an encrypted audience automatically when eligible. Any online member's connection can admit them; guides do not approve individual connections. A person may remove only their own connections directly. A guide removes a member from the journey, after which clients remove all that member's ineligible connections before sharing new content.
+An **account key** is the person's browser-held signing key. It endorses each browser or agent **connection credential**; a connection signs its audience-specific MLS key packages. A passkey unlocks the vault but is not this signing key. The recovery code can unwrap the same account key on a new browser. A new connection without that code needs a signature from an already trusted browser.
+
+A **safety number** is six groups of digits derived from the account public key. Members compare it outside Wayfinding. Clients remember the first key they see and refuse a changed key until the new number is compared and accepted. Recovery without the code changes the account key and safety number; recovery with the code does not.
+
+The **journey identity log** records member safety-number changes and connection additions/removals. A verified signature identifies the signing account key, not whether the server supplied every entry. Recovery without a surviving signing key appears as an unsigned server report.
 
 ## Work inside a journey
 

@@ -22,11 +22,16 @@ export async function accountSecurity(account: Account, _accounts: Account[], st
  if(operation.op==='recovery_start') {
   if(identity.signedInAt===undefined||!Number.isFinite(identity.signedInAt)||identity.signedInAt>now||now-identity.signedInAt>600000)throw new Refused('A fresh sign-in is required to start recovery');
   if(account.recovery?.readyAt!==undefined)return {readyAt:account.recovery.readyAt};
+  const removals=account.accountKey?(account.connections??[]).filter(c=>!c.revokedAt).length:0;
+  // Reserve the new account-key event and its first signed browser connection before revoking anything.
+  if((account.identityEvents?.length??0)+removals+2>4096)throw new Refused('Account identity log capacity reached; recovery was not started');
   for(const [i,agent] of account.agents.entries()) {
    agent.live=false;agent.card=stepCard(agent.card,'withdraw');
    account.bindings=bindingRule.step(account.bindings,{op:2,client:0,agent:i+2,personAsserted:0,agentIsOwnLive:0,personLive:1,boundAgentLive:0});
   }
   for(const [i] of account.identities.entries())if(cell(account.group,'Members',i+2)!==0)account.group=personalGroupRule(1).step(account.group,{op:1,subject:i+2,kind:0,belongsTo:1});
+  for(const connection of account.connections??[])if(!connection.revokedAt){connection.revokedAt=now;const key=account.accountKey;if(key)(account.identityEvents??=[]).push({personId:account.personId,generation:key.identity.generation,accountPublicKey:key.identity.publicKey,action:'connection-removed',connectionId:connection.claim.connectionId,at:now});}
+  account.connections=[]; // Old-generation credentials cannot be reused; retain their history in the journal.
   account.browsers=[];account.passkeys=[];account.assertions=[];account.onboarding={complete:false};
   delete account.descriptor; // No surviving keys: a fresh P workspace, never a ratchet rollback.
   account.recovery={generation:(account.recovery?.generation??0)+1,startedAt:now,readyAt:now+259200000};

@@ -12,6 +12,17 @@ function describe(parent:HTMLElement,value:unknown,depth=0):void {
  if(typeof value==='object'){const list=el('dl');for(const [key,item]of Object.entries(value)){if(['content','sealed','descriptor','privateDefinition','publication','publications','private','contexts','devices','definition','envelope','ciphertext','hash','iv'].includes(key)||/^(?:recordId|groupId|journeyId|deviceId|agentId|personId|.*Revision)$/.test(key))continue;const detail=el('dd');describe(detail,item,depth+1);if(detail.childNodes.length)list.append(el('dt',key),detail);}parent.append(list);return;}
  parent.append(document.createTextNode(String(value)));
 }
+async function journeyIdentity(c:SealedClient,parent:HTMLElement,data:Record<string,unknown>,button:Button,refresh:()=>Promise<unknown>){
+ const panel=el('section');parent.append(panel);panel.append(el('h3','Member safety numbers'));
+ const identities=z.record(z.string(),z.record(z.string(),z.unknown())).parse(data.identities??{});
+ for(const [personId,identity]of Object.entries(identities)){
+  const member=rows(data.members).find(m=>String(m.personId??m.memberId)===personId),row=el('article'),number=String(identity.safetyNumber);panel.append(row);
+  row.append(el('h4',String(member?.name??personId)),el('code',number),el('p',identity.accountTrust==='changed'?'Safety number changed — compare outside Wayfinding before trusting.':identity.accountCompared===true?'Matches this browser’s compared account key.':'First seen or not compared in this browser. Compare outside Wayfinding.'));
+  const compared=input(row,'Safety number compared outside Wayfinding');button(row,'Trust compared safety number',async()=>{if(compared.value.trim()!==number)throw new Error('Compare the exact safety number outside Wayfinding');await c.trustAccountKey(personId,String(identity.publicKey),compared.value.trim());await refresh();});
+ }
+ const log=el('details');log.append(el('summary','Journey connection and safety-number log'));
+ for(const entry of rows(data.identityLog))log.append(el('p',`${new Date(Number(entry.at)).toISOString()} · ${String(entry.personId)} · ${String(entry.action)} · ${String(entry.connectionId??'Safety number change')} · ${entry.verification==='self-signed'?`Signed · account key ${String(entry.accountTrust)}`:'Server report — unsigned'}`));panel.append(log);
+}
 async function renderTaskRequests(c:SealedClient,work:HTMLElement,agentId:string,button:Button,isActive:()=>boolean):Promise<void>{
  const section=el('section');work.append(section);
  const refresh=async()=>{
@@ -20,6 +31,10 @@ async function renderTaskRequests(c:SealedClient,work:HTMLElement,agentId:string
   for(const journey of rows(journeys.journeys).filter(j=>!j.pending)){
    const journeyId=String(journey.journeyId),view=await c.call('journey_read',{journeyId});if(!isActive())return;
    if(!rows(view.members).some(m=>m.memberId===agentId))continue;
+   if(Object.values(z.record(z.string(),z.record(z.string(),z.unknown())).parse(view.identities??{})).some(i=>i.accountTrust==='changed')){
+    const entry=el('article');entry.append(el('h3',`Journey ${journeyId}: safety number comparison required`));
+    await journeyIdentity(c,entry,view,button,refresh);entries.push(entry);continue;
+   }
    const journeyAdmission=await c.enrollGroup(journeyId);if(!isActive())return;
    for(const pending of rows(view.taskPreparations).filter(t=>t.agentId===agentId)){
     const entry=el('article');entry.append(el('h3',String(pending.taskId)),el('p','This request needs your browser connection before its contents can be sent.'));
@@ -58,10 +73,14 @@ export async function renderPrivateWorkspace(c:SealedClient,work:HTMLElement,but
  if(agentRoute){const agentId=decodeURIComponent(agentRoute[1]!),own=rows(agents.agents).find(a=>a.agentId===agentId);if(own){work.append(el('h2','Private connection details'));const name=input(work,'Agent name',String(own.name??'')),app=input(work,'App name',String(own.clientName??''));button(work,'Save connection details',async()=>{await c.call('agent_descriptor_set',{agentId,name:name.value,clientName:app.value});});await renderTaskRequests(c,work,agentId,button,isActive);}return;}
  const route=/^\/console\/journeys\/([^/]+)(?:\/(\w+)(?:\/([^/]+))?)?$/.exec(location.pathname);if(!route)return;
  const journeyId=decodeURIComponent(route[1]!),kind=route[2],item=route[3]?decodeURIComponent(route[3]):undefined;
+ const view=await c.call('journey_read',{journeyId});if(!isActive())return;
+ if(Object.values(z.record(z.string(),z.record(z.string(),z.unknown())).parse(view.identities??{})).some(i=>i.accountTrust==='changed')){
+  await journeyIdentity(c,work,view,button,()=>renderPrivateWorkspace(c,work,button,isActive));return;
+ }
  const admission=await c.enrollGroup(journeyId);if(!isActive())return;
  if(!admission.admitted){work.append(el('p','Connection prepared. Waiting for an online journey connection to share private history. Unlock again after it synchronizes.'));return;}
  const result=el('section');work.append(el('h2','Private workspace'),result);
- const show=async(tool:string,params:Record<string,unknown>)=>{const data=await c.call(tool,params);if(!isActive())return data;result.replaceChildren();describe(result,data);return data;};
+ const show=async(tool:string,params:Record<string,unknown>)=>{const data=await c.call(tool,params);if(!isActive())return data;result.replaceChildren();if(tool==='journey_read'){await journeyIdentity(c,result,data,button,()=>show(tool,params));const {identities:_identities,identityLog:_log,...rest}=data;describe(result,rest);}else describe(result,data);return data;};
  if(kind==='topics'&&item){await show('topic_read',{topicId:item});const text=input(work,'Reply','',true);button(work,'Post reply',async()=>{await c.call('post_create',{topicId:item,body:text.value});text.value='';await show('topic_read',{topicId:item});});return;}
  if(kind==='rounds'&&item){await show('round_read',{roundId:item});return;}
  if(kind==='library'&&item){await show('library_get',{itemId:item});return;}

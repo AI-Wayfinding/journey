@@ -86,7 +86,7 @@ export class Backend implements CoordinationBackend {
     }
     if(tool==='offer_search'){const result=await this.executeCommand(subject,parseCommand('offer_search',{journeyId:named.journeyId}),clientId);return {journeyId:named.journeyId,offers:z.array(z.record(z.string(),z.unknown())).parse(result.offers).map(o=>({id:o.id,agentId:o.agentId,owner:o.owner,version:o.version,contentRevision:o.contentRevision,status:o.status,admission:o.admission,publication:z.record(z.string(),z.unknown()).parse(o.publications??{})[String(named.journeyId)]}))};}
     if(tool==='journey_create'){requireAccountCapability(actor,'journey.create');return this.executeCommand(subject,parseCommand('journey_create',{name:SEALED_NOTICE,policy:named.policy,defaultRole:named.defaultRole}),clientId);}
-    if(tool==='sealed_device_register'||tool==='sealed_device_binding'){if(!this.accounts.sealedDevice)throw new Refused('Device binding storage unavailable');return this.accounts.sealedDevice(account.personId,clientId,tool,named);}
+    if(tool==='sealed_device_register'||tool==='sealed_device_binding'||tool==='sealed_connection_request'){if(!this.accounts.sealedDevice)throw new Refused('Device binding storage unavailable');return this.accounts.sealedDevice(account.personId,clientId,tool,named);}
     const journeyId=z.string().min(1).max(200).parse(named.journeyId),port=this.journey(journeyId);if(!port.sealed||!this.accounts.deviceBinding||!this.accounts.reserveDevice)throw new Refused('Sealed storage unavailable');
     const result=await port.sealed(account.personId,tool,named,actor,{binding:id=>this.accounts.deviceBinding!(id),reserve:(id,group)=>this.accounts.reserveDevice!(id,group)});const revocation=await this.recoverWrites(account.personId);if(revocation.state==='pending')result.revocation={state:'pending',retryAt:revocation.retryAt};return result;
   }
@@ -182,7 +182,7 @@ export class Backend implements CoordinationBackend {
       pending: pending.map(p => ({ ...p, name: names[p.personId] ?? 'Wayfinding member' })) };
   }
   private accountView(account: Account): ToolData {
-    return { personId: account.personId, personalGroupId: `personal_${account.personId}`, subject: account.subject, name: account.name, nickname: account.nickname, email: account.email,descriptor:account.descriptor, ...(this.sealedMode?{contentFormat:'sealed-v1'}:{}) };
+    return { personId: account.personId, personalGroupId: `personal_${account.personId}`, subject: account.subject, name: account.name, nickname: account.nickname, email: account.email,descriptor:account.descriptor,accountKey:account.accountKey, ...(this.sealedMode?{contentFormat:'sealed-v1'}:{}) };
   }
   async execute(subject: string, supplied: Command, clientId = 'trusted-host'): Promise<ToolData> {
     if(this.sealedMode&&(Object.hasOwn(sealedInputs,supplied.tool)||/^(artifact_|mls_|library_|topic_|post_|conversation_|board_|round_|interview_|project_|task_)/.test(supplied.tool)))throw new Refused(SEALED_NOTICE+'; use the sealed client contract');

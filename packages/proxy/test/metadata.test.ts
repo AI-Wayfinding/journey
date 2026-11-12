@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {Client,StreamableHTTPClientTransport} from '@modelcontextprotocol/client';
 import {MemoryBackend} from '../../mcp/src/backend.ts';
 import {app,bridge,keyPair,RESOURCE,token,testPasskeys} from '../../mcp/test/helpers.ts';
-import {SealedClient} from '../src/sealed-client.ts';
+import {openTestSealed} from './account-fixture.ts';
 import {scalar,cell} from '../../mcp/src/rules.ts';
 
 async function fixture(t:TestContext,sealed:boolean){
@@ -12,7 +12,7 @@ async function fixture(t:TestContext,sealed:boolean){
   const remote=new Client({name:'metadata-test',version:'1'});await remote.connect(new StreamableHTTPClientTransport(RESOURCE,{fetch:bridge(app(signer,backend)),requestInit:{headers:{authorization:`Bearer ${await token(signer,{sub:subject})}`}}}));t.after(()=>remote.close());
   const call=async(name:string,input:Record<string,unknown>={})=>{const r=await remote.callTool({name,arguments:input});if(r.isError)throw new Error(JSON.stringify(r.content));return r.structuredContent as Record<string,unknown>;};
   const personId=String((await call('account_read')).personId),files=new Map<string,string>();
-  const client=sealed?await SealedClient.open(remote,{async read(k){return files.get(k)},async write(k,v){files.set(k,v)}},personId):undefined;
+  const client=sealed?(await openTestSealed(backend,remote,{async read(k){return files.get(k)},async write(k,v){files.set(k,v)}},subject,personId)).client:undefined;
   return {personId,client,call:client?(name:string,input:Record<string,unknown>={})=>client.call(name,input):call};
  };
  const a=await connect('alice'),b=await connect('bob'),journeyId=String((await a.call('journey_create',{name:'Metadata contract',policy:'open',defaultRole:'write'})).journeyId);

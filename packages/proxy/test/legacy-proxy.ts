@@ -157,6 +157,7 @@ export class WayfindingProxy {
   const entries=live.filter(a=>!a.deleted&&(revisionKey(g.saved,a.artifactId,a.version)??g.saved.keys[a.artifactId])).map(artifact=>({artifact,key:(revisionKey(g.saved,artifact.artifactId,artifact.version)??g.saved.keys[artifact.artifactId])!}));
   await this.post(groupId,g,'application',await g.mls.seal(json({action:'keys',entries,members:g.saved.members})));
  }
+ trustAccountKey(personId:string,publicKey:string,expectedSafetyNumber:string):Promise<void>{return this.serial(async()=>{if(!this.sealed)throw new Error('Account trust is unavailable in legacy mode');await this.sealed.trustAccountKey(personId,publicKey,expectedSafetyNumber);});}
  exportGroup(groupId:string):Promise<string>{return this.serial(()=>this.sealed?this.sealed.exportGroup(groupId):this.group(groupId).mls.exportState().then(encode));}
  async coordinationTools(){return this.sealed?this.sealed.tools():(await this.remote.listTools()).tools.filter(t=>!t.name.startsWith('artifact_')&&!t.name.startsWith('mls_'));}
  call(name:string,input:Record<string,unknown>={}):Promise<Record<string,unknown>>{return this.serial(async()=>{

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { AccountsHost } from '../src/accounts.ts';
 import { MemoryStorage } from '../src/storage.ts';
 import { authenticator } from './console-authenticator.ts';
+import { generateSigningKey, signIdentityEvent, signConnection, signValue, connectionClaim, signPackage } from '../../shared/account-identity.ts';
 
 const identity = {subject:'alice',clientId:'https://poc.wayfinding.support/console/client.json'};
 async function fixture() {
@@ -119,7 +120,14 @@ test('recovery: real DO adapters preserve sign-in freshness and revoke connectio
   JOURNEYS:{getByName(){throw Error('No journey expected');}},
  },true);
  const agent=await backend.sealedExecute('alice','agent_create',{},identity.clientId);
- const browserId=crypto.randomUUID(),device={deviceId:`device_${crypto.randomUUID()}`,verificationKey:Buffer.alloc(32,1).toString('base64'),data:Buffer.from('synthetic key package').toString('base64')};
+ const account=await f.host().lookup('alice');assert.ok(account);
+ const accountKey=await generateSigningKey(),root=await generateSigningKey(),generation=Number((await backend.passkey(identity,{op:'identity_read'})).generation);
+ const record={identity:{publicKey:accountKey.publicKey,generation},recoveryWrap:{format:'wayfinding-browser-vault-1' as const,iv:'AA==',ciphertext:'AA=='}};
+ await backend.passkey(identity,{op:'identity_set',record,event:await signIdentityEvent(accountKey.privateKey,{personId:account.personId,accountPublicKey:accountKey.publicKey,generation,action:'account-key-set',at:Date.now()})});
+ const claim={personId:account.personId,connectionId:`connection-${crypto.randomUUID()}`,verificationKey:root.publicKey,generation,accountPublicKey:accountKey.publicKey};
+ const credential=await signConnection(accountKey.privateKey,claim),event=await signIdentityEvent(accountKey.privateKey,{personId:account.personId,accountPublicKey:accountKey.publicKey,generation,connectionId:claim.connectionId,action:'connection-added',at:Date.now()});
+ await backend.sealedExecute('alice','sealed_connection_request',{claim,proof:await signValue(root.privateKey,'wayfinding-connection-request-1',connectionClaim(claim)),certificate:credential,event},identity.clientId);
+ const browserId=crypto.randomUUID(),body={deviceId:`device_${crypto.randomUUID()}`,verificationKey:root.publicKey,data:Buffer.from('synthetic key package').toString('base64'),credential},device={...body,packageSignature:await signPackage(root.privateKey,body)};
  const fields={browserId,credentialId:f.key.id,device},options=await backend.passkey(identity,{op:'browser_begin',...fields});
  await backend.passkey(identity,{op:'browser_finish',...fields,assertion:await f.key.assert(String(options.challenge))});
  assert.equal(((await backend.passkey(identity,{op:'browser_list'})).browsers as unknown[]).length,1);

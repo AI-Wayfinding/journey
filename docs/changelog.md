@@ -2,6 +2,16 @@
 
 What shipped in the Wayfinding rewrite, newest first. Each entry lists the commits, and the live deploy where there was one. The proof of concept runs at https://poc.wayfinding.support. The reasons behind these changes are in `docs/decisions.md`.
 
+## Unreleased: account-signed connections
+
+Source only; no push, deployment or data migration.
+
+- One browser-held Ed25519 account key endorses browser and agent connections. Clients refuse unsigned or substituted MLS packages before admission or history sharing.
+- Profile and journey member views show safety numbers. Changed account keys need a fresh comparison before a client trusts them.
+- Journeys retain signed connection and safety-number changes. Unsigned recovery reports are labelled; signatures do not prove the server supplied a complete log.
+- Recovery with the code preserves the account key. Recovery without it replaces the key after the existing 72-hour wait and requires new agent connections.
+- Old unsigned connections require re-enrolment. Confidential data remains out of scope.
+
 ## Unreleased: live-pass recovery and sealed requests
 
 - Fresh sign-ins reach the account recovery check through the Durable Object adapter. Starting recovery removes browser and agent connections immediately.

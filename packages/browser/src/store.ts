@@ -47,11 +47,22 @@ export class BrowserStore implements LocalStore{
  }
  async read(name:string){if(!this.key)throw new Error('Device locked');return this.values[name];}
  async write(name:string,value:string){
-  if(!this.key)throw new Error('Device locked');if(!['sealed-state','content-mode'].includes(name))throw new Error('Unknown browser storage record');
+  if(!this.key)throw new Error('Device locked');if(!['sealed-state','content-mode','account-key','connection-identity','account-trust'].includes(name))throw new Error('Unknown browser storage record');
   const commit=this.pending.then(async()=>{
    if(!this.key)throw new Error('Device locked');
    const values={...this.values,[name]:value},record={...this.record,state:await wrap(JSON.stringify(values),this.key,this.record.context)};
    await saveVault(record);this.record=record;if(this.key)this.values=values;
+  });
+  this.pending=commit.catch(()=>{});return commit;
+ }
+ /** Discard only a never-enrolled request, while still holding its writer fence. */
+ async discardPending(){
+  const commit=this.pending.then(async()=>{
+   if(!this.key)throw new Error('Device locked');
+   let root:{certificate?:unknown};try{root=z.object({certificate:z.unknown().optional()}).parse(JSON.parse(this.values['connection-identity']??'null'));}catch{throw new Error('Invalid pending connection record; refusing discard');}
+   if(root.certificate||this.values['sealed-state'])throw new Error('Only a pending connection can be discarded');
+   const db=await database();try{await new Promise<void>((resolve,reject)=>{const tx=db.transaction('vaults','readwrite',{durability:'strict'});tx.objectStore('vaults').delete(recordKey(this.record.context.origin,this.record.context.personId));tx.oncomplete=()=>resolve();tx.onerror=tx.onabort=()=>reject(new Error('Cannot discard pending connection'));});}finally{db.close();}
+   this.lock();
   });
   this.pending=commit.catch(()=>{});return commit;
  }

@@ -9,6 +9,7 @@ import {app,bridge,keyPair,RESOURCE,token,testPasskeys} from '../../mcp/test/hel
 import {FileStore} from '../src/file-store.ts';
 import {AuthKitProvider} from '../src/oauth.ts';
 import {WayfindingProxy} from '../src/proxy.ts';
+import {openTestProxy} from './account-fixture.ts';
 
 test('proxy: sealed bootstrap with the real FileStore persists and reopens sealed state',async t=>{
  const directory=await mkdtemp(join(tmpdir(),'wayfinding-sealed-bootstrap-'));
@@ -22,12 +23,12 @@ test('proxy: sealed bootstrap with the real FileStore persists and reopens seale
  try{
   // These are the same storage-backed bootstrap calls used by cli.ts after sign-in.
   await AuthKitProvider.open(store,new URL('http://127.0.0.1:8717/callback'),async()=>{});
-  const proxy=await WayfindingProxy.open(remote,store);
+  const opened=await openTestProxy(backend,remote,store,'alice'),proxy=opened.proxy;
   const journey=await proxy.call('journey_create',{name:'Synthetic persisted journey',policy:'open',defaultRole:'write'});
   const journeyId=String(journey.journeyId);
   assert.equal((await stat(join(directory,'sealed-state.json'))).mode&0o777,0o600);
   await store.close();store=await FileStore.open(directory);
-  const reopened=await WayfindingProxy.open(remote,store);
+  const reopened=await WayfindingProxy.open(opened.remote,store);
   assert.equal((await reopened.call('journey_read',{journeyId})).name,'Synthetic persisted journey');
  }finally{await store.close();}
 });

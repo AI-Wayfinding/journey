@@ -1,7 +1,7 @@
 import * as z from 'zod';
 import {id,utf8} from './codec.ts';
 import type {LocalStore} from './store.ts';
-import {SealedClient,type SealedRemote} from './sealed-client.ts';
+import {SealedClient,type SealedClientOptions,type SealedRemote} from './sealed-client.ts';
 import {sealedRemoteCall} from './mode.ts';
 import {PartialMoveFailure} from './errors.ts';
 
@@ -14,9 +14,9 @@ export class WayfindingProxy {
  private tail:Promise<unknown>=Promise.resolve();
  private sealed:SealedClient;readonly personId:string;readonly personalGroupId:string;
  private constructor(sealed:SealedClient,personId:string,personalGroupId:string){this.sealed=sealed;this.personId=personId;this.personalGroupId=personalGroupId;}
- static async open(remote:SealedRemote,store:LocalStore):Promise<WayfindingProxy>{
+ static async open(remote:SealedRemote,store:LocalStore,options:SealedClientOptions={}):Promise<WayfindingProxy>{
   const account=z.object({personId:id,personalGroupId:id}).parse(await sealedRemoteCall(remote,'account_read',{}));
-  return new WayfindingProxy(await SealedClient.open(remote,store,account.personId),account.personId,account.personalGroupId);
+  return new WayfindingProxy(await SealedClient.open(remote,store,account.personId,options),account.personId,account.personalGroupId);
  }
  private serial<T>(op:()=>Promise<T>):Promise<T>{const result=this.tail.then(op);this.tail=result.catch(()=>{});return result;}
  createGroup(groupId:string){return this.serial(()=>this.sealed.createGroup(groupId));}
@@ -24,6 +24,7 @@ export class WayfindingProxy {
  addMember(groupId:string,personId:string,deviceId:string){return this.serial(()=>this.sealed.addMember(groupId,personId,deviceId));}
  removeMember(groupId:string,personId:string){return this.serial(()=>this.sealed.removeMember(groupId,personId));}
  sync(groupId:string){return this.serial(()=>this.sealed.sync(groupId));}
+ trustAccountKey(personId:string,publicKey:string,expectedSafetyNumber:string){return this.serial(()=>this.sealed.trustAccountKey(personId,publicKey,expectedSafetyNumber));}
  exportGroup(groupId:string){return this.serial(()=>this.sealed.exportGroup(groupId));}
  coordinationTools(){return this.sealed.tools();}
  call(name:string,input:Record<string,unknown>={}){return this.serial(()=>this.sealed.call(name,input));}
