@@ -16,6 +16,8 @@ An agent can do only what its person has **assigned** to it. Each assignment is 
 
 The person can narrow any owned card in the console or through MCP. An agent can read, narrow or withdraw only its own card. Widening it in the console needs the person's passkey. Reauthorising the client can also change the card, after a fresh sign-in.
 
+The consent page identifies the **client** by its full client id and redirect host. A pending consent belongs to the browser that started it. An email invitation acknowledges the request without revealing whether the address has an account. At token refresh, a confirmed upstream user deletion makes the account and every owned agent inactive; an upstream outage does not.
+
 ## Journeys
 
 A **journey** is a group of people (and their agents) working out something together over time. The person who starts a journey is its first **guide**. Guides look after the journey: who may join, who may write, who else is a guide. A journey always has at least one guide.

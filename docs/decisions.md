@@ -269,16 +269,42 @@ Dan's brief for v2 was to write the spec, build what seems best, and refine late
   - Account name/nickname/email and device/passkey labels use P, as do card name/client name. Each revision may explicitly publish nickname-only profile and name/client-name card copies to selected J audiences. Current alias selection uses authenticated pointers; withdrawal cannot erase old ciphertext. Descriptive edits never grant capabilities.
   - AuthKit profile fields are transient before device enrollment. Accounts stores opaque id labels and an HMAC of trimmed, lower-case authenticated email for invitations; its server-held key does not hide email from the live server. Editing encrypted profile email does not change authenticated routing. OAuth persists only the fixed `MCP client` label; console/passkey authority controls use ids and refuse raw descriptive edits. Unsealed account state is refused without migration or deletion. P uses the proxy's device-local personal-workspace journey; creating that workspace requires `journey.create` as well as normal action authority and read/device keys. No bootstrap grant or key admission is implicit; authenticated descriptor pointers provide cross-device workspace discovery.
 
+### 36. Agents manage only their own cards
+
+- **Decided by:** hardening task, security finding F14.
+- **What:** a bound agent can list and read only its own card, and can narrow or withdraw only that card. The person can still manage every owned agent.
+
 ### 37. Standing offer decisions apply to one journey
 
 - **Decided by:** hardening task, security finding F13.
 - **What:** standing decisions affect only the journey where the task was decided. Agent-created allows remain bounded by the owner’s admission ceiling, including later ceiling reductions. Manual approval still admits only the selected task.
 
 
-### 36. Agents manage only their own cards
+### 38. Invitations do not reveal account existence
 
-- **Decided by:** hardening task, security finding F14.
-- **What:** a bound agent can list and read only its own card, and can narrow or withdraw only that card. The person can still manage every owned agent.
+- Email invitations return the same acknowledgement for unknown emails, existing accounts and repeat invitations. Only guides may send them. Joining still proves that the invitee has an account and a pending invitation.
+- Every journey RPC checks the account directory before allocating a Durable Object for its id. Device-binding lookup scope remains open because peer and historical signature verification need a shared client/server contract.
+
+### 39. Anonymous sign-in cannot consume a global login budget
+
+- Pre-authentication login state and PKCE verifier live in the signed, expiring, HttpOnly cookie. Only a successful callback leaves a short-lived replay tombstone on the server.
+- Login, client registration, authorization and token routes use Cloudflare's per-IP limiter. Production refuses these routes if the limiter or trusted IP is unavailable. There is no shared anonymous client or pending-request count cap. Unused DCR clients expire after one day.
+
+### 40. Consent identifies and binds the requesting client
+
+- Consent shows the full client id and redirect host, including when the client display name is sealed. The initiating browser's HttpOnly cookie must match the saved request on every consent and passkey operation.
+- OAuth authorization responses include the issuer. Replaying a correctly bound, already-used code revokes its token family. Client metadata is cached for five minutes; errors are not cached. HTTPS responses carry HSTS.
+
+### 41. Account storage is partitioned without deleting the old generation
+
+- `AccountsPartitionedV1` stores separate account, hashed-token, client, request and permit rows. Delta writes and the write-authority fence share one transaction. Access-token verification reads its token, account and rule metadata without rewriting them.
+- Token and unresolved write-permit budgets apply per account. Other account operations still assemble the tables; this is not per-account Durable Object sharding.
+- The new class uses a fresh namespace. The old account classes and their data remain. Switching bindings is not a data migration or deletion, and requires the normal deployment gate.
+
+### 42. Refresh checks upstream account liveness
+
+- Refresh verifies that the WorkOS user still exists before rotating credentials. Only a confirmed upstream 404 tombstones the account; an outage returns `temporarily_unavailable` without consuming the refresh token.
+- Tombstoning withdraws every owned agent and prevents account resurrection. Prompt webhook offboarding is not implemented yet; a signed user-deleted webhook is still required before this finding is complete.
 
 ## Open
 
