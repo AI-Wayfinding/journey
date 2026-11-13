@@ -37,3 +37,24 @@ test('recovery HTTP: all registration endpoints need a sign-in after the uncance
   const r=await f.send(path,{});assert.equal(r.status,303,path);assert.equal(r.headers.get('location'),'/console/login');
  }
 });
+
+
+test('recovery HTTP: stale sign-in explains the refusal and offers sign-in again',async()=>{
+ const f=await fixture();f.advance(600001);
+ const response=await f.send('/console/recovery/start',{confirm:'REMOVE ALL CONNECTIONS'});
+ assert.equal(response.status,403);const text=await response.text();
+ assert.match(text,/A fresh sign-in is required to start recovery/);
+ assert.match(text,/<a href="\/console\/login">Sign in again<\/a>/);
+ assert.equal((await f.backend.passkey(identity,{op:'setup_status'})).readyAt,null);
+});
+
+test('console refusals expose only exact safe messages, never arbitrary exception text',async()=>{
+ const f=await fixture(),{Refused}=await import('../src/commands.ts'),original=f.backend.passkey.bind(f.backend);
+ for(const error of [new Error('A fresh sign-in is required to start recovery'),new Refused('A fresh sign-in is required to start recovery<script>SECRET</script>'),new Refused('SECRET')]){
+  f.backend.passkey=async(identity,operation)=>{if(operation.op==='recovery_start')throw error;return original(identity,operation);};
+  const response=await f.send('/console/recovery/start',{confirm:'REMOVE ALL CONNECTIONS'}),text=await response.text();
+  assert.equal(response.status,403);assert.match(text,/Console request refused/);assert.doesNotMatch(text,/SECRET|<script>|A fresh sign-in is required to start recovery/);
+ }
+ const response=await f.send('/console/recovery/start',{confirm:'wrong'});
+ assert.match(await response.text(),/Confirm removal of all connections/);
+});

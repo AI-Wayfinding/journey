@@ -1,4 +1,5 @@
 import * as z from 'zod';
+import {offerDefinitionSchema} from '../../mcp/src/offers.ts';
 import type {SealedClient} from '../../proxy/src/sealed-client.ts';
 const rows=(v:unknown)=>z.array(z.record(z.string(),z.unknown())).parse(v??[]);
 const el=<K extends keyof HTMLElementTagNameMap>(tag:K,text?:string)=>{const n=document.createElement(tag);if(text!==undefined)n.textContent=text;return n;};
@@ -34,7 +35,8 @@ async function renderOfferControls(c:SealedClient,work:HTMLElement,agentId:strin
    if(offer.status==='draft')button(row,'Publish offer',async()=>{
     // Journey switches can change after the private definition was encrypted.
     // Re-seal for precisely the currently enabled journeys; never enable a row here.
-    await c.call('offer_set',{agentId,expectedVersion:offer.version,offer:{id:offer.id,name:offer.name,description:offer.description,tags:offer.tags,examples:offer.examples,inputSchema:offer.inputSchema,outputSchema:offer.outputSchema,resource:offer.resource,instructions:offer.instructions,admission:offer.admission,journeySettings:offer.journeySettings}});
+    const definition=offerDefinitionSchema.parse(offer.definition);
+    await c.call('offer_set',{agentId,expectedVersion:offer.version,offer:{...definition,admission:offer.admission,journeySettings:offer.journeySettings}});
     await c.call('offer_publish',{agentId,offerId:offer.id});if(isActive())await refresh();
    });
   }

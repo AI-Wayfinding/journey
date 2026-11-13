@@ -181,8 +181,10 @@ test('a second browser reuses a synced passkey without registering a credential 
  const f=await flow();try{
   f.vault.lock();await f.load();f.click('Unlock with passkey');await until(()=>f.controls.textContent.includes('Check for approval'),'Pending view missing');
   f.click('Discard pending connection from this browser');await until(()=>f.controls.textContent.includes('Add passkey and trust this browser'),'Setup missing');
+  const typedCode=f.controls.all().find(e=>e.tagName==='label'&&e.ownText==='Recovery code (or leave blank to confirm an existing passkey)')!.children[0]!;typedCode.value=f.accountCode;
   f.click('Trust this browser with an existing passkey');
   await until(()=>f.controls.textContent.includes('Check for approval'),()=>`Existing synced passkey must create a pending connection without credentials.create: ${f.main.textContent}`);
+  assert.equal(typedCode.value,'');assert.ok(!f.controls.textContent.includes(f.accountCode),'An account recovery code must not be displayed as a connection unlock code');
   const record=await readVault(location.origin,f.signed.account.personId);assert.ok(record);
   const keys=await f.backend.passkey(f.identity,{op:'list'});assert.equal((keys.passkeys as unknown[]).length,1,'Connection-only enrollment must not add a passkey');assert.equal(record.credentialId,(keys.passkeys as {id:string}[])[0]!.id);
   const info=await f.post('/console/device/identity',{op:'identity_read'}),pending=(info.connections as {claim:unknown;certificate?:unknown}[]).at(-1)!;assert.equal(pending.certificate,undefined,'A passkey alone cannot sign the account connection');
@@ -191,6 +193,7 @@ test('a second browser reuses a synced passkey without registering a credential 
   const browsers=await f.backend.passkey(f.identity,{op:'browser_list'});assert.ok((browsers.browsers as {id:string;live:boolean;credentialId:string}[]).some(b=>b.id===record.context.deviceId&&b.live&&b.credentialId===record.credentialId));
   const unlockCode=f.controls.all().find(e=>e.tagName==='code')!.textContent,confirmation=f.controls.all().find(e=>e.tagName==='label'&&e.ownText==='Retype your connection unlock code')!.children[0]!;confirmation.value=unlockCode;f.click('I saved this connection unlock code');
   await until(()=>!f.controls.textContent.includes('I saved this connection unlock code'),'Confirmation did not finish');assert.match(f.controls.textContent,/Refresh private content/,'Confirmed connections retain manual synchronization');
+  assert.notEqual(unlockCode,f.accountCode,'Reusing a passkey must generate a separate connection unlock code');
  }finally{await f.stop();}
 });
 
@@ -206,6 +209,7 @@ test('pending browser keeps automatic refresh alive until an online trusted brow
   await first.enrollGroup(personal);await first.enrollGroup(journeyId);f.tick();await until(()=>f.main.textContent.includes('Waiting journey'),()=>`Admitted browser did not repaint: ${f.main.textContent}`);assert.doesNotMatch(f.controls.textContent,/Unlock with passkey/);
   // Reopen the retained record through the actual browser view, not a proxy client.
   const read=await first.call('journey_read',{journeyId}),artifact=(read.artifacts as {recordId:string}[])[0]!;location.pathname=`/console/journeys/${journeyId}/library/${artifact.recordId}`;f.click('Refresh private content');await until(()=>f.main.textContent.includes('New browser reads retained history'),()=>`History stayed unreadable: ${f.main.textContent}`);
+  await until(()=>f.controls.textContent.includes('Private content refreshed'),()=>`Admission refresh must settle: ${f.controls.textContent}`);assert.doesNotMatch(f.controls.textContent,/Waiting for another online connection/);
  }finally{await f.stop();}
 });
 

@@ -1,6 +1,7 @@
 import * as z from 'zod';
 import { base64url } from '../agents.ts';
 import { Refused } from '../commands.ts';
+import { consoleRefusal } from './refusal.ts';
 import type { ConsoleConfig } from './contract.ts';
 import { ConsoleSessions, SESSION_COOKIE, OAUTH_COOKIE, random, cookie } from './session.ts';
 const SIGNED_OUT_COOKIE = '__Host-wayfinding-signed-out';
@@ -255,7 +256,7 @@ export function createConsole(config: ConsoleConfig) {
     } catch (error) {
       // Log the refusal reason only (no tokens or cookies) so live sign-in failures can be diagnosed.
       console.warn('console refused', config.backend.sealedMode?'sealed request':new URL(request.url).pathname, config.backend.sealedMode?'refused':error instanceof Error ? `${error.name}: ${error.message}`.slice(0, 300) : 'unknown');
-      return new Response('<!doctype html><html lang="en"><meta charset="utf-8"><title>Console request refused</title><main><h1>Console request refused</h1><p>Check the form or <a href="/console/login">sign in to your console</a>.</p></main></html>', { status: 403, headers: { ...headers, 'Content-Type': 'text/html; charset=utf-8' } });
+      return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><title>Console request refused</title><main><h1>Console request refused</h1><p>${consoleRefusal(error)}</p><p><a href="/console/login">Sign in again</a>.</p></main></html>`, { status: 403, headers: { ...headers, 'Content-Type': 'text/html; charset=utf-8' } });
     }
   } };
 }

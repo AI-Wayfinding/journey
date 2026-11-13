@@ -9,6 +9,7 @@ import { page, escape, form, capabilityFields } from './console/pages.ts';
 import { agentConsent, authorizationRequest, clientMetadata, oauthId, type OAuthClient } from './oauth-contract.ts';
 import { assertionSchema } from './agents.ts';
 import { randomToken, tokenHash } from './oauth-store.ts';
+import {browserPath,browserIntegrity} from '../../browser/generated/bundle.ts';
 const CONSENT_COOKIE = '__Host-wayfinding-consent';
 function browserToken(request: Request): string | undefined {
   const values = (request.headers.get('cookie') ?? '').split(';').map(v => v.trim()).filter(v => v.startsWith(CONSENT_COOKIE + '='));
@@ -145,9 +146,18 @@ export function createOAuth(config: { backend?: CoordinationBackend; console?: C
         const finish = () => { const response = redirect(destination.href); response.headers.set('Referrer-Policy', 'no-referrer'); return response; };
         if (body) {
           if (body.decision === 'deny') { await backend.oauth({ op: 'deny', id }); destination.searchParams.set('error', 'access_denied'); return finish(); }
-          if (body.decision !== 'allow') throw new Refused('Consent decision required');
-          // Never copy posted subject, clientId, agentId or authority flags into storage.
+          // Names remain in the unlocked browser; staging never accepts descriptive plaintext.
+          const staged=backend.sealedMode&&request.headers.get('content-type')?.startsWith('application/json')&&!path.endsWith('/options');
           if (Object.keys(body).some(k => !['csrf', 'request', 'decision', 'name', 'capabilities', 'journeys', 'assertion'].includes(k))) throw new Refused('Unknown consent field');
+          if(staged&&body.decision==='finish'){
+            const clients=await backend.execute(session.subject,parseCommand('client_list',{}),session.clientId);
+            const bound=rows(clients.clients).find(c=>c.clientId===r.clientId&&c.bound);
+            if(!bound)throw new Refused('Authorization expired');
+            const code=await backend.oauth({op:'code',id,subject:session.subject,agentId:z.string().parse(bound.agentId)});
+            if(code.kind!=='code')throw new Refused('Authorization code refused');
+            destination.searchParams.set('code',code.code);return json({redirect:destination.href});
+          }
+          if(body.decision!=='allow'&&!(staged&&body.decision==='prepare'))throw new Refused('Consent decision required');
           const consent = agentConsent.parse({ name: body.name, capabilities: body.capabilities ?? [], journeys: body.journeys ?? [] });
           if (path.endsWith('/options')) {
             const result = await backend.oauth({ op: 'consent-options', subject: session.subject, id, consent });
@@ -156,6 +166,7 @@ export function createOAuth(config: { backend?: CoordinationBackend; console?: C
           }
           const assertion = typeof body.assertion === 'string' ? JSON.parse(body.assertion) : body.assertion;
           const agentId = await config.console.backend.consentAgent(session.subject, id, consent, assertionSchema.optional().parse(assertion));
+          if(body.decision==='prepare')return json({agentId});
           const code = await backend.oauth({ op: 'code', id, subject: session.subject, agentId });
           if (code.kind !== 'code') throw new Refused('Authorization code refused');
           destination.searchParams.set('code', code.code); return finish();
@@ -165,9 +176,10 @@ export function createOAuth(config: { backend?: CoordinationBackend; console?: C
         const agent = bound ? rows(agents!.agents).find(a => a.agentId === bound.agentId && a.live) : undefined;
         const caps = (agent ? z.array(z.string()).parse(agent.capabilities) : ['read', 'post']).filter(c => c !== 'device.keys');
         const selected = agent ? z.array(z.string()).parse(agent.journeys ?? []) : [];
-        const fields = hidden('request', id) + `<p>Connect <strong>${escape(r.clientName)}</strong> as your agent. Client ID: <code>${escape(r.clientId)}</code>. Redirect host: <strong>${escape(destination.host)}</strong>. Its access is always limited by your live authority.</p><label>Agent name <input name="name" value="${escape(backend.sealedMode?'MCP client':agent?.name ?? r.clientName)}" maxlength="60"${backend.sealedMode?' readonly':''} required></label>`
+        const fields = hidden('request', id) + (backend.sealedMode?hidden('name','MCP client'):'') + `<p>Connect <strong>${escape(r.clientName)}</strong> as your agent. Client ID: <code>${escape(r.clientId)}</code>. Redirect host: <strong>${escape(destination.host)}</strong>. Its access is always limited by your live authority.</p><label>Agent name <input ${backend.sealedMode?'data-agent-name':'name="name"'} value="${escape(backend.sealedMode?'MCP client':agent?.name ?? r.clientName)}" maxlength="60" required></label>`
           + capabilityFields(caps) + '<p>Device keys let the local encryption proxy read your private profile, manage device key packages and access your personal sealed content. This is off by default and always requires a registered passkey, even after sign-in. <a href="/console/passkeys" target="_blank">Register a passkey</a> before allowing it.</p>' + `<fieldset><legend>Journeys</legend>${rows(journeys!.journeys).filter(j => !j.pending).map(j => `<label><input type="checkbox" name="journeys" value="${escape(j.journeyId)}"${selected.includes(String(j.journeyId)) ? ' checked' : ''}> ${escape(j.name)}</label>`).join('')}</fieldset>`;
-        const html = page('Allow agent access', `<form method="post" action="/oauth/consent" data-ceremony="consent" data-options="/oauth/consent/options">${hidden('csrf', session.csrf)}${fields}<button name="decision" value="allow">Allow</button><button name="decision" value="deny">Deny</button></form>`, session.csrf);
+        let html = page('Allow agent access', `<form method="post" action="/oauth/consent" data-ceremony="consent"${backend.sealedMode?' data-sealed-consent="true"':''} data-options="/oauth/consent/options">${hidden('csrf', session.csrf)}${fields}${backend.sealedMode?'<p>Unlock this browser below to save the agent name privately, then allow access.</p>':''}<button name="decision" value="allow"${backend.sealedMode?' disabled':''}>Allow</button><button name="decision" value="deny">Deny</button></form>`, session.csrf);
+        if(backend.sealedMode)html=html.replace('</head>',`<script type="module" src="${browserPath}" integrity="${browserIntegrity}" crossorigin="anonymous"></script></head>`);
         return new Response(html, { headers: { ...headers, 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': `default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; form-action 'self' ${destination.origin}; frame-ancestors 'none'; base-uri 'none'` } });
       }
       if (path === '/oauth/register' && request.method === 'POST') {

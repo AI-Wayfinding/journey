@@ -14,3 +14,22 @@ test('proxy pins sealed-v1, refuses missing or downgraded modes, and persists th
  mode=undefined;calls.length=0;await assert.rejects(proxy.call('whoami'),/sealed-v1/);assert.deepEqual(calls,['account_read']);
  mode='sealed-v1';files.set('content-mode',JSON.stringify({version:1,contentFormat:'legacy',personId:'person_a'}));await assert.rejects(WayfindingProxy.open(remote,store),/local.*mode/i);
 });
+
+
+test('proxy asks for connector sign-in again on typed authentication failures, not arbitrary remote text',async()=>{
+ const {sealedRemoteCall}=await import('../src/mode.ts'),{localError}=await import('../src/errors.ts');
+ const {UnauthorizedError,SdkHttpError,SdkErrorCode}=await import('@modelcontextprotocol/client');
+ const f=await syntheticAccountIdentity(),files=new Map<string,string>(),store={async read(k:string){return files.get(k)},async write(k:string,v:string){files.set(k,v)}};
+ let failure:Error|undefined;
+ const remote:SealedRemote={async listTools(){if(failure)throw failure;return {tools:[]}},async callTool(r){if(failure)throw failure;return {content:[],structuredContent:r.name==='account_read'?{personId:'person_a',personalGroupId:'personal_a',contentFormat:'sealed-v1',accountKey:f.accountKey}:r.name==='sealed_connection_request'?await f.approve(r.arguments??{}):{}}}};
+ const client=await import('../src/sealed-client.ts').then(m=>m.SealedClient.open(remote,store,'person_a'));
+ for(const error of [new UnauthorizedError('SECRET'),new SdkHttpError(SdkErrorCode.ClientHttpAuthentication,'SECRET',{status:401})]){
+  failure=error;
+  for(const call of [()=>sealedRemoteCall(remote,'whoami',{}),()=>client.call('whoami',{}),()=>client.tools()]){
+   await assert.rejects(call,error=>{assert.equal(localError(error),'Sign in again to re-authorise the connector');return true;});
+  }
+ }
+ for(const error of [new Error('401 Unauthorized SECRET'),new SdkHttpError(SdkErrorCode.ClientHttpForbidden,'SECRET',{status:403}),new Error('network SECRET')]){
+  failure=error;await assert.rejects(()=>client.call('whoami',{}),error=>{assert.equal(localError(error),'Remote service unavailable');return true;});
+ }
+});

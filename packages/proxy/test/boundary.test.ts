@@ -18,3 +18,14 @@ for(const reason of ['Offer is not available','Current device required for retai
  const result=await client.callTool({name:'whoami',arguments:{}});assert.equal(result.isError,true);assert.ok(JSON.stringify(result).includes(reason));
  f.attack(`${reason}\nBearer SECRET-TOKEN ${injection}`);const unsafe=await client.callTool({name:'whoami',arguments:{}});assert.doesNotMatch(JSON.stringify(unsafe),/SECRET-TOKEN|UNTRUSTED-INSTRUCTION/);
 });
+
+
+test('account_trust_key explains a mismatched safety number without echoing caller input',async t=>{
+ const f=await fixture(),proxy=await WayfindingProxy.open(f.remote,f.store),server=await buildProxyServer(proxy),client=new Client({name:'boundary',version:'1'}),[a,b]=InMemoryTransport.createLinkedPair();
+ await Promise.all([server.connect(a),client.connect(b)]);t.after(()=>client.close());
+ const {generateSigningKey,safetyNumber}=await import('../../shared/account-identity.ts'),key=await generateSigningKey();
+ const result=await client.callTool({name:'account_trust_key',arguments:{personId:'person_b',publicKey:key.publicKey,expectedSafetyNumber:'WRONG-NUMBER SECRET'}});
+ assert.equal(result.isError,true);assert.match(JSON.stringify(result),/Account safety number did not match; compare it outside Wayfinding and try again/);assert.doesNotMatch(JSON.stringify(result),/SECRET|WRONG-NUMBER/);
+ const correct=await client.callTool({name:'account_trust_key',arguments:{personId:'person_b',publicKey:key.publicKey,expectedSafetyNumber:await safetyNumber(key.publicKey)}});
+ assert.deepEqual(correct.structuredContent,{trusted:true});
+});
