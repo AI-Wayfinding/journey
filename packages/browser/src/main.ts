@@ -9,6 +9,8 @@ import {evaluatePrf,assertion,registerPasskey} from './webauthn.ts';
 import {consolePost,consoleRemote} from './remote.ts';
 import {finishOnboarding} from './onboarding.ts';
 import {renderPrivateWorkspace} from './workspace.ts';
+import {SealedConsent} from './consent.ts';
+import {agentConsent} from '../../mcp/src/oauth-contract.ts';
 z.config({jitless:true});
 const object=z.record(z.string(),z.unknown()),objects=(v:unknown)=>z.array(object).parse(v??[]);
 const el=<K extends keyof HTMLElementTagNameMap>(tag:K,text?:string)=>{const n=document.createElement(tag);if(text!==undefined)n.textContent=text;return n;};
@@ -25,6 +27,21 @@ const post=consolePost(csrf);
 let busy=false,client:SealedClient|undefined,store:BrowserStore|undefined,release:(()=>void)|undefined;
 let refreshPrivate:((repaint?:boolean)=>Promise<void>)|undefined,syncTimer:number|undefined;
 async function run(action:()=>Promise<void>){if(busy)return;busy=true;try{await action();}catch(e){status.textContent=e instanceof Error?e.message:'Connection refused';}finally{busy=false;}}
+const consentForm=document.querySelector<HTMLFormElement>('form[data-sealed-consent="true"]');
+if(consentForm){
+ const consentFlow=new SealedConsent(()=>client,post,async options=>(await assertion(options)).assertion);
+ const allow=consentForm.querySelector<HTMLButtonElement>('button[value="allow"]');if(allow)allow.disabled=false;
+ consentForm.addEventListener('submit',event=>{
+  if(event.submitter instanceof HTMLButtonElement&&event.submitter.value==='deny')return;
+  event.preventDefault();
+  const fields=new FormData(consentForm),name=consentForm.querySelector<HTMLInputElement>('[data-agent-name]')?.value??'';
+  void run(async()=>{
+   if(allow)allow.disabled=true;
+   try{const destination=await consentFlow.allow(z.string().parse(fields.get('request')),agentConsent.parse({name,capabilities:fields.getAll('capabilities'),journeys:fields.getAll('journeys')}));location.assign(destination);}
+   finally{if(allow)allow.disabled=false;}
+  });
+ });
+}
 function stamp(browserId:string,unlocked:boolean){for(const row of document.querySelectorAll<HTMLElement>('[data-browser-id]'))if(row.dataset.browserId===browserId){const label=row.querySelector('[data-connection-state]');if(label)label.textContent=`This browser · ${unlocked?'Unlocked':'Locked'}`;}}
 function lock(){refreshPrivate=undefined;if(syncTimer!==undefined)window.clearInterval(syncTimer);syncTimer=undefined;if(store)stamp(store.browserId,false);client=undefined;store?.lock();store=undefined;release?.();release=undefined;work.replaceChildren();controls.replaceChildren();status.textContent='Locked. Private keys and decrypted content were removed from this page.';const profile=document.getElementById('profile-editor');if(profile)profile.replaceChildren(el('h2','Your name'),el('p','Unlock this connection to read or change your private name.'));}
 async function renderWorkspace(){const current=client;if(!current)return;try{await renderPrivateWorkspace(current,work,button,()=>client===current);}catch(error){if(error instanceof Error&&error.message==='Await authenticated device admission'){if(client===current)work.replaceChildren(el('p','Waiting for another online trusted connection to share private history. Keep both connections unlocked, then refresh private content.'));}else throw error;}}
@@ -61,11 +78,12 @@ async function open(info:Record<string,unknown>,render=true,code?:string,onReady
    try{if(!(await unlocked.enrollGroup(audience)).admitted)pending.push(audience);}catch(error){failures.push(error instanceof Error?error.message:'Audience synchronization refused');}
   }
   if(store!==current||client!==unlocked)return;
-  return {waiting:pending,failures};
+  return {waiting:pending,failures,admitted:audiences.size-pending.length-failures.length};
  };
+ const historyStatus=(result:{waiting:string[];failures:string[];admitted:number},ready:string)=>result.failures.join('; ')||(result.waiting.length?(result.admitted?`${ready} Some other private history is waiting for an online connection.`:'Connection trusted. Waiting for another online connection to share private history.'):ready);
  const initial=await synchronize();if(!initial)return;stamp(current.browserId,true);
  let awaitingHistory=initial.waiting;
- status.textContent=initial.waiting.length?'Connection trusted. Waiting for another online connection to share private history.':initial.failures.join('; ')||'Unlocked in this tab. Private content is encrypted before sending.';
+ status.textContent=historyStatus(initial,'Unlocked in this tab. Private content is encrypted before sending.');
  controls.replaceChildren();button(controls,'Lock this connection',async()=>{lock();await connectionControls();});
  await renderIdentityControls(accountKey);
  if(render)await renderWorkspace();await onReady();
@@ -77,7 +95,7 @@ async function open(info:Record<string,unknown>,render=true,code?:string,onReady
   const newlyReadable=awaitingHistory.some(audience=>!result.waiting.includes(audience));awaitingHistory=result.waiting;
   if(repaint||newlyReadable)await renderWorkspace();
   if(store!==current||client!==unlocked)return;
-  status.textContent=result.failures.join('; ')||(result.waiting.length?'Connection trusted. Waiting for another online connection to share private history.':'Private content refreshed. Private content is encrypted before sending.');
+  status.textContent=historyStatus(result,'Private content refreshed. Private content is encrypted before sending.');
  };
  button(controls,'Refresh private content',()=>refreshPrivate?.()??Promise.resolve());
  if(syncTimer!==undefined)window.clearInterval(syncTimer);
@@ -121,7 +139,7 @@ async function connectionControls(){
  const codeInput=keys.length?field(controls,'Recovery code (or leave blank to confirm an existing passkey)',true):undefined;
  const trustBrowser=async(reuse=false)=>{
   const displayName=name?.value.trim();if(needsName&&!displayName)throw new Error('Set your name before continuing');
-  let savedCode=codeInput?.value??'';if(codeInput)codeInput.value='';
+  let savedCode=reuse?'':codeInput?.value??'';if(codeInput)codeInput.value='';
   const proof:Record<string,unknown>={};
   if(savedCode)proof.recoveryProof=await recoveryAuthorization(savedCode,origin,personId);
   let credentialId:string;

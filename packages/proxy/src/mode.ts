@@ -1,11 +1,11 @@
 import * as z from 'zod';
-import {RemoteFailure,remoteFailure} from './errors.ts';
+import {RemoteFailure,remoteFailure,transportFailure} from './errors.ts';
 import type {SealedRemote} from './sealed-client.ts';
 import type {LocalStore} from './store.ts';
 
 export async function sealedRemoteCall(remote:SealedRemote,name:string,args:Record<string,unknown>):Promise<Record<string,unknown>> {
  const read=async(tool:string,input:Record<string,unknown>)=>{
-  let r;try{r=await remote.callTool({name:tool,arguments:input});}catch{throw new RemoteFailure('unavailable');}
+  let r;try{r=await remote.callTool({name:tool,arguments:input});}catch(error){throw transportFailure(error);}
   if(r.isError)throw remoteFailure(r.content?.map(c=>c.type==='text'?c.text:'').join('\n').slice(0,4096)??'');
   const parsed=z.record(z.string(),z.unknown()).safeParse(r.structuredContent);if(!parsed.success)throw new RemoteFailure('response');return parsed.data;
  };

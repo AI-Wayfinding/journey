@@ -9,6 +9,8 @@ import {openTestSealed,testAccount} from './account-fixture.ts';
 import {parseCommand} from '../../mcp/src/commands.ts';
 import * as z from 'zod';
 import {installTestAccountIdentity} from '../../mcp/test/account-fixture.ts';
+import {workspaceDom} from '../../browser/test/workspace-dom.ts';
+import {offerDefinitionSchema} from '../../mcp/src/offers.ts';
 
 async function fixture(t:TestContext,now:()=>number=Date.now){
  const backend=new MemoryBackend({async get(s){return {name:s,email:`${s}@example.test`};}},now,testPasskeys,true),signer=await keyPair('sealed');
@@ -251,6 +253,14 @@ test('sealed offers keep definitions private and publish current authenticated j
  for(const marker of markers){assert.equal(backend.snapshot().includes(marker),false,marker);for(const blob of backend.blobs.data.values())assert.equal(Buffer.from(blob).includes(Buffer.from(marker)),false,marker);}
  await assert.rejects(backend.sealedExecute('alice','offer_set',{agentId,offer:definition}),/Invalid sealed/);
  await assert.rejects(backend.sealedExecute('alice','offer_set',{agentId,offer:{id:'private-human-title',sealed,journeySettings:{[journeyId]:{enabled:true}},admission:{rules:[],default:'hold'}}}),/Invalid sealed/);
+});
+for(const complete of [false,true])test(`browser republishes the entire private offer definition (optional fields=${complete})`,async t=>{
+ const {a,backend}=await fixture(t),journeyId=String((await a.client.call('journey_create',{name:'Offer journey',policy:'open',defaultRole:'write'})).journeyId),agentId=String((await a.client.call('agent_create',{name:'Offer connection'})).agentId);
+ await setAgentCard(backend,'alice',agentId,['read','task.manage','device.keys']);await a.client.call('agent_add',{journeyId,agentId});
+ const source=offerDefinitionSchema.parse({id:`offer-${crypto.randomUUID()}`,name:'Private offer',description:'Kept private',tags:['test'],examples:['An example'],inputSchema:{type:'object'},journeySettings:{[journeyId]:{enabled:true,maxRequestsPerDay:4}},...(complete?{outputSchema:{type:'object'},preset:'Custom',admission:{rules:[],default:'hold'},resource:'private-resource',instructions:'Private instructions'}:{})});
+ await a.client.call('offer_set',{agentId,offer:source});
+ const dom=workspaceDom(`/console/agents/${agentId}`);try{await dom.render(a.client);await dom.click('Publish offer');}finally{dom.restore();}
+ const own=await a.client.call('offer_list',{agentId}),offer=z.array(z.record(z.string(),z.unknown())).parse(own.offers)[0]!;assert.equal(offer.status,'published');assert.deepEqual(JSON.parse(JSON.stringify(offer.definition)),{...source,admission:source.admission??{rules:[{who:'people',decision:'allow'}],default:'hold'}});
 });
 
 

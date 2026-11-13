@@ -16,6 +16,9 @@ import { WayfindingProxy } from '../../proxy/src/proxy.ts';
 import {installTestAccountIdentity,trustedAccountRemote} from './account-fixture.ts';
 import {capabilities} from '../../rules/src/capabilities.ts';
 import {cardCaps} from '../src/agents.ts';
+import {SealedConsent} from '../../browser/src/consent.ts';
+import {SealedClient,type SealedRemote} from '../../proxy/src/sealed-client.ts';
+import {sealedInputs} from '../src/sealed-contract.ts';
 
 const signer = await keyPair('oauth-as');
 const origin = RESOURCE.origin, consoleClient = `${origin}/console/client.json`;
@@ -565,4 +568,67 @@ test('oauth AS: served consent browser script signs and submits the same frozen 
   assert.ok(posted);
   assert.equal((await posted).status, 303);
   assert.equal((await f.backend.accountsHost.lookup('alice'))!.agents[0]!.name, 'Encryption proxy');
+});
+
+
+test('oauth AS: sealed consent stages a connection for its encrypted name before issuing a code', async () => {
+ const f=await deviceConsentFixture(true),body={...await f.pending(),name:'MCP client',capabilities:['read']};
+ const html=await (await f.send(`/oauth/consent?request=${body.request}`,{headers:{cookie:f.cookie}})).text();
+ assert.match(html,/data-sealed-consent="true"/);
+ assert.doesNotMatch(html, /name="name"[^>]*readonly/);
+ assert.match(html, /type="module"[^>]*\/console\/device-/);
+ const early=await f.post('/oauth/consent',{csrf:body.csrf,request:body.request,decision:'finish'},f.cookie);
+ assert.equal(early.status,403);
+ const prepare=await f.post('/oauth/consent',{...body,decision:'prepare'},f.cookie);
+ assert.equal(prepare.status,200,await prepare.clone().text());
+ const {agentId}=await prepare.json() as {agentId:string};
+ assert.ok(agentId);
+ assert.equal((await f.backend.accountsHost.lookup('alice'))!.agents[0]!.authorizationPending,true);
+ assert.equal(f.backend.snapshot().includes('PRIVATE-CONSENT-NAME'),false);
+ const wrong=(await f.pending()).request;
+ assert.equal((await f.post('/oauth/consent',{csrf:body.csrf,request:wrong,decision:'finish'},f.cookie)).status,403);
+ const finish=await f.post('/oauth/consent',{csrf:body.csrf,request:body.request,decision:'finish'},f.cookie);
+ assert.equal(finish.status,200,await finish.clone().text());
+ const {redirect}=await finish.json() as {redirect:string};
+ assert.equal(new URL(redirect).origin,new URL(callback).origin);
+ assert.equal((await f.exchange(new URL(redirect).searchParams.get('code')!)).status,200);
+ assert.equal((await f.post('/oauth/consent',{csrf:body.csrf,request:body.request,decision:'finish'},f.cookie)).status,403);
+});
+
+
+test('oauth AS: browser keeps the edited consent name sealed, including device.keys confirmation', async () => {
+ const f=await deviceConsentFixture(true),body=await f.pending();
+ assert.ok(f.signing);
+ let failSave=true;
+ const remote:SealedRemote={async listTools(){return {tools:[]}},async callTool(r){
+  if(r.name==='agent_descriptor_set'&&failSave){failSave=false;throw new Error('synthetic offline');}
+  const input=r.arguments??{};
+  const structuredContent=sealedInputs[r.name]?await f.backend.sealedExecute('alice',r.name,input,consoleClient):r.name==='whoami'?await f.backend.whoami('alice',consoleClient):await f.backend.execute('alice',parseCommand(r.name,input),consoleClient);
+  return {structuredContent,content:[{type:'text',text:'synthetic'}]};
+ }};
+ const files=new Map<string,string>(),store={async read(k:string){return files.get(k)},async write(k:string,v:string){files.set(k,v)}};
+ const client=await SealedClient.open(trustedAccountRemote(remote,f.signing),store,(await f.backend.accountsHost.lookup('alice'))!.personId,{endorse:async claim=>(await f.signing!.artifacts(claim)).certificate});
+ const sent:Record<string,unknown>[]=[],post=async(path:string,fields:Record<string,unknown>)=>{
+  sent.push(fields);const response=await f.post(path,{csrf:body.csrf,...fields},f.cookie);
+  assert.equal(response.status,200,await response.clone().text());return await response.json() as Record<string,unknown>;
+ };
+ let live:SealedClient|undefined;
+ const flow=new SealedConsent(()=>live,post,async options=>f.key.assert(String(options.challenge)));
+ const edited={name:'PRIVATE-CONSENT-NAME',capabilities:['read','device.keys'] as const,journeys:[]};
+ await assert.rejects(flow.allow(body.request,{...edited,capabilities:[...edited.capabilities]}),/Unlock this browser/);
+ assert.equal(sent.length,0);
+ live=client;
+ await assert.rejects(flow.allow(body.request,{...edited,capabilities:[...edited.capabilities]}),/Remote service unavailable/);
+ const pending=(await f.backend.accountsHost.lookup('alice'))!.agents[0]!;
+ assert.equal(pending.authorizationPending,true);
+ assert.equal(sent.some(b=>b.decision==='finish'),false);
+ // A retry must save the name and permissions captured before the passkey prompt, not changed fields.
+ const destination=await flow.allow(body.request,{name:'Changed while the prompt was open',capabilities:[],journeys:[]});
+ assert.equal(JSON.stringify(sent).includes(edited.name),false);
+ assert.equal(f.backend.snapshot().includes(edited.name),false);
+ const account=(await f.backend.accountsHost.lookup('alice'))!,agent=account.agents[0]!;
+ assert.equal(agent.name,agent.id);
+ const agents=(await client.call('agent_list')).agents as {agentId:string;name:string}[];
+ assert.equal(agents.find(a=>a.agentId===agent.id)!.name,edited.name);
+ assert.equal((await f.exchange(new URL(destination).searchParams.get('code')!)).status,200);
 });

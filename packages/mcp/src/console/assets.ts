@@ -6,6 +6,7 @@ const decode = text => Uint8Array.from(atob(text.replaceAll('-', '+').replaceAll
 const encode = buffer => btoa(String.fromCharCode(...new Uint8Array(buffer))).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
 for (const form of document.querySelectorAll('form[data-ceremony]')) form.addEventListener('submit', async event => {
   const consent = form.dataset.ceremony === 'consent';
+  if (form.dataset.sealedConsent === 'true') return;
   if (consent && (event.submitter?.value === 'deny' || !new FormData(form).getAll('capabilities').includes('device.keys'))) return;
   event.preventDefault();
   const button = form.querySelector('button'), status = document.getElementById('status');
