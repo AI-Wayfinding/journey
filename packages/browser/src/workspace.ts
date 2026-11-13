@@ -23,6 +23,24 @@ async function journeyIdentity(c:SealedClient,parent:HTMLElement,data:Record<str
  const log=el('details');log.append(el('summary','Journey connection and safety-number log'));
  for(const entry of rows(data.identityLog))log.append(el('p',`${new Date(Number(entry.at)).toISOString()} · ${String(entry.personId)} · ${String(entry.action)} · ${String(entry.connectionId??'Safety number change')} · ${entry.verification==='self-signed'?`Signed · account key ${String(entry.accountTrust)}`:'Server report — unsigned'}`));panel.append(log);
 }
+async function renderOfferControls(c:SealedClient,work:HTMLElement,agentId:string,button:Button,isActive:()=>boolean):Promise<void>{
+ const section=el('section');work.append(section);
+ const refresh=async()=>{
+  const listed=await c.call('offer_list',{agentId});if(!isActive())return;
+  section.replaceChildren(el('h2','Private offers'));
+  for(const offer of rows(listed.offers)){
+   const row=el('article');section.append(row);row.append(el('h3',String(offer.name)),el('p',String(offer.status)));
+   if(offer.contentUnavailable){row.append(el('p','Waiting for private offer history from another trusted connection.'));continue;}
+   if(offer.status==='draft')button(row,'Publish offer',async()=>{
+    // Journey switches can change after the private definition was encrypted.
+    // Re-seal for precisely the currently enabled journeys; never enable a row here.
+    await c.call('offer_set',{agentId,expectedVersion:offer.version,offer:{id:offer.id,name:offer.name,description:offer.description,tags:offer.tags,examples:offer.examples,inputSchema:offer.inputSchema,outputSchema:offer.outputSchema,resource:offer.resource,instructions:offer.instructions,admission:offer.admission,journeySettings:offer.journeySettings}});
+    await c.call('offer_publish',{agentId,offerId:offer.id});if(isActive())await refresh();
+   });
+  }
+ };
+ await refresh();
+}
 async function renderTaskRequests(c:SealedClient,work:HTMLElement,agentId:string,button:Button,isActive:()=>boolean):Promise<void>{
  const section=el('section');work.append(section);
  const refresh=async()=>{
@@ -70,7 +88,7 @@ export async function renderPrivateWorkspace(c:SealedClient,work:HTMLElement,but
  if(!isActive())return;
  for(const a of rows(agents.agents)){const row=document.querySelector<HTMLElement>(`[data-agent-id="${CSS.escape(String(a.agentId))}"] a`);if(row)row.textContent=String(a.name??a.agentId);}
  const agentRoute=/^\/console\/agents\/([^/]+)$/.exec(location.pathname);
- if(agentRoute){const agentId=decodeURIComponent(agentRoute[1]!),own=rows(agents.agents).find(a=>a.agentId===agentId);if(own){work.append(el('h2','Private connection details'));const name=input(work,'Agent name',String(own.name??'')),app=input(work,'App name',String(own.clientName??''));button(work,'Save connection details',async()=>{await c.call('agent_descriptor_set',{agentId,name:name.value,clientName:app.value});});await renderTaskRequests(c,work,agentId,button,isActive);}return;}
+ if(agentRoute){const agentId=decodeURIComponent(agentRoute[1]!),own=rows(agents.agents).find(a=>a.agentId===agentId);if(own){work.append(el('h2','Private connection details'));const name=input(work,'Agent name',String(own.name??'')),app=input(work,'App name',String(own.clientName??''));button(work,'Save connection details',async()=>{await c.call('agent_descriptor_set',{agentId,name:name.value,clientName:app.value});});await renderOfferControls(c,work,agentId,button,isActive);await renderTaskRequests(c,work,agentId,button,isActive);}return;}
  const route=/^\/console\/journeys\/([^/]+)(?:\/(\w+)(?:\/([^/]+))?)?$/.exec(location.pathname);if(!route)return;
  const journeyId=decodeURIComponent(route[1]!),kind=route[2],item=route[3]?decodeURIComponent(route[3]):undefined;
  const view=await c.call('journey_read',{journeyId});if(!isActive())return;

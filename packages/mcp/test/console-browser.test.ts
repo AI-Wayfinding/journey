@@ -41,6 +41,32 @@ async function fixture(){
  return {get now(){return now},backend,target,send,post,requests,device,signingAccount,complete,ready,csrf,identity,key,authorize,advance:(ms:number)=>{now+=ms;},signIn};
 }
 
+test('console browser publish carries newly enabled journey settings into sealed publications',async t=>{
+ const f=await fixture(),a=await f.device();await f.ready(a);
+ const j=String((await a.client.call('journey_create',{name:'Publish journey',policy:'invite',defaultRole:'write'})).journeyId),other=String((await a.client.call('journey_create',{name:'Off journey',policy:'invite',defaultRole:'write'})).journeyId);
+ const agentId=String((await a.client.call('agent_create',{name:'Offering endpoint'})).agentId);
+ await f.authorize({kind:'card',agentId,capabilities:['read','task.manage','device.keys']});
+ for(const journeyId of [j,other])await f.backend.execute('alice',{tool:'agent_add',input:{journeyId,agentId}},clientId);
+ await f.authorize({kind:'bind',clientId:'publishing-endpoint',agentId});
+ const signer=await keyPair('publishing'),remote=new Client({name:'publishing',version:'1'});await remote.connect(new StreamableHTTPClientTransport(RESOURCE,{fetch:bridge(app(signer,f.backend)),requestInit:{headers:{authorization:`Bearer ${await token(signer,{sub:'alice',client_id:'publishing-endpoint'})}`}}}));t.after(()=>remote.close());
+ const files=new Map<string,string>(),account=await f.signingAccount(),endpoint=await SealedClient.open(trustedAccountRemote(remote,account),{async read(k){return files.get(k)},async write(k,v){files.set(k,v)}},a.client.personId,{endorse:async claim=>(await account.artifacts(claim)).certificate});
+ const jd=await endpoint.prepareGroup(j);await a.client.addMember(j,endpoint.personId,jd.deviceId);
+ const offerId=`offer-${crypto.randomUUID()}`;
+ await a.client.call('offer_set',{agentId,offer:{id:offerId,name:'PUBLISH-OFFER-CANARY',description:'Synthetic',inputSchema:{type:'object'},admission:{rules:[],default:'hold'}}});
+ const list=await a.client.call('offer_list',{agentId}),version=(list.offers as {version:number}[])[0]!.version;
+ assert.equal((await f.send('/console/offers/journey',{csrf:f.csrf,agentId,offerId,journeyId:j,expectedVersion:version,enabled:true,limitMode:'limit',maxRequestsPerDay:2})).status,303);
+ const bypass=await f.send('/console/offers/publish',{csrf:f.csrf,agentId,offerId,expectedVersion:version+1});assert.equal(bypass.status,403,'Metadata-only publication must not bypass browser encryption');assert.equal(((await a.client.call('offer_list',{agentId})).offers as {status:string}[])[0]!.status,'draft');
+ const ui=workspaceDom(`/console/agents/${agentId}`);try{await ui.render(a.client);await ui.click('Publish offer');}finally{ui.restore();}
+ const published=((await a.client.call('offer_list',{agentId})).offers as {status:string;journeySettings:unknown;sealed:{publications:Record<string,unknown>}}[])[0]!;
+ assert.equal(published.status,'published');assert.deepEqual(published.journeySettings,{[j]:{enabled:true,maxRequestsPerDay:2}});assert.deepEqual(Object.keys(published.sealed.publications),[j]);
+ assert.match(JSON.stringify(await a.client.call('offer_search',{journeyId:j})),/PUBLISH-OFFER-CANARY/);
+ const task=await a.client.call('task_create',{journeyId:j,agentId,offerId,name:'Published task',input:{},maxRounds:1,deadline:f.now+300000});
+ const ed=await endpoint.prepareGroup(String(task.groupId));await a.client.addMember(String(task.groupId),endpoint.personId,ed.deviceId);
+ await a.client.call('task_create',{journeyId:j,taskId:task.taskId,agentId,offerId,name:'Published task',input:{},maxRounds:1,deadline:f.now+300000});
+ assert.equal(((await a.client.call('journey_read',{journeyId:j})).tasks as unknown[]).length,1);
+ await assert.rejects(a.client.call('task_prepare',{journeyId:other,agentId,offerId}));
+ assert.equal(f.requests.join('\n').includes('PUBLISH-OFFER-CANARY'),false);assert.equal(f.backend.snapshot().includes('PUBLISH-OFFER-CANARY'),false);
+});
 test('browser device call preserves a CAS refusal as JSON 409',async()=>{
  const f=await fixture(),a=await f.device();await f.ready(a);
  const journeyId=String((await a.client.call('journey_create',{name:'CAS refusal',policy:'invite',defaultRole:'write'})).journeyId);

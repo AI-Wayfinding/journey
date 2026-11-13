@@ -79,6 +79,13 @@ Use synthetic data only. These are source checks, not a deployment claim. The ho
 
 **Code recovery does not restore lost storage.** The code authorizes an additional passkey and can unlock an existing local vault. It cannot recreate a deleted vault or roll back an MLS state. No-code recovery clears the lost private-workspace descriptor and creates a fresh workspace; lost content keys remain lost. `recoveryAccountWrappingKey` unwraps the same account signing key with the saved code. Without that code, the new first browser creates a replacement key and safety number; journey logs record the change (F4 above).
 
+### Browser connection, admission and offer checks
+
+- With a synced passkey already registered, choose **Trust this browser with an existing passkey**. No new credential is registered. Without the account recovery code, compare the request code in an existing trusted browser and sign the connection there. Adding a new passkey still needs an existing passkey or the account recovery code.
+- Keep a trusted browser unlocked while adding another connection. Unlocked browsers synchronize their personal workspace and joined journeys on unlock, on return online and every 15 seconds. **Refresh private content** runs the same admission and history sync. Eligible pending devices need no proxy command; account-signed bindings and changed-safety-number checks still apply. Removal authority is unchanged. A waiting browser stays unlocked and refreshes its view after admission. Locking, logout and leaving the page stop automatic sync.
+- On an agent's page, enable a draft offer for journey J and leave another journey Off. Unlock and select **Publish offer** under **Private offers**. The browser encrypts a publication for the enabled journey using its current settings before publishing. Check that a request in J succeeds and the other journey still refuses it. The locked metadata-only publish route refuses sealed offers.
+- Proxy refusals include exact, allowlisted server reasons, including **Offer is not available** and **Current device required for retained history**. Unknown text and reasons with appended content stay generic; tokens and arbitrary remote instructions are not echoed.
+
 ### Scripted browser proof
 
 Start an isolated Chrome profile with a debugging port, or use `agent-browser --session sealing-proof open about:blank` followed by `agent-browser --session sealing-proof get cdp-url`. Read that port's `/json/list` and use its page-target WebSocket URL:

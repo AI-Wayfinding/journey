@@ -72,7 +72,7 @@ async function agentOffers(backend: ConsoleBackend, identity: ClientIdentity, ag
       if (!requester) return [];
       return [`<li>${escape(rule.decision === 'allow' ? 'Always allowed' : rule.decision === 'deny' ? 'Always denied' : 'Always held')}: ${escape(requester)}${form('/console/offers/rule-remove', csrf, fields + hidden('version', offer.version) + hidden('ruleIndex', index), 'Remove standing rule')}</li>`];
     }).join('');
-    return (offer.status === 'draft' ? form('/console/offers/publish', csrf, fields, 'Publish offer') : '')
+    return (offer.status === 'draft' ? backend.sealedMode ? '<p>Unlock this browser connection to publish this offer with its journey settings.</p>' : form('/console/offers/publish', csrf, fields, 'Publish offer') : '')
       + (offer.status === 'published' ? form('/console/offers/retire', csrf, fields, 'Retire offer') : '')
       + journeyRows(offer) + (standing ? `<ul>${standing}</ul>` : '');
   };

@@ -49,12 +49,12 @@ async function flow(recoverPage=false){
  const auth=await authenticator();const options=await backend.passkey(identity,{op:'begin'});await backend.passkey(identity,{op:'finish',credential:auth.register(String(options.challenge))});
  const signed=await installTestAccountIdentity(backend,'alice',identity.clientId);
  const state=JSON.parse(String(await backend.accountStorage.get('accounts')));state.accounts[0].onboarding={complete:true};state.accounts[0].accountKey.recoveryWrap=await sealAccountKey(signed.key,accountCode,'https://poc.wayfinding.support',signed.account.personId);await backend.accountStorage.put('accounts',JSON.stringify(state));
- const post=async(path:string,body:Record<string,unknown>)=>browserPost(backend,identity,path,{csrf:'test-csrf',...body});
+ const post=async(path:string,body:Record<string,unknown>)=>path==='/console/passkeys/addition-options'?backend.passkey(identity,{op:'addition_options'}):browserPost(backend,identity,path,{csrf:'test-csrf',...body});
  class AssertionResponse {clientDataJSON:ArrayBuffer;authenticatorData:ArrayBuffer;signature:ArrayBuffer;constructor(clientDataJSON:ArrayBuffer,authenticatorData:ArrayBuffer,signature:ArrayBuffer){this.clientDataJSON=clientDataJSON;this.authenticatorData=authenticatorData;this.signature=signature;}}
  class Credential {id:string;rawId:ArrayBuffer;response:AssertionResponse;withPrf:boolean;constructor(id:string,rawId:ArrayBuffer,response:AssertionResponse,withPrf:boolean){this.id=id;this.rawId=rawId;this.response=response;this.withPrf=withPrf;}getClientExtensionResults(){return this.withPrf?{prf:{results:{first:prf.slice().buffer}}}:{};}}
  let count=0;
  const storage=idb();set('indexedDB',storage);set('location',{origin:'https://poc.wayfinding.support',hostname:'poc.wayfinding.support',pathname:'/console/connections',assign(){}});
- set('window',{addEventListener:(n:string,f:()=>void)=>windowEvents.set(n,f)});
+ const timers=new Map<number,()=>void>();set('window',{addEventListener:(n:string,f:()=>void)=>windowEvents.set(n,f),setInterval:(fn:()=>void)=>{const id=timers.size+1;timers.set(id,fn);return id;},clearInterval:(id:number)=>timers.delete(id)});
  set('document',{title:'Connections',getElementById:(id:string)=>id==='main'?main:id==='connection-controls'?controls:id==='onboarding'?setup:null,createElement:(t:string)=>new NodeElement(t),createTextNode:(s:string)=>{const n=new NodeElement('#text');n.textContent=s;return n;},querySelector:(s:string)=>s==='input[name="csrf"]'?csrf:null,querySelectorAll:()=>[]});
  set('CSS',{escape:(s:string)=>s});
  set('PublicKeyCredential',Credential);set('AuthenticatorAssertionResponse',AssertionResponse);
@@ -66,8 +66,9 @@ async function flow(recoverPage=false){
  let identityEvents:IdentityEvent[]|undefined;
  set('fetch',async(path:string,init:RequestInit)=>{try{const body=JSON.parse(String(init.body)),result=await post(path,body);return Response.json(path==='/console/device/identity'&&body.op==='identity_read'&&identityEvents?{...result,events:identityEvents}:result);}catch(error){return Response.json({error:String(error)},{status:400});}});
  const vault=await BrowserStore.create({origin:location.origin,personId:signed.account.personId,deviceId:browserId},auth.id,code,new Uint8Array(32),prf,()=>{});
- const enroll=async(device:Record<string,unknown>)=>{const body={browserId,credentialId:auth.id,device},options=await post('/console/device/enroll/options',body);return post('/console/device/enroll/finish',{...body,assertion:await auth.assert(String(options.challenge),++count)});};
+ const enroll=async(device:Record<string,unknown>,connectionId=browserId)=>{const body={browserId:connectionId,credentialId:auth.id,device},options=await post('/console/device/enroll/options',body);return post('/console/device/enroll/finish',{...body,assertion:await auth.assert(String(options.challenge),++count)});};
  return {get now(){return now},advance(ms:number){now+=ms;},set events(value:IdentityEvent[]){identityEvents=value},main,controls,storage,backend,identity,signed,code,accountCode,browserId,vault,post,enroll,
+  online(){windowEvents.get('online')?.();},tick(){for(const fn of timers.values())fn();},get timerCount(){return timers.size;},
   async load(){await import(`../src/main.ts?flow=${crypto.randomUUID()}`);await until(()=>controls.all().some(e=>e.tagName==='button'),'UI did not start');},
   async reload(){windowEvents.get('pagehide')?.();controls.replaceChildren();main.replaceChildren(controls);await import(`../src/main.ts?reload=${crypto.randomUUID()}`);await until(()=>controls.all().some(e=>e.tagName==='button'),'Reloaded UI did not start');},
   click(label:string){const b=main.all().find(e=>e.tagName==='button'&&e.textContent===label);assert.ok(b,`Missing ${label}; UI: ${controls.textContent}`);b.listeners.get('click')!();},
@@ -173,5 +174,55 @@ test('browser unlock shows a changed member and accepts a compared number before
   field.value=number;const trust=field.parentNode!.parentNode!.all().find(e=>e.tagName==='button'&&e.textContent==='Trust compared safety number')!;trust.listeners.get('click')!();
   await until(()=>f.main.textContent.includes('Readable after comparison'),()=>`Compared key did not resume private reading: ${f.main.textContent}`);
   assert.doesNotMatch(f.controls.textContent,/Unlock with passkey/);
+ }finally{await f.stop();}
+});
+
+test('a second browser reuses a synced passkey without registering a credential or bypassing connection approval',async()=>{
+ const f=await flow();try{
+  f.vault.lock();await f.load();f.click('Unlock with passkey');await until(()=>f.controls.textContent.includes('Check for approval'),'Pending view missing');
+  f.click('Discard pending connection from this browser');await until(()=>f.controls.textContent.includes('Add passkey and trust this browser'),'Setup missing');
+  f.click('Trust this browser with an existing passkey');
+  await until(()=>f.controls.textContent.includes('Check for approval'),()=>`Existing synced passkey must create a pending connection without credentials.create: ${f.main.textContent}`);
+  const record=await readVault(location.origin,f.signed.account.personId);assert.ok(record);
+  const keys=await f.backend.passkey(f.identity,{op:'list'});assert.equal((keys.passkeys as unknown[]).length,1,'Connection-only enrollment must not add a passkey');assert.equal(record.credentialId,(keys.passkeys as {id:string}[])[0]!.id);
+  const info=await f.post('/console/device/identity',{op:'identity_read'}),pending=(info.connections as {claim:unknown;certificate?:unknown}[]).at(-1)!;assert.equal(pending.certificate,undefined,'A passkey alone cannot sign the account connection');
+  const {certificate,event}=await f.signed.artifacts(connectionClaimSchema.parse(pending.claim));await f.backend.passkey(f.identity,{op:'connection_approve',certificate,event});f.click('Check for approval');
+  await until(()=>f.controls.textContent.includes('I saved this connection unlock code'),()=>`Approved reused-passkey connection did not enroll: ${f.main.textContent}`);
+  const browsers=await f.backend.passkey(f.identity,{op:'browser_list'});assert.ok((browsers.browsers as {id:string;live:boolean;credentialId:string}[]).some(b=>b.id===record.context.deviceId&&b.live&&b.credentialId===record.credentialId));
+  const unlockCode=f.controls.all().find(e=>e.tagName==='code')!.textContent,confirmation=f.controls.all().find(e=>e.tagName==='label'&&e.ownText==='Retype your connection unlock code')!.children[0]!;confirmation.value=unlockCode;f.click('I saved this connection unlock code');
+  await until(()=>!f.controls.textContent.includes('I saved this connection unlock code'),'Confirmation did not finish');assert.match(f.controls.textContent,/Refresh private content/,'Confirmed connections retain manual synchronization');
+ }finally{await f.stop();}
+});
+
+test('pending browser keeps automatic refresh alive until an online trusted browser shares private history',async()=>{
+ const f=await flow();try{
+  const files=new Map<string,string>(),browserId=crypto.randomUUID(),remote=trustedAccountRemote(consoleRemote(f.post,browserId,device=>f.enroll(device,browserId)),f.signed);
+  const first=await SealedClient.open(remote,{async read(k:string){return files.get(k)},async write(k:string,v:string){files.set(k,v)}},f.signed.account.personId,{endorse:async claim=>(await f.signed.artifacts(claim)).certificate});
+  const personal=String((await f.post('/console/device/info',{})).personalGroupId);await first.enrollGroup(personal);
+  const journeyId=String((await first.call('journey_create',{name:'Waiting journey',policy:'open',defaultRole:'write'})).journeyId);
+  await first.call('library_add',{journeyId,name:'History',text:'New browser reads retained history',kind:'markdown'});
+  const joining=await enrolled(f);assert.equal((await joining.enrollGroup(journeyId)).admitted,false);f.vault.lock();location.pathname=`/console/journeys/${journeyId}`;
+  await f.load();f.click('Unlock with passkey');await until(()=>f.controls.textContent.includes('Refresh private content'),()=>`Waiting browser must remain unlocked and keep refreshing: ${f.main.textContent}`);assert.match(f.controls.textContent,/Waiting for another online connection/);assert.equal(f.timerCount,1);
+  await first.enrollGroup(personal);await first.enrollGroup(journeyId);f.tick();await until(()=>f.main.textContent.includes('Waiting journey'),()=>`Admitted browser did not repaint: ${f.main.textContent}`);assert.doesNotMatch(f.controls.textContent,/Unlock with passkey/);
+  // Reopen the retained record through the actual browser view, not a proxy client.
+  const read=await first.call('journey_read',{journeyId}),artifact=(read.artifacts as {recordId:string}[])[0]!;location.pathname=`/console/journeys/${journeyId}/library/${artifact.recordId}`;f.click('Refresh private content');await until(()=>f.main.textContent.includes('New browser reads retained history'),()=>`History stayed unreadable: ${f.main.textContent}`);
+ }finally{await f.stop();}
+});
+
+test('browser automatically admits eligible personal and journey devices on unlock, online and refresh, and stops on lock',async()=>{
+ const f=await flow();try{
+  const alice=await enrolled(f),personal=String((await f.post('/console/device/info',{})).personalGroupId);
+  const journeyId=String((await alice.call('journey_create',{name:'Admission journey',policy:'open',defaultRole:'write'})).journeyId);
+  await alice.call('library_add',{journeyId,name:'Private history',text:'History shared by browser only',kind:'markdown'});
+  const pending=async()=>{const browserId=crypto.randomUUID(),files=new Map<string,string>(),remote=trustedAccountRemote(consoleRemote(f.post,browserId,device=>f.enroll(device,browserId)),f.signed);const c=await SealedClient.open(remote,{async read(k:string){return files.get(k)},async write(k:string,v:string){files.set(k,v)}},alice.personId,{endorse:async claim=>(await f.signed.artifacts(claim)).certificate});await c.enrollGroup(personal);await c.enrollGroup(journeyId);return c;};
+  const second=await pending();f.vault.lock();await f.load();f.click('Unlock with passkey');
+  await until(()=>f.controls.textContent.includes('Refresh private content'),()=>`Unlocked browser must offer audience synchronization: ${f.main.textContent}`);
+  assert.equal((await second.enrollGroup(personal)).admitted,true);assert.equal((await second.enrollGroup(journeyId)).admitted,true);
+  assert.match(JSON.stringify(await second.call('journey_read',{journeyId})),/History shared by browser only/);
+  const third=await pending();f.online();await until(()=>f.controls.textContent.includes('Private content refreshed'),()=>`Online did not synchronize: ${f.main.textContent}`);
+  assert.equal((await third.enrollGroup(personal)).admitted,true);assert.equal((await third.enrollGroup(journeyId)).admitted,true);
+  const fourth=await pending();f.click('Refresh private content');await until(()=>f.controls.textContent.includes('Private content refreshed'),'Manual refresh did not complete');assert.equal((await fourth.enrollGroup(journeyId)).admitted,true);
+  assert.equal(f.timerCount,1);const fifth=await pending();f.tick();await until(()=>f.controls.textContent.includes('Private content refreshed'),'Periodic refresh did not complete');assert.equal((await fifth.enrollGroup(journeyId)).admitted,true);
+  f.click('Lock this connection');await until(()=>f.controls.textContent.includes('Unlock with passkey'),'Lock did not complete');assert.equal(f.timerCount,0);f.online();f.tick();await Promise.resolve();assert.match(f.controls.textContent,/Unlock with passkey/);
  }finally{await f.stop();}
 });
